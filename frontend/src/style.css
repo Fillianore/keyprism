@@ -1,0 +1,668 @@
+/* ============================================================
+   视觉语言: 黑色亮面三角钢琴
+   - 面板 = 近黑烤漆, 顶部柔和高光, 克制的深度
+   - 点缀 = 象牙白 / 香槟金, 仅用于活动态与重要控件
+   - 控件 = 钢琴控制台实体键: 深色微凸, 细高光斜面, 明确按下态
+   ============================================================ */
+:root {
+  color-scheme: dark;
+
+  /* 烤漆面板 */
+  --bg: #0a0a0c;
+  --panel-top: #1a1b20;
+  --panel-mid: #131318;
+  --panel-bot: #0f0f13;
+  --edge-hi: rgba(255, 255, 255, 0.06);
+  --edge-lo: rgba(0, 0, 0, 0.85);
+
+  /* 象牙 / 香槟金 */
+  --ivory: #f3ecdc;
+  --gold: #d8b26a;
+  --gold-hi: #ecd9a4;
+  --gold-dim: #a8894f;
+  --gold-glow: rgba(222, 184, 116, 0.45);
+  --gold-line: #6a5a37;
+
+  /* 文字 */
+  --text: #ddd6c8;
+  --muted: #98917f;
+
+  /* 统一几何与动效 */
+  --r-panel: 10px;
+  --r-group: 8px;
+  --r-btn: 7px;
+  --t: 0.16s ease;
+  --shadow-ctl: 0 2px 5px rgba(0, 0, 0, 0.55);
+
+  /* 旧变量兼容 */
+  --panel: var(--panel-mid);
+  --border: #2c2b2e;
+  --accent: var(--gold);
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  background:
+    radial-gradient(140% 90% at 50% -20%, #16151a 0%, #0c0b0d 46%, #09090b 100%);
+  color: var(--text);
+  font-family: 'Microsoft YaHei', 'PingFang SC', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---------- 顶栏: 两行烤漆控制台 ---------- */
+.topbar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 16px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0) 46%),
+    linear-gradient(180deg, var(--panel-top) 0%, var(--panel-mid) 60%, var(--panel-bot) 100%);
+  border-bottom: 1px solid var(--edge-lo);
+  box-shadow:
+    inset 0 1px 0 var(--edge-hi),
+    0 6px 18px rgba(0, 0, 0, 0.45);
+  flex: 0 0 auto;
+}
+
+.topbar .row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.brand {
+  font-weight: 600;
+  font-size: 15px;
+  letter-spacing: 1.5px;
+  color: var(--ivory);
+  white-space: nowrap;
+}
+
+.brand .dot {
+  color: var(--gold);
+  text-shadow: 0 0 10px var(--gold-glow);
+}
+
+.file {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 3px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.35), rgba(0, 0, 0, 0.12));
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.45);
+  max-width: 34vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spacer {
+  flex: 1 1 auto;
+}
+
+/* 控件组: 内凹的控制台模块, 取代零散工具条 */
+.ctrl {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0) 42%),
+    linear-gradient(180deg, #17171c, #101014);
+  border: 1px solid rgba(255, 255, 255, 0.055);
+  border-radius: var(--r-group);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 1px 2px rgba(0, 0, 0, 0.4);
+}
+
+.ctrl select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-color: #0c0c0f;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='9' height='6'%3E%3Cpath d='M1 1l3.5 3.5L8 1' fill='none' stroke='%239a8f72' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  color: var(--text);
+  border: 1px solid #26262c;
+  border-radius: 6px;
+  padding: 3px 24px 3px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color var(--t), color var(--t), box-shadow var(--t);
+}
+
+.ctrl select:hover {
+  border-color: var(--gold-line);
+  color: var(--ivory);
+}
+
+.ctrl select:focus-visible {
+  outline: none;
+  border-color: var(--gold-dim);
+  box-shadow: 0 0 0 2px rgba(216, 178, 106, 0.18);
+}
+
+.ctrl select:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.floor-val {
+  min-width: 52px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+/* 点击可输入的数值标签 */
+.num {
+  cursor: text;
+  border-bottom: 1px dotted rgba(152, 145, 127, 0.55);
+}
+
+.num-input {
+  width: 60px;
+  background: #0c0c0f;
+  color: var(--ivory);
+  border: 1px solid var(--gold-dim);
+  border-radius: 5px;
+  box-shadow: 0 0 0 2px rgba(216, 178, 106, 0.15);
+  font: inherit;
+  padding: 1px 4px;
+  outline: none;
+}
+
+/* 常驻数字输入 (BPM / 偏移): 内凹铭牌槽 */
+.num-static {
+  width: 68px;
+  background: linear-gradient(180deg, #0a0a0d, #121217);
+  color: var(--text);
+  border: 1px solid #26262c;
+  border-radius: 6px;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.5);
+  font: inherit;
+  padding: 3px 6px;
+  outline: none;
+  transition: border-color var(--t), box-shadow var(--t);
+}
+
+.num-static:focus {
+  border-color: var(--gold-dim);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.5), 0 0 0 2px rgba(216, 178, 106, 0.15);
+}
+
+/* ---------- 进度弹窗 ---------- */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(4, 4, 6, 0.66);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 999;
+}
+
+.modal {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0) 40%),
+    linear-gradient(180deg, var(--panel-top), #111114);
+  border: 1px solid #302f31;
+  border-radius: 12px;
+  padding: 20px 28px;
+  min-width: 360px;
+  box-shadow:
+    inset 0 1px 0 var(--edge-hi),
+    0 24px 60px rgba(0, 0, 0, 0.65);
+}
+
+.modal h3 {
+  margin: 0 0 6px;
+  font-size: 14px;
+  color: var(--ivory);
+  letter-spacing: 0.5px;
+}
+
+.modal .phase {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 12px;
+  min-height: 16px;
+}
+
+.modal .bar {
+  height: 8px;
+  background: #0a0a0c;
+  border-radius: 4px;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.8);
+  overflow: hidden;
+}
+
+.modal .bar-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, #b98f47, var(--gold-hi));
+  border-radius: 4px;
+  box-shadow: 0 0 10px var(--gold-glow);
+  transition: width 0.12s ease;
+}
+
+.modal .bar-fill.indeterminate {
+  width: 34%;
+  animation: bar-slide 1.1s ease-in-out infinite;
+}
+
+@keyframes bar-slide {
+  0% {
+    transform: translateX(-110%);
+  }
+
+  100% {
+    transform: translateX(320%);
+  }
+}
+
+.modal .pct {
+  font-size: 11px;
+  color: var(--muted);
+  text-align: right;
+  margin-top: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- 实体琴键式按钮 (复位等小键) ---------- */
+.reset {
+  background: linear-gradient(180deg, #2b2b32, #1b1b20 62%, #17171b);
+  border: 1px solid #35353d;
+  color: #a49c8a;
+  border-radius: 6px;
+  cursor: pointer;
+  padding: 1px 7px;
+  font-size: 11px;
+  line-height: 1.4;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 1px 2px rgba(0, 0, 0, 0.5);
+  transition:
+    color var(--t),
+    border-color var(--t),
+    background var(--t),
+    box-shadow var(--t),
+    transform var(--t);
+}
+
+.reset:hover {
+  border-color: var(--gold-line);
+  color: var(--gold-hi);
+}
+
+.reset:active {
+  background: linear-gradient(180deg, #141417, #1d1d22);
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.65);
+  transform: translateY(1px);
+}
+
+/* ---------- 滑杆: 细内凹导轨 + 金属象牙旋钮 ---------- */
+input[type='range'] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 18px;
+  background: transparent;
+  cursor: pointer;
+}
+
+input[type='range']::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, #060607, #17171c);
+  box-shadow:
+    inset 0 1px 2px rgba(0, 0, 0, 0.85),
+    0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border-radius: 50%;
+  border: 1px solid #2b2b31;
+  background: radial-gradient(circle at 32% 28%, #fffdf3 0%, #eadfc6 38%, #baa97f 76%, #8f7f5c 100%);
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.7),
+    inset 0 1px 1px rgba(255, 255, 255, 0.55);
+  transition: box-shadow var(--t);
+}
+
+input[type='range']:hover::-webkit-slider-thumb {
+  border-color: var(--gold-line);
+}
+
+input[type='range']:active::-webkit-slider-thumb {
+  border-color: var(--gold-dim);
+  box-shadow:
+    0 0 0 3px rgba(216, 178, 106, 0.16),
+    0 0 10px var(--gold-glow),
+    inset 0 1px 1px rgba(255, 255, 255, 0.55);
+}
+
+input[type='range']::-moz-range-track {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, #060607, #17171c);
+  box-shadow:
+    inset 0 1px 2px rgba(0, 0, 0, 0.85),
+    0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+input[type='range']::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1px solid #2b2b31;
+  background: radial-gradient(circle at 32% 28%, #fffdf3 0%, #eadfc6 38%, #baa97f 76%, #8f7f5c 100%);
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.7),
+    inset 0 1px 1px rgba(255, 255, 255, 0.55);
+  transition: box-shadow var(--t);
+}
+
+input[type='range']:hover::-moz-range-thumb {
+  border-color: var(--gold-line);
+}
+
+input[type='range']:active::-moz-range-thumb {
+  border-color: var(--gold-dim);
+  box-shadow:
+    0 0 0 3px rgba(216, 178, 106, 0.16),
+    0 0 10px var(--gold-glow),
+    inset 0 1px 1px rgba(255, 255, 255, 0.55);
+}
+
+#floorSlider {
+  width: 130px;
+}
+
+/* ---------- 绘图区: 深色琴腹, 暗角衬托频谱 ---------- */
+/* 绝对定位包装层: 让 plotly 尺寸完全由 flex 布局决定, 不再溢出遮挡下方控件 */
+#plot-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  background:
+    radial-gradient(130% 90% at 50% 0%, rgba(255, 255, 255, 0.022), rgba(0, 0, 0, 0) 58%),
+    linear-gradient(180deg, #0c0c0e, #0a0a0c);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.03),
+    inset 0 0 48px rgba(0, 0, 0, 0.55);
+}
+
+#plot {
+  position: absolute;
+  inset: 0;
+}
+
+/* plotly 悬停工具条: 烤漆小面板 */
+.js-plotly-plot .modebar {
+  background: rgba(21, 21, 25, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+}
+
+.js-plotly-plot .modebar-btn .icon,
+.js-plotly-plot .modebar-btn .icon * {
+  fill: #a89f8c !important;
+}
+
+.js-plotly-plot .modebar-btn:hover .icon,
+.js-plotly-plot .modebar-btn:hover .icon *,
+.js-plotly-plot .modebar-btn.active .icon,
+.js-plotly-plot .modebar-btn.active .icon * {
+  fill: var(--gold-hi) !important;
+}
+
+.js-plotly-plot .modebar-btn:hover {
+  background: rgba(255, 255, 255, 0.06) !important;
+}
+
+/* ---------- 播放器: 底部烤漆横梁 ---------- */
+.player-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0) 40%),
+    linear-gradient(180deg, var(--panel-mid) 0%, var(--panel-bot) 70%, #0c0c0f 100%);
+  border-top: 1px solid var(--edge-lo);
+  box-shadow: inset 0 1px 0 var(--edge-hi);
+  flex: 0 0 auto;
+  user-select: none;
+  font-size: 12px;
+  color: var(--text);
+}
+
+/* 控制台实体键 */
+.player-bar button {
+  background: linear-gradient(180deg, #2c2c33, #1c1c21 58%, #18181c);
+  color: var(--text);
+  border: 1px solid #37373f;
+  border-radius: var(--r-btn);
+  padding: 5px 10px;
+  min-width: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.09),
+    var(--shadow-ctl);
+  transition:
+    color var(--t),
+    border-color var(--t),
+    background var(--t),
+    box-shadow var(--t),
+    transform var(--t);
+}
+
+.player-bar button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.player-bar button:hover {
+  border-color: var(--gold-line);
+  color: var(--ivory);
+  background: linear-gradient(180deg, #34343c, #202026 58%, #1c1c21);
+}
+
+.player-bar button:active {
+  background: linear-gradient(180deg, #141417, #1e1e23);
+  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.65);
+  transform: translateY(1px);
+}
+
+/* 播放主键: 香槟金大键 */
+.player-bar button:first-of-type {
+  background: linear-gradient(180deg, #eeda9e, #d3ad66 55%, #b98f47);
+  border-color: #8a6d3b;
+  color: #241c0e;
+  font-weight: 600;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.35);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.5),
+    var(--shadow-ctl),
+    0 0 14px rgba(214, 171, 102, 0.22);
+}
+
+.player-bar button:first-of-type:hover {
+  background: linear-gradient(180deg, #f6e6b4, #ddb872 55%, #c29a52);
+  color: #1c1509;
+}
+
+.player-bar button:first-of-type:active {
+  background: linear-gradient(180deg, #c69f58, #ab8442);
+  box-shadow:
+    inset 0 2px 4px rgba(80, 58, 20, 0.55),
+    0 0 10px rgba(214, 171, 102, 0.18);
+  transform: translateY(1px);
+}
+
+.player-bar .time {
+  font-variant-numeric: tabular-nums;
+  min-width: 104px;
+  color: #b7b0a0;
+}
+
+.player-bar .seek {
+  flex: 1 1 auto;
+}
+
+.player-bar .vol {
+  width: 90px;
+}
+
+.player-bar label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.player-bar input[type='checkbox'] {
+  accent-color: var(--gold);
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+}
+
+/* ---------- 播放光标: 金色唱针 ---------- */
+.playhead {
+  position: absolute;
+  left: 0;
+  width: 2px;
+  background: linear-gradient(180deg, #f4e2b0, #d8b26a);
+  box-shadow:
+    0 0 8px rgba(230, 201, 138, 0.85),
+    0 0 2px rgba(0, 0, 0, 0.7);
+  pointer-events: none;
+  z-index: 5;
+  will-change: transform;
+}
+
+/* ---------- 底部导航条: 内凹琴轨 ---------- */
+.navbar {
+  position: relative;
+  height: 34px;
+  margin: 8px 16px 10px;
+  border: 1px solid var(--edge-lo);
+  border-radius: 6px;
+  background-color: #0d0d0f;
+  background-position: center;
+  background-size: 100% 100%;
+  background-repeat: no-repeat;
+  box-shadow:
+    inset 0 2px 6px rgba(0, 0, 0, 0.75),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.03),
+    0 1px 0 rgba(255, 255, 255, 0.04);
+  user-select: none;
+  touch-action: none;
+  flex: 0 0 auto;
+}
+
+/* 取景窗: 金丝滑框 */
+.navbar .window {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  box-sizing: border-box;
+  border: 1px solid rgba(226, 196, 138, 0.85);
+  background: linear-gradient(180deg, rgba(226, 196, 138, 0.2), rgba(226, 196, 138, 0.08));
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.35),
+    0 0 12px rgba(216, 178, 106, 0.22),
+    inset 0 0 8px rgba(230, 201, 138, 0.1);
+  border-radius: 4px;
+  cursor: grab;
+}
+
+.navbar .window:active {
+  cursor: grabbing;
+}
+
+.navbar .handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: ew-resize;
+}
+
+.navbar .handle.lo {
+  left: -4px;
+}
+
+.navbar .handle.hi {
+  right: -4px;
+}
+
+/* 手柄抓握纹: 悬停窗口时浮现 */
+.navbar .handle::after {
+  content: '';
+  position: absolute;
+  top: 24%;
+  bottom: 24%;
+  width: 2px;
+  border-radius: 1px;
+  background: rgba(240, 225, 190, 0.75);
+  box-shadow: 0 0 4px rgba(230, 201, 138, 0.55);
+  opacity: 0;
+  transition: opacity var(--t);
+}
+
+.navbar .handle.lo::after {
+  left: 3px;
+}
+
+.navbar .handle.hi::after {
+  right: 3px;
+}
+
+.navbar .window:hover .handle::after {
+  opacity: 0.85;
+}
+
+.navbar .lab {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 10px;
+  color: #d6cdb9;
+  text-shadow: 0 1px 2px #000;
+  pointer-events: none;
+}
+
+.navbar .lab.left {
+  left: 4px;
+}
+
+.navbar .lab.right {
+  right: 4px;
+}

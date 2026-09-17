@@ -1,0 +1,14 @@
+[project]
+name = "keyprism"
+version = "0.1.0"
+description = "KeyPrism — piano-key spectrogram player: resolve audio into a semitone-grid spectrum with synced interactive playback"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "matplotlib>=3.7",
+    "soundfile>=0.12",
+    "av>=11.0",
+]

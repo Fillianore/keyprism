@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>KeyPrism</title>
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <div class="row">
+          <div class="brand"><span class="dot">◆</span> KeyPrism</div>
+          <div class="file" id="fileBadge" title=""></div>
+          <label class="ctrl">
+            分辨率
+            <select id="rateSelect"></select>
+            <span>列/s</span>
+            <select id="subSelect"></select>
+            <span>子带/半音</span>
+          </label>
+          <span class="ctrl" id="resStatus"></span>
+          <label class="ctrl">
+            通道
+            <select id="chanSelect">
+              <option value="mix" selected>混合</option>
+              <option value="left">左</option>
+              <option value="right">右</option>
+            </select>
+          </label>
+          <label class="ctrl">
+            音域
+            <select id="loSelect"></select>
+            <span>–</span>
+            <select id="hiSelect"></select>
+          </label>
+          <label class="ctrl">
+            BPM
+            <input type="number" id="bpmInput" class="num-static" min="30" max="300" step="0.1" />
+            <button class="reset" id="bpmReset" title="还原检测值" type="button">↺</button>
+          </label>
+          <label class="ctrl">
+            偏移ms
+            <input type="number" id="offsetInput" class="num-static" step="1" />
+            <button class="reset" id="offsetReset" title="还原检测值" type="button">↺</button>
+          </label>
+          <label class="ctrl">
+            拍/小节
+            <select id="beatsSel">
+              <option value="2">2</option>
+              <option value="3">3</option>
+              <option value="4" selected>4</option>
+              <option value="6">6</option>
+            </select>
+          </label>
+        </div>
+        <div class="row">
+          <label class="ctrl">
+            配色
+            <select id="cmapSelect"></select>
+          </label>
+          <label class="ctrl">
+            色彩下限
+            <input type="range" id="floorSlider" />
+            <span class="floor-val" id="floorVal"></span>
+            <button class="reset" id="floorReset" title="还原默认" type="button">↺</button>
+          </label>
+          <label class="ctrl">
+            高光 γ
+            <input type="range" id="gammaSlider" />
+            <span class="floor-val" id="gammaVal"></span>
+            <button class="reset" id="gammaReset" title="还原默认" type="button">↺</button>
+          </label>
+        </div>
+      </header>
+      <div id="plot-wrap">
+        <div id="plot"></div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

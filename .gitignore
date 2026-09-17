@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Node / 前端构建
+node_modules/
+dist/
+
+# 后端生成产物 (运行 backend.py 自动产生)
+frontend/public/data.json
+frontend/public/audio.*
