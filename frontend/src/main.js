@@ -13,12 +13,12 @@ import { createNavbar } from './navbar.js';
 import { createPlayer } from './player.js';
 
 /** 进度弹窗: setPhase 文案 / setProgress(done,total) / setIndeterminate */
-function showProgressModal() {
+function showProgressModal(title = '正在更新频谱') {
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.innerHTML = `
     <div class="modal">
-      <h3>正在更新频谱</h3>
+      <h3>${title}</h3>
       <div class="phase"></div>
       <div class="bar"><div class="bar-fill indeterminate"></div></div>
       <div class="pct"></div>
@@ -175,7 +175,8 @@ async function main() {
   registerAdaptiveTicks(gd);
   registerRangeClamp(gd, EPOCH_MS, EPOCH_MS + Math.round(data.durationSec * 1000));
   createPlayer(app, gd, {
-    audioUrl: `./${data.audioFile}`,
+    // 查询串作缓存破坏: 切换曲目后同名 audio.wav 不再读到浏览器缓存旧文件
+    audioUrl: `./${data.audioFile}?t=${Date.now()}`,
     offsetSec: data.offsetSec,
     endSec: data.endSec,
     durMs: Math.round(data.durationSec * 1000),
@@ -271,6 +272,54 @@ async function main() {
   };
   rateSel.addEventListener('change', applyResolution);
   subSel.addEventListener('change', applyResolution);
+
+  // ---- 顶栏: 选择本地音乐 (上传到后端解析并切换曲目, 需 --serve 模式) ----
+  const pickBtn = document.getElementById('pickBtn');
+  const fileInput = document.getElementById('fileInput');
+  pickBtn.addEventListener('click', () => {
+    if (!data.apiBase) {
+      resStatus.textContent = '(选择音乐需后端 --serve 模式)';
+      return;
+    }
+    fileInput.click();
+  });
+  fileInput.addEventListener('change', () => {
+    const file = fileInput.files && fileInput.files[0];
+    fileInput.value = ''; // 允许再次选择同一文件
+    if (!file) return;
+    const modal = showProgressModal('正在导入音乐');
+    pickBtn.disabled = true;
+    const finish = (msg) => {
+      modal.close();
+      pickBtn.disabled = false;
+      if (msg) resStatus.textContent = msg;
+    };
+    const xhr = new XMLHttpRequest();
+    xhr.open(
+      'POST',
+      `${data.apiBase}/api/upload?name=${encodeURIComponent(file.name)}`
+    );
+    xhr.responseType = 'json';
+    xhr.upload.addEventListener('progress', (e) => {
+      if (e.lengthComputable) modal.setProgress(e.loaded, e.total);
+    });
+    xhr.addEventListener('load', () => {
+      const body = xhr.response;
+      if (xhr.status === 200 && body && !body.error) {
+        modal.setPhase('分析完成, 正在刷新页面');
+        modal.setIndeterminate(true);
+        setTimeout(() => location.reload(), 500);
+        return;
+      }
+      const err = (body && body.error) || `HTTP ${xhr.status}`;
+      finish(`导入失败: ${err}`);
+    });
+    xhr.addEventListener('error', () => finish('导入失败: 网络错误'));
+    xhr.addEventListener('abort', () => finish('导入已取消'));
+    modal.setPhase(`上传 ${file.name}`);
+    modal.setIndeterminate(false); // 切换为真实上传进度
+    xhr.send(file);
+  });
 
   // ---- 顶栏: 文件名 / 配色选择 / 色彩下限 ----
   const badge = document.getElementById('fileBadge');
