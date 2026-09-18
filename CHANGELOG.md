@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Release process guide in `AGENTS.md` documenting `scripts/release.sh`
+  usage, cut-off timing and solo-maintainer admin-merge conventions
+
 ## [0.2.0] - 2026-09-18
 
 ### Added
