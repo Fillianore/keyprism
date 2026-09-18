@@ -1,13 +1,15 @@
 /* ============================================================
-   视觉语言: 黑色亮面三角钢琴
-   - 面板 = 近黑烤漆, 顶部柔和高光, 克制的深度
-   - 点缀 = 象牙白 / 香槟金, 仅用于活动态与重要控件
-   - 控件 = 钢琴控制台实体键: 深色微凸, 细高光斜面, 明确按下态
+   Visual language: black glossy grand piano
+   - Panels = near-black lacquer, soft top highlight, restrained depth
+   - Accents = ivory / champagne gold, only for active states and
+     important controls
+   - Controls = piano-console hardware keys: dark and slightly raised,
+     thin beveled highlight, clear pressed state
    ============================================================ */
 :root {
   color-scheme: dark;
 
-  /* 烤漆面板 */
+  /* Lacquered panels */
   --bg: #0a0a0c;
   --panel-top: #1a1b20;
   --panel-mid: #131318;
@@ -15,7 +17,7 @@
   --edge-hi: rgba(255, 255, 255, 0.06);
   --edge-lo: rgba(0, 0, 0, 0.85);
 
-  /* 象牙 / 香槟金 */
+  /* Ivory / champagne gold */
   --ivory: #f3ecdc;
   --gold: #d8b26a;
   --gold-hi: #ecd9a4;
@@ -23,18 +25,18 @@
   --gold-glow: rgba(222, 184, 116, 0.45);
   --gold-line: #6a5a37;
 
-  /* 文字 */
+  /* Text */
   --text: #ddd6c8;
   --muted: #98917f;
 
-  /* 统一几何与动效 */
+  /* Unified geometry and motion */
   --r-panel: 10px;
   --r-group: 8px;
   --r-btn: 7px;
   --t: 0.16s ease;
   --shadow-ctl: 0 2px 5px rgba(0, 0, 0, 0.55);
 
-  /* 旧变量兼容 */
+  /* Legacy variable compatibility */
   --panel: var(--panel-mid);
   --border: #2c2b2e;
   --accent: var(--gold);
@@ -58,7 +60,7 @@ body,
   -webkit-font-smoothing: antialiased;
 }
 
-/* ---------- 顶栏: 两行烤漆控制台 ---------- */
+/* ---------- Top bar: two-row lacquered console ---------- */
 .topbar {
   display: flex;
   flex-direction: column;
@@ -108,7 +110,8 @@ body,
   white-space: nowrap;
 }
 
-/* 选择音乐: 香槟金实体键 (上传本地音频到后端解析) */
+/* Select music: champagne gold hardware key (uploads local audio to the
+ * backend for analysis) */
 .pick-btn {
   background: linear-gradient(180deg, #eeda9e, #d3ad66 55%, #b98f47);
   border: 1px solid #8a6d3b;
@@ -152,7 +155,7 @@ body,
   flex: 1 1 auto;
 }
 
-/* 控件组: 内凹的控制台模块, 取代零散工具条 */
+/* Control groups: recessed console modules replacing a scattered toolbar */
 .ctrl {
   display: flex;
   align-items: center;
@@ -209,7 +212,7 @@ body,
   color: var(--text);
 }
 
-/* 点击可输入的数值标签 */
+/* Click-to-type numeric labels */
 .num {
   cursor: text;
   border-bottom: 1px dotted rgba(152, 145, 127, 0.55);
@@ -227,7 +230,7 @@ body,
   outline: none;
 }
 
-/* 常驻数字输入 (BPM / 偏移): 内凹铭牌槽 */
+/* Persistent numeric inputs (BPM / offset): recessed nameplate slot */
 .num-static {
   width: 68px;
   background: linear-gradient(180deg, #0a0a0d, #121217);
@@ -246,7 +249,7 @@ body,
   box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.5), 0 0 0 2px rgba(216, 178, 106, 0.15);
 }
 
-/* ---------- 进度弹窗 ---------- */
+/* ---------- Progress modal ---------- */
 .modal-overlay {
   position: fixed;
   inset: 0;
@@ -324,7 +327,7 @@ body,
   font-variant-numeric: tabular-nums;
 }
 
-/* ---------- 实体琴键式按钮 (复位等小键) ---------- */
+/* ---------- Hardware piano-key style buttons (reset and other small keys) ---------- */
 .reset {
   background: linear-gradient(180deg, #2b2b32, #1b1b20 62%, #17171b);
   border: 1px solid #35353d;
@@ -356,7 +359,7 @@ body,
   transform: translateY(1px);
 }
 
-/* ---------- 滑杆: 细内凹导轨 + 金属象牙旋钮 ---------- */
+/* ---------- Sliders: thin recessed rail + metallic ivory knob ---------- */
 input[type='range'] {
   -webkit-appearance: none;
   appearance: none;
@@ -437,8 +440,9 @@ input[type='range']:active::-moz-range-thumb {
   width: 130px;
 }
 
-/* ---------- 绘图区: 深色琴腹, 暗角衬托频谱 ---------- */
-/* 绝对定位包装层: 让 plotly 尺寸完全由 flex 布局决定, 不再溢出遮挡下方控件 */
+/* ---------- Plot area: dark piano body, vignetting frames the spectrum ---------- */
+/* Absolutely positioned wrapper: plotly's size is fully determined by the
+ * flex layout and no longer overflows over the controls below */
 #plot-wrap {
   position: relative;
   flex: 1 1 auto;
@@ -457,7 +461,7 @@ input[type='range']:active::-moz-range-thumb {
   inset: 0;
 }
 
-/* plotly 悬停工具条: 烤漆小面板 */
+/* plotly hover toolbar: small lacquered panel */
 .js-plotly-plot .modebar {
   background: rgba(21, 21, 25, 0.92);
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -481,7 +485,7 @@ input[type='range']:active::-moz-range-thumb {
   background: rgba(255, 255, 255, 0.06) !important;
 }
 
-/* ---------- 播放器: 底部烤漆横梁 ---------- */
+/* ---------- Player: bottom lacquered beam ---------- */
 .player-bar {
   display: flex;
   align-items: center;
@@ -498,7 +502,7 @@ input[type='range']:active::-moz-range-thumb {
   color: var(--text);
 }
 
-/* 控制台实体键 */
+/* Console hardware keys */
 .player-bar button {
   background: linear-gradient(180deg, #2c2c33, #1c1c21 58%, #18181c);
   color: var(--text);
@@ -538,7 +542,7 @@ input[type='range']:active::-moz-range-thumb {
   transform: translateY(1px);
 }
 
-/* 播放主键: 香槟金大键 */
+/* Primary play key: large champagne gold key */
 .player-bar button:first-of-type {
   background: linear-gradient(180deg, #eeda9e, #d3ad66 55%, #b98f47);
   border-color: #8a6d3b;
@@ -593,7 +597,7 @@ input[type='range']:active::-moz-range-thumb {
   cursor: pointer;
 }
 
-/* ---------- 播放光标: 金色唱针 ---------- */
+/* ---------- Playback cursor: golden stylus ---------- */
 .playhead {
   position: absolute;
   left: 0;
@@ -607,7 +611,7 @@ input[type='range']:active::-moz-range-thumb {
   will-change: transform;
 }
 
-/* ---------- 底部导航条: 内凹琴轨 ---------- */
+/* ---------- Bottom navigation bar: recessed piano rail ---------- */
 .navbar {
   position: relative;
   height: 34px;
@@ -627,7 +631,7 @@ input[type='range']:active::-moz-range-thumb {
   flex: 0 0 auto;
 }
 
-/* 取景窗: 金丝滑框 */
+/* Viewport window: gold sliding frame */
 .navbar .window {
   position: absolute;
   top: 0;
@@ -663,7 +667,7 @@ input[type='range']:active::-moz-range-thumb {
   right: -4px;
 }
 
-/* 手柄抓握纹: 悬停窗口时浮现 */
+/* Handle grip ridges: appear on window hover */
 .navbar .handle::after {
   content: '';
   position: absolute;

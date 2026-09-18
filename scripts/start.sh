@@ -1,27 +1,28 @@
 #!/usr/bin/env bash
 # ============================================================
-#  KeyPrism 一键启动 (Linux / macOS)
-#  用法:  scripts/start.sh [音频文件]      # 缺省由后端默认加载 assets/demo.m4a
+#  KeyPrism one-command launch (Linux / macOS)
+#  Usage:  scripts/start.sh [audio file]   # the backend loads assets/demo.m4a by default
 #
-#  配置优先级: 环境变量 > ~/.keyprism/config.env > 内置默认值
-#    KEYPRISM_HOME            工作区目录 (日志/缓存/上传暂存)
-#    KEYPRISM_LOG_DIR         日志目录   (默认 $KEYPRISM_HOME/logs)
-#    KEYPRISM_API_HOST/PORT   后端 API 监听地址
-#    KEYPRISM_FRONTEND_PORT   前端页面端口
-#  config.env 为 KEY=VALUE 纯文本 (# 开头为注释), 只识别 KEYPRISM_ 前缀。
-#  在 VS Code 集成终端运行时, 两个端口会自动出现在 Ports 面板。
+#  Config precedence: env vars > ~/.keyprism/config.env > built-in defaults
+#    KEYPRISM_HOME            workspace directory (logs/cache/upload staging)
+#    KEYPRISM_LOG_DIR         log directory (default $KEYPRISM_HOME/logs)
+#    KEYPRISM_API_HOST/PORT   backend API listen address
+#    KEYPRISM_FRONTEND_PORT   frontend page port
+#  config.env is plain KEY=VALUE text (lines starting with # are comments);
+#  only keys prefixed with KEYPRISM_ are recognized.
+#  In the VS Code integrated terminal, both ports appear in the Ports panel.
 # ============================================================
 set -euo pipefail
 
 PROJ_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJ_ROOT"
 
-# ---- 工作区目录: 日志 / 缓存 / 上传暂存 (KEYPRISM_HOME 可重定向) ----
+# ---- Workspace: logs / cache / upload staging (relocatable via KEYPRISM_HOME) ----
 KEYPRISM_HOME="${KEYPRISM_HOME:-$HOME/.keyprism}"
 KEYPRISM_HOME="${KEYPRISM_HOME/#\~/$HOME}"
 mkdir -p "$KEYPRISM_HOME"
 
-# 用户持久配置: 存在则加载 (已导出的环境变量优先, 不被覆盖)
+# User persistent config: loaded if present (already-exported env vars win)
 CONFIG_FILE="$KEYPRISM_HOME/config.env"
 if [[ -f "$CONFIG_FILE" ]]; then
     while IFS='=' read -r key value; do
@@ -34,15 +35,15 @@ LOG_DIR="${KEYPRISM_LOG_DIR:-$KEYPRISM_HOME/logs}"
 LOG_DIR="${LOG_DIR/#\~/$HOME}"
 mkdir -p "$LOG_DIR"
 
-# ---- 监听地址与端口 (不沿用旧版 8800/5180) ----
+# ---- Listen address and ports (old 8800/5180 intentionally not reused) ----
 API_HOST="${KEYPRISM_API_HOST:-127.0.0.1}"
 API_PORT="${KEYPRISM_API_PORT:-9630}"
 FRONTEND_PORT="${KEYPRISM_FRONTEND_PORT:-5270}"
 export KEYPRISM_HOME
 export MPLCONFIGDIR="${MPLCONFIGDIR:-$KEYPRISM_HOME/cache/matplotlib}"
-export PYTHONUNBUFFERED=1  # 后端日志实时落盘 (stdout 重定向时不块缓冲)
+export PYTHONUNBUFFERED=1  # backend logs hit disk in real time (no block buffering when stdout is redirected)
 
-# ---- 预检 ----
+# ---- Preflight ----
 if ! command -v uv >/dev/null 2>&1; then
     echo "ERROR: 未找到 uv, 请先安装: https://docs.astral.sh/uv/" >&2
     exit 1
@@ -72,7 +73,8 @@ else
 fi
 PID_API=$!
 
-# 等待 API 就绪 (首次 uv sync + 频谱分析较慢; 超时仅提示, 不阻塞前端)
+# Wait for the API to be ready (first uv sync + spectrum analysis are slow;
+# timeout only warns, never blocks the frontend)
 if command -v curl >/dev/null 2>&1; then
     API_UP=0
     for _ in $(seq 1 120); do

@@ -1,4 +1,4 @@
-"""音频 IO 层测试: 解码链回退与浏览器兼容转存"""
+"""Audio IO layer tests: decode-chain fallback and browser-safe transcoding"""
 
 import numpy as np
 import pytest
@@ -9,7 +9,8 @@ from helpers import make_m4a, make_wav
 
 @pytest.fixture(autouse=True)
 def isolated_public_dir(tmp_path, monkeypatch):
-    """browser_safe_audio 的输出目录指向临时目录, 不污染 frontend/public"""
+    """Point browser_safe_audio's output directory at a temp dir so
+    frontend/public stays untouched"""
     pub = tmp_path / "pub"
     pub.mkdir()
     monkeypatch.setattr(audio_io, "PUBLIC_DIR", pub)
@@ -21,7 +22,7 @@ def test_load_channels_wav(tmp_path):
     make_wav(p, seconds=2.0)
     data, sr, dur = audio_io.load_channels(p, 0.0, None)
     assert sr == 22050
-    assert data.shape[1] == 2  # 保持多声道
+    assert data.shape[1] == 2  # multichannel preserved
     assert dur == pytest.approx(2.0, abs=0.05)
 
 
@@ -30,7 +31,8 @@ def test_load_channels_slice(tmp_path):
     make_wav(p, seconds=4.0)
     data, sr, dur = audio_io.load_channels(p, 1.0, 3.0)
     assert dur == pytest.approx(2.0, abs=0.05)
-    # 与全量读取的对应区间一致 (1s = 22050 帧, 2s = 44100 帧)
+    # matches the corresponding slice of a full read (1s = 22050 frames,
+    # 2s = 44100 frames)
     full, _, _ = audio_io.load_channels(p, 0.0, None)
     np.testing.assert_allclose(data, full[22050:66150], atol=1e-9)
 
@@ -43,7 +45,7 @@ def test_load_channels_start_beyond_end(tmp_path):
 
 
 def test_load_channels_av_fallback_m4a(tmp_path):
-    """libsndfile 不支持 m4a, 应回退 PyAV 全量解码"""
+    """libsndfile cannot handle m4a; must fall back to a full PyAV decode"""
     p = tmp_path / "t.m4a"
     make_m4a(p, seconds=1.5)
     data, sr, dur = audio_io.load_channels(p, 0.0, None)
@@ -68,7 +70,8 @@ def test_browser_safe_audio_direct_copy(tmp_path, isolated_public_dir):
 
 
 def test_browser_safe_audio_transcode(tmp_path, isolated_public_dir):
-    """m4a 转存 PCM WAV, 保证浏览器 decodeAudioData 可解"""
+    """m4a is transcoded to PCM WAV so the browser's decodeAudioData can
+    decode it"""
     p = tmp_path / "t.m4a"
     make_m4a(p)
     name = audio_io.browser_safe_audio(p)

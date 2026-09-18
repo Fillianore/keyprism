@@ -1,54 +1,61 @@
-# KeyPrism HTTP API 参考
+# KeyPrism HTTP API Reference
 
-> 适用范围：后端以 serve 模式运行时（`uv run python -m keyprism --serve 9630`）。
-> 跨域已放开（`Access-Control-Allow-Origin: *`），前后端可分开部署。
+> Scope: the backend running in serve mode
+> (`uv run python -m keyprism --serve 9630`).
+> CORS is wide open (`Access-Control-Allow-Origin: *`), so frontend and
+> backend can be deployed separately.
 
-## 端点
+## Endpoints
 
-| 方法 | 端点 | 说明 |
+| Method | Endpoint | Description |
 |------|------|------|
-| GET | `/api/ping` | 健康检查，返回 `{"ok": true}` |
-| GET | `/api/spec?rate=15&sub=5` | 重算指定分辨率的频谱（三通道 + 包络），带缓存 |
-| POST | `/api/upload?name=歌曲.mp3` | 上传本地音频（请求体为原始文件字节），后端解析并切换当前曲目，刷新 `data.json`；返回完整 payload |
-| OPTIONS | 任意端点 | CORS 预检，返回 204 |
+| GET | `/api/ping` | health check, returns `{"ok": true}` |
+| GET | `/api/spec?rate=15&sub=5` | recompute the spectrum at the given resolution (three channels + envelopes), cached |
+| POST | `/api/upload?name=song.mp3` | upload a local audio file (request body is raw file bytes); the backend analyzes it, switches the current track and refreshes `data.json`; returns the full payload |
+| OPTIONS | any endpoint | CORS preflight, returns 204 |
 
-## 上传接口
+## Upload Endpoint
 
-请求体直接放音频文件的原始字节（不需要 multipart 表单）：
+Put the raw bytes of the audio file directly in the request body (no
+multipart form needed):
 
 ```bash
-curl -X POST --data-binary @歌曲.m4a \
-  'http://localhost:9630/api/upload?name=歌曲.m4a'
+curl -X POST --data-binary @song.m4a \
+  'http://localhost:9630/api/upload?name=song.m4a'
 ```
 
-- `name` 查询参数为用户可见的显示名，会做路径剥离（`../` 等被清洗为纯文件名）
-- 大小上限 512 MB
-- 解码链：libsndfile 直读，失败自动回退 PyAV (ffmpeg)，覆盖主流音频格式
-- 成功：`200` + 完整 payload（与 `data.json` 内容一致）
-- 失败：`500` + `{"error": "无法解析该音频 (...)"}`，暂存文件自动清理
+- The `name` query parameter is the user-visible display name; path components
+  are stripped (`../` etc. are sanitized to a bare file name)
+- Size cap: 512 MB
+- Decode chain: libsndfile reads directly, falling back automatically to
+  PyAV (ffmpeg), covering mainstream audio formats
+- Success: `200` + the full payload (identical to the `data.json` contents)
+- Failure: `500` + `{"error": "..."}`; the staged file is cleaned up
+  automatically
 
-## 错误码
+## Error Codes
 
-| 码 | 场景 |
+| Code | Scenario |
 |----|------|
-| 404 | 未知路由 |
-| 409 | 已有导入任务进行中 |
-| 411 | 请求体缺失（Content-Length 为 0） |
-| 413 | 文件超过 512 MB 上限 |
-| 500 | 解析失败（格式不支持 / 文件损坏 / 无音轨） |
+| 404 | unknown route |
+| 409 | an import task is already in progress |
+| 411 | request body missing (Content-Length is 0) |
+| 413 | file exceeds the 512 MB cap |
+| 500 | analysis failed (unsupported format / corrupted file / no audio track) |
 
-## spec 响应结构
+## spec Response Structure
 
 ```jsonc
 {
   "specs":    { "mix": "<base64 uint8>", "left": "...", "right": "..." },
   "envelopes":{ "mix": "data:image/png;base64,...", "...": "..." },
-  "nCols": 960,       // 时间列数
-  "hopSec": 0.066,    // 列距 (秒)
-  "rate": 15,         // 实际生效的列/秒 (会被钳制到 5..30)
-  "sub": 5            // 实际生效的每半音子带数 (非法值回退 1)
+  "nCols": 960,       // number of time columns
+  "hopSec": 0.066,    // column spacing (seconds)
+  "rate": 15,         // effective columns/second (clamped to 5..30)
+  "sub": 5            // effective subbands per semitone (invalid values fall back to 1)
 }
 ```
 
-`data.json` 完整字段契约的权威定义在 `src/keyprism/payload.py`，
-契约测试 `tests/test_payload.py` 逐字段断言——改契约时两处必须同步。
+The authoritative definition of the full `data.json` field contract lives in
+`src/keyprism/payload.py`; the contract test `tests/test_payload.py` asserts
+it field by field — when the contract changes, both places must be synced.

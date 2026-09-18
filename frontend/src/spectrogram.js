@@ -3,7 +3,7 @@ import Plotly from 'plotly.js-dist-min';
 export const EPOCH_MS = Date.UTC(2020, 0, 1);
 export const N_ROWS = 88;
 
-// 键盘贴条几何常量 (paper / y 轴域分数)
+// Keyboard strip geometry constants (paper / y-axis domain fractions)
 const KEY_STRIP = [0.004, 0.048];
 const KEY_BLACK_W = 0.62;
 const KEY_BLACK_H = 0.58;
@@ -18,7 +18,8 @@ export function iso(ms) {
 
 export function pMs(v) {
   if (typeof v === 'number') return v;
-  // 兼容 ISO (T 分隔, 可带 Z) 与 plotly 内部格式 (空格分隔, 无 Z), 一律按 UTC
+  // Accept both ISO (T separator, optional Z) and plotly's internal format
+  // (space separator, no Z); always interpreted as UTC
   const m =
     /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?\s*(Z)?$/.exec(v);
   if (m) {
@@ -28,7 +29,7 @@ export function pMs(v) {
   return Date.parse(v);
 }
 
-/** mm:ss:mmm 格式 (分:秒:毫秒) */
+/** mm:ss:mmm format (minutes:seconds:milliseconds) */
 export function fmtRel(ms) {
   const total = Math.max(0, Math.round(ms - EPOCH_MS));
   const mm = Math.floor(total / 60000);
@@ -39,8 +40,9 @@ export function fmtRel(ms) {
   ).padStart(3, '0')}`;
 }
 
-/** 真实钢琴几何: 白键全高, 黑键 58% 行高居中, 白键分隔线在每行边界
- *  (E|F、B|C 加深)。lo/hi 为可见半音行范围, 分数相对该范围计算 */
+/** Real piano geometry: white keys full height, black keys 58% of row height
+ *  centered, white-key separators at row boundaries (E|F and B|C darker).
+ *  lo/hi are the visible semitone row range; fractions are relative to it */
 function keyboardShapes(lo = 0, hi = N_ROWS - 1) {
   const [l, r] = KEY_STRIP;
   const bw = (r - l) * KEY_BLACK_W;
@@ -105,12 +107,13 @@ function keyboardShapes(lo = 0, hi = N_ROWS - 1) {
   return shapes;
 }
 
-/** 小节网格状态 (BPM / 偏移 / 每小节拍数), 由 applyGrid 更新 */
+/** Measure grid state (BPM / offset / beats per measure), updated by
+ *  applyGrid */
 let gridState = null;
-let pitchRange = [0, N_ROWS - 1]; // 半音范围
-let sub = 1; // 每半音子带数 (行数 = N_ROWS * sub)
+let pitchRange = [0, N_ROWS - 1]; // semitone range
+let sub = 1; // subbands per semitone (row count = N_ROWS * sub)
 
-/** y 轴半音刻度: 半音 m 的中心行 = m*sub + (sub-1)/2 */
+/** y-axis semitone ticks: the center row of semitone m = m*sub + (sub-1)/2 */
 const rowOf = (m) => m * sub + (sub - 1) / 2;
 
 function yaxisConfig(data) {
@@ -127,7 +130,8 @@ function yaxisConfig(data) {
   };
 }
 
-/** 切换每半音子带数 (行数变化), 重新应用 y 轴 (shape 用轴域分数不受影响) */
+/** Switch subbands per semitone (row count changes); re-apply the y axis
+ *  (shapes use axis-domain fractions so they are unaffected) */
 export function setSub(gd, s, data) {
   sub = s;
   Plotly.relayout(gd, { yaxis: yaxisConfig(data) });
@@ -138,7 +142,7 @@ function gridShapes() {
   const { bpm, offsetMs, beats, minMs, maxMs } = gridState;
   const beatMs = 60000 / bpm;
   const barMs = beatMs * beats;
-  // 归一化偏移到 [0, barMs)
+  // normalize the offset into [0, barMs)
   let t0 = minMs + (((offsetMs % barMs) + barMs) % barMs);
   const out = [];
   for (let t = t0; t <= maxMs; t += barMs) {
@@ -169,7 +173,8 @@ function gridShapes() {
   return out;
 }
 
-/** 汇总当前所有 shape: 键盘 + 小节网格 (播放光标由 HTML 覆盖层实现, 不占 shape) */
+/** Assemble all current shapes: keyboard + measure grid (the playback cursor
+ *  is an HTML overlay and does not occupy a shape) */
 function currentShapes(gd, xs) {
   return [
     ...keyboardShapes(pitchRange[0], pitchRange[1]),
@@ -177,13 +182,14 @@ function currentShapes(gd, xs) {
   ];
 }
 
-/** 应用小节网格 (BPM / 偏移 ms / 每小节拍数) */
+/** Apply the measure grid (BPM / offset in ms / beats per measure) */
 export function applyGrid(gd, opts) {
   gridState = opts;
   Plotly.relayout(gd, { shapes: currentShapes(gd, null) });
 }
 
-/** 应用音域范围: y 轴裁剪 + shape 全量重建 (保留网格与光标) */
+/** Apply the pitch range: clip the y axis + full shape rebuild (grid and
+ *  cursor preserved) */
 export function applyPitchRange(gd, data, lo, hi) {
   pitchRange = [lo, hi];
   Plotly.relayout(gd, {
@@ -192,11 +198,12 @@ export function applyPitchRange(gd, data, lo, hi) {
   });
 }
 
-/** 创建热图与布局, 返回 { gd, playheadIdx } */
+/** Create the heatmap and layout, returns { gd, playheadIdx } */
 export function buildFigure(el, data, xs, spec) {
   const initViewMs = data.initViewSec * 1000;
   if (data.bpm) {
-    // 初始网格: 使用后端估计的 BPM 与首拍偏移, 每小节 4 拍
+    // Initial grid: backend-estimated BPM and first-beat offset, 4 beats per
+    // measure
     gridState = {
       bpm: data.bpm,
       offsetMs: (data.beatOffsetSec || 0) * 1000,
@@ -211,7 +218,7 @@ export function buildFigure(el, data, xs, spec) {
       type: 'heatmap',
       z: spec,
       x: xs,
-      y: Array.from({ length: spec.length }, (_, i) => i), // 数值行号
+      y: Array.from({ length: spec.length }, (_, i) => i), // numeric row index
       colorscale: data.colorscales[data.defaultCmap],
       zmin: -data.dbRange,
       zmax: 0,
@@ -224,7 +231,7 @@ export function buildFigure(el, data, xs, spec) {
 
   const tickStyle = { color: '#9a9282', size: 10 };
   const layout = {
-    dragmode: 'pan', // 拖拽 = 平移, 不做框选缩放
+    dragmode: 'pan', // drag = pan, no box-select zoom
     font: { family: 'Microsoft YaHei, sans-serif', color: '#d3ccbd' },
     paper_bgcolor: 'rgba(0,0,0,0)',
     plot_bgcolor: 'rgba(0,0,0,0)',
@@ -246,7 +253,7 @@ export function buildFigure(el, data, xs, spec) {
 
   Plotly.newPlot(el, traces, layout, {
     responsive: true,
-    scrollZoom: true, // 滚轮缩放 (y 轴已被 fixedrange 锁定, 仅 x 生效)
+    scrollZoom: true, // wheel zoom (the y axis is locked by fixedrange, so only x applies)
   });
   return { gd: el };
 }

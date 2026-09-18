@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""python -m keyprism 入口"""
+"""python -m keyprism entry point"""
 
 from keyprism.cli import main
 

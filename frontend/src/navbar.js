@@ -1,8 +1,9 @@
 import Plotly from 'plotly.js-dist-min';
 import { iso, pMs } from './spectrogram.js';
 
-/** 底部导航条: 背景为全曲能量包络, 取景窗口拖动时宽度恒定,
- *  左右手柄调整宽度, 点击空白处跳转 */
+/** Bottom navigation bar: backdrop is the full-track energy envelope; the
+ *  viewport window keeps a constant width while dragged, the left/right
+ *  handles resize it, clicking empty space jumps there */
 export function createNavbar(container, gd, { minMs, maxMs, initAMs, initBMs, envUrl }) {
   let a = initAMs;
   let b = initBMs;
@@ -95,7 +96,7 @@ export function createNavbar(container, gd, { minMs, maxMs, initAMs, initBMs, en
   drag(hR, 'hi');
   drag(wrap, 'move', true);
 
-  // 主图缩放/平移时同步窗口
+  // Keep the window in sync when the main plot zooms/pans
   gd.on('plotly_relayout', (e) => {
     const r = e['xaxis.range'];
     let a2;
