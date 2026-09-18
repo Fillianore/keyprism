@@ -1,0 +1,49 @@
+# CI: 兜底验证强制化
+# 目的: 任何改动合并前自动跑回归测试与前端构建, 测试腐烂在这里被拦截
+# (红了必须二选一: 修代码, 或有意识地更新/删除过时测试), 而不是靠人记得手跑。
+# 工具链说明: av/soundfile 的 wheel 自带 ffmpeg/libsndfile, 无需 apt 装系统依赖;
+# pyproject 已配置清华源为默认索引, GitHub runner (海外) 访问同样可达。
+
+name: CI
+
+on:
+  push:
+    branches: [master, devel]
+  pull_request:
+
+jobs:
+  backend:
+    name: 后端 (uv sync + pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: 安装依赖 (含 dev 测试组)
+        run: uv sync
+
+      - name: 启动脚本语法检查
+        run: bash -n scripts/start.sh
+
+      - name: 回归测试 (30 用例, ~6s)
+        run: uv run pytest -q
+
+  frontend:
+    name: 前端 (npm ci + build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22 # vite 7 要求 >= 20.19
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 生产构建
+        run: npm run build

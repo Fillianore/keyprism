@@ -108,6 +108,46 @@ body,
   white-space: nowrap;
 }
 
+/* 选择音乐: 香槟金实体键 (上传本地音频到后端解析) */
+.pick-btn {
+  background: linear-gradient(180deg, #eeda9e, #d3ad66 55%, #b98f47);
+  border: 1px solid #8a6d3b;
+  color: #241c0e;
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.5px;
+  font-family: inherit;
+  border-radius: var(--r-btn);
+  padding: 4px 12px;
+  cursor: pointer;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.5),
+    var(--shadow-ctl),
+    0 0 12px rgba(214, 171, 102, 0.18);
+  transition:
+    background var(--t),
+    box-shadow var(--t),
+    transform var(--t);
+}
+
+.pick-btn:hover {
+  background: linear-gradient(180deg, #f6e6b4, #ddb872 55%, #c29a52);
+}
+
+.pick-btn:active {
+  background: linear-gradient(180deg, #c69f58, #ab8442);
+  box-shadow:
+    inset 0 2px 4px rgba(80, 58, 20, 0.55),
+    0 1px 2px rgba(0, 0, 0, 0.55);
+  transform: translateY(1px);
+}
+
+.pick-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+  transform: none;
+}
+
 .spacer {
   flex: 1 1 auto;
 }

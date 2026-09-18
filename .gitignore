@@ -7,6 +7,12 @@ __pycache__/
 node_modules/
 dist/
 
-# 后端生成产物 (运行 backend.py 自动产生)
+# 后端生成产物 (运行后端自动产生)
 frontend/public/data.json
 frontend/public/audio.*
+
+# 本地工具状态 (AI 编程智能体的会话/worktree, 与项目无关)
+.kilo/
+
+# 注意: uv.lock 与 frontend/package-lock.json 有意提交 (锁定依赖, CI 复现环境);
+# .github/workflows 亦有意提交 (CI 本体)。勿加入本文件。

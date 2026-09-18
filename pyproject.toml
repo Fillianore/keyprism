@@ -1,3 +1,7 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "keyprism"
 version = "0.1.0"
@@ -12,3 +16,19 @@ dependencies = [
     "soundfile>=0.12",
     "av>=11.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+# 默认包索引走清华 TUNA 镜像 (官方 pypi 在部分网络不可达)
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/keyprism"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
