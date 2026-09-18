@@ -1,7 +1,8 @@
 import Plotly from 'plotly.js-dist-min';
 import { iso, pMs, pickDtickMs } from './spectrogram.js';
 
-/** 时间轴刻度自适应: 窗口越宽刻度越疏, 16s 内窗口每 1s 一个刻度 */
+/** Adaptive time-axis ticks: the wider the window, the sparser the ticks;
+ *  one tick per second for windows within 16s */
 export function registerAdaptiveTicks(gd) {
   gd.on('plotly_relayout', (e) => {
     const r = e['xaxis.range'];
@@ -25,7 +26,8 @@ export function registerAdaptiveTicks(gd) {
   });
 }
 
-/** 范围钳制: 时间窗不允许拖出 [minMs, maxMs] (歌曲开头/结尾处截止) */
+/** Range clamping: the time window cannot be dragged outside
+ *  [minMs, maxMs] (hard stop at the track's start/end) */
 export function registerRangeClamp(gd, minMs, maxMs) {
   const clamp = (a, b) => {
     if (!isFinite(a) || !isFinite(b) || b <= a) return null;

@@ -1,10 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""KeyPrism 前端契约层: 分析结果 -> data.json payload
+"""KeyPrism frontend contract layer: analysis results -> data.json payload
 
-职责: 把解码后的 PCM 变成前端直接消费的 JSON 结构——
-三通道量化频谱 (uint8 base64)、包络图 (matplotlib 渲染 data URL)、
-色标表、BPM/曲目元信息。前端 data.json 字段的唯一权威定义处。
+Responsibility: turn decoded PCM into the JSON structure the frontend
+consumes directly — three-channel quantized spectra (uint8 base64), envelope
+images (matplotlib-rendered data URLs), color scales, BPM/track metadata.
+Single source of truth for the frontend's data.json fields.
 """
 
 import base64
@@ -20,8 +21,9 @@ from .dsp import (
     spec_matrix, stft_power,
 )
 
-# matplotlib 的字体/配置缓存收进工作区, 不污染用户配置目录
-# (必须在 import matplotlib 之前设置)
+# Keep matplotlib's font/config cache inside the workspace so it never
+# pollutes the user's config directory
+# (must be set before import matplotlib)
 os.environ.setdefault("MPLCONFIGDIR", str(KEYPRISM_HOME / "cache" / "matplotlib"))
 
 import matplotlib  # noqa: E402
@@ -29,7 +31,7 @@ import matplotlib  # noqa: E402
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-INIT_VIEW_SEC = 15.0  # 频谱区默认视窗宽度
+INIT_VIEW_SEC = 15.0  # default spectrogram viewport width
 COLORMAPS = ["Inferno", "Magma", "Plasma", "Viridis", "Cividis", "Turbo"]
 
 
@@ -38,8 +40,10 @@ def build_colorscale(name: str = "inferno", n: int = 33) -> list:
     cs = [[round(i / (n - 1), 4),
            f"rgb({int(r * 255)},{int(g * 255)},{int(b * 255)})"]
           for i, (r, g, b, _) in enumerate(cmap)]
-    # 下限锚点强制纯黑: 静默区沉入深色背景, 凸显有效频谱。
-    # 只改首锚点颜色, 与第二锚点之间仍是平滑线性过渡, 无断层。
+    # Lower anchor pinned to pure black: silence sinks into the dark
+    # background, highlighting the effective spectrum.
+    # Only the first anchor color changes; the transition to the second anchor
+    # stays smoothly linear, with no discontinuity.
     cs[0][1] = "#000000"
     return cs
 
@@ -59,7 +63,8 @@ def build_envelope_dataurl(spec_db: np.ndarray) -> str:
 
 def compute_specs(data2d: np.ndarray, sr: int, dur: float, rate: int,
                   sub: int, db_range: float, window: int) -> dict:
-    """按分辨率参数计算三通道频谱 (统一峰值归一化)"""
+    """Compute the three-channel spectra at the given resolution parameters
+    (unified peak normalization)"""
     rate = min(max(rate, TIME_RATES[0]), TIME_RATES[-1])
     if sub not in SUB_OPTIONS:
         sub = 1
@@ -102,14 +107,15 @@ def analyze(path: Path, start: float, end: float | None, window: int,
             db_range: float, rate: int, sub: int,
             api_base: str | None = None, preloaded: tuple | None = None,
             name: str | None = None) -> dict:
-    """完整分析: 解码 (或复用预解码数据) -> BPM -> 三通道频谱 -> payload"""
+    """Full analysis: decode (or reuse preloaded data) -> BPM ->
+    three-channel spectra -> payload"""
     if preloaded is not None:
         data2d, sr, dur = preloaded
     else:
         data2d, sr, dur = load_channels(path, start, end)
     print(f"[1/3] 已加载 {dur:.1f}s @ {sr} Hz, {data2d.shape[1]} 声道")
 
-    # BPM 用混合声道全分辨率 STFT 估计 (一次性)
+    # BPM is estimated from a full-resolution STFT of the mix channel (once)
     freqs, mix_power = stft_power(data2d.mean(axis=1), sr, window)
     hop_full = dur / max(mix_power.shape[1] - 1, 1)
     bpm, beat_offset = estimate_bpm(mix_power, hop_full)

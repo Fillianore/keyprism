@@ -1,4 +1,5 @@
-"""HTTP 服务层测试: 临时端口起真实服务, 覆盖 ping/spec/upload 全路由"""
+"""HTTP service layer tests: a real server on an ephemeral port, covering
+all ping/spec/upload routes"""
 
 import json
 import threading
@@ -14,7 +15,8 @@ from keyprism.server import make_server
 
 @pytest.fixture()
 def srv(tmp_path, monkeypatch):
-    """临时目录 + 临时端口的服务实例, 测试结束自动 shutdown"""
+    """Server instance on a temp dir + ephemeral port, auto-shutdown at test
+    end"""
     pub = tmp_path / "pub"
     pub.mkdir()
     monkeypatch.setattr(audio_io, "PUBLIC_DIR", pub)
@@ -59,7 +61,7 @@ def test_spec(srv):
     assert code == 200
     assert set(res["specs"]) == {"mix", "left", "right"}
     assert res["rate"] == 5 and res["sub"] == 1
-    # 同参数第二次命中缓存, 结果一致
+    # same parameters hit the cache the second time; results identical
     _, res2 = get(f"{srv['base']}/api/spec?rate=5&sub=1")
     assert res2 == res
 
@@ -75,13 +77,13 @@ def test_upload_switches_track(srv):
     code, payload = post(
         f"{srv['base']}/api/upload?name=newsong.wav", body)
     assert code == 200
-    assert payload["file"] == "newsong.wav"  # 显示名为用户文件名
-    # data.json 已切换, spec 反映新曲目
+    assert payload["file"] == "newsong.wav"  # display name is the user's file name
+    # data.json switched; spec reflects the new track
     d = json.loads((srv["pub"] / "data.json").read_text(encoding="utf-8"))
     assert d["file"] == "newsong.wav"
     _, res = get(f"{srv['base']}/api/spec?rate=5&sub=1")
     assert res["nCols"] == payload["nCols"]
-    # 暂存目录只保留上传副本
+    # staging directory keeps the uploaded copy
     assert any(p.name.endswith("newsong.wav") for p in srv["uploads"].glob("*"))
 
 
@@ -90,7 +92,7 @@ def test_upload_garbage_returns_500(srv):
         f"{srv['base']}/api/upload?name=bad.mp3", b"\x00" * 2048)
     assert code == 500
     assert "无法解析" in body["error"]
-    # 失败的上传不留暂存文件
+    # a failed upload leaves no staged file behind
     assert not list(srv["uploads"].glob("*bad.mp3"))
 
 
@@ -100,7 +102,7 @@ def test_upload_empty_body_returns_411(srv):
 
 
 def test_upload_name_sanitized(srv):
-    """路径穿越的文件名被剥离为纯文件名"""
+    """Path-traversing file names are stripped to a bare file name"""
     body = srv["wav"].read_bytes()
     code, payload = post(
         f"{srv['base']}/api/upload?name=..%2F..%2Fevil.wav", body)
@@ -121,7 +123,7 @@ def test_unknown_routes(srv):
     with pytest.raises(urllib.error.HTTPError) as e:
         urllib.request.urlopen(f"{srv['base']}/api/nothing", timeout=10)
     assert e.value.code == 404
-    # send_error 返回 HTML, 不走 JSON 解析路径
+    # send_error returns HTML, bypassing the JSON parsing path
     req = urllib.request.Request(
         f"{srv['base']}/api/nothing", data=b"x", method="POST")
     with pytest.raises(urllib.error.HTTPError) as e:

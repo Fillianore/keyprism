@@ -1,4 +1,4 @@
-"""测试辅助: 生成小型真实音频文件 (wav / m4a)"""
+"""Test helpers: generate small real audio files (wav / m4a)"""
 
 import av
 import numpy as np
@@ -8,7 +8,8 @@ SR = 22050
 
 
 def tone_stereo(seconds: float = 2.0, sr: int = SR) -> np.ndarray:
-    """440/880Hz 双声道正弦, 能量非零且稳定, 适合分析管线"""
+    """440/880Hz stereo sine, non-zero stable energy, suitable for the
+    analysis pipeline"""
     t = np.linspace(0, seconds, int(sr * seconds), endpoint=False)
     sig = 0.4 * np.sin(2 * np.pi * 440 * t) + 0.3 * np.sin(2 * np.pi * 880 * t)
     return np.stack([sig, np.roll(sig, 100)], axis=1)
@@ -19,7 +20,8 @@ def make_wav(path, seconds: float = 2.0, sr: int = SR) -> None:
 
 
 def make_m4a(path, seconds: float = 2.0, sr: int = SR) -> None:
-    """AAC/M4A 容器: libsndfile 不支持, 强制走 PyAV 回退路径"""
+    """AAC/M4A container: unsupported by libsndfile, forces the PyAV
+    fallback path"""
     stereo = tone_stereo(seconds, sr)
     cont = av.open(str(path), "w")
     s = cont.add_stream("aac", rate=sr)
@@ -38,7 +40,8 @@ def make_m4a(path, seconds: float = 2.0, sr: int = SR) -> None:
 
 def click_track(bpm: float = 120.0, seconds: float = 12.0,
                 sr: int = SR) -> np.ndarray:
-    """等间隔衰减脉冲串 (节拍器), BPM 估计的确定性输入"""
+    """Evenly spaced decaying pulse train (metronome), a deterministic input
+    for BPM estimation"""
     x = np.zeros(int(sr * seconds))
     period = 60.0 / bpm
     t_burst = np.arange(int(0.05 * sr)) / sr

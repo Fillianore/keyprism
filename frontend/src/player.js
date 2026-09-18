@@ -1,13 +1,16 @@
 import Plotly from 'plotly.js-dist-min';
 import { EPOCH_MS, iso, pMs, fmtRel } from './spectrogram.js';
 
-/** 播放器: Web Audio 全缓冲引擎 + 点击定位 + 平滑光标 + 跟随视窗
+/** Player: fully buffered Web Audio engine + click-to-seek + smooth cursor +
+ *  follow viewport
  *
- * 为什么不用 <audio> 元素:
- *   - data:URL MP3 的 seek 需要解码扫描, 既卡又使 currentTime 与
- *     真实采样位置产生比例漂移 (VBR 时长误估时可积累到秒级)
- *   - decodeAudioData 全量解码后, seek 只是缓冲区偏移, 瞬时且
- *     时钟精确到采样 (ctx.currentTime), 光标与声音严格同步
+ * Why not the <audio> element:
+ *   - seeking in a data:URL MP3 requires a decoding scan, which stutters and
+ *     makes currentTime drift proportionally from the real sample position
+ *     (VBR duration misestimates can accumulate to seconds)
+ *   - after decodeAudioData decodes everything, a seek is just a buffer
+ *     offset: instant, and the clock is sample-accurate (ctx.currentTime),
+ *     so cursor and sound stay strictly in sync
  */
 export function createPlayer(container, gd, opts) {
   const { audioUrl, offsetSec, endSec, durMs } = opts;
@@ -21,21 +24,21 @@ export function createPlayer(container, gd, opts) {
   gain.connect(ctx.destination);
 
   const VOL_KEY = 'piano-spec-volume';
-  const VOL_MAX = Math.pow(10, -10 / 20); // 最大音量衰减 10 dB
+  const VOL_MAX = Math.pow(10, -10 / 20); // volume ceiling: -10 dB attenuation
   let volSaved = VOL_MAX;
   try {
     const saved = parseFloat(localStorage.getItem(VOL_KEY));
     if (isFinite(saved)) volSaved = Math.min(Math.max(saved, 0), VOL_MAX);
   } catch {
-    /* localStorage 不可用时忽略 */
+    /* localStorage unavailable: ignore */
   }
   gain.gain.value = volSaved;
 
-  let buffer = null; // 解码后的 PCM
-  let src = null; // 当前 BufferSource
-  let startCtx = 0; // 起播时的 ctx.currentTime
-  let startOffset = 0; // 起播缓冲偏移
-  let savedOffset = 0; // 暂停位置
+  let buffer = null; // decoded PCM
+  let src = null; // current BufferSource
+  let startCtx = 0; // ctx.currentTime at play start
+  let startOffset = 0; // buffer offset at play start
+  let savedOffset = 0; // paused position
   let playing = false;
   let endTimer = null;
 
@@ -50,7 +53,8 @@ export function createPlayer(container, gd, opts) {
     return isFinite(l) ? l : 0;
   };
 
-  /** 当前"可听"时刻: 采样时钟扣除输出延迟, 与耳朵对齐 */
+  /** The current "audible" moment: sample clock minus output latency,
+   *  aligned with the ear */
   const curTime = () => {
     if (!buffer) return 0;
     let t;
@@ -63,8 +67,10 @@ export function createPlayer(container, gd, opts) {
     return t;
   };
 
-  // ---- 控制条 ----
-  // 图标: 填充+描边同色配合 round join 形成全圆角几何; 主键用雕版深棕, 次键用香槟金
+  // ---- Control bar ----
+  // Icons: fill and stroke share a color with round joins for fully rounded
+  // geometry; the primary key uses engraved dark brown, secondary keys
+  // champagne gold
   const ICONS = {
     play:
       '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">' +
@@ -130,14 +136,14 @@ export function createPlayer(container, gd, opts) {
   bar.append(btn, btnHome, timeLbl, seek, folWrap, volLbl, vol);
   container.appendChild(bar);
 
-  // ---- 引擎 ----
+  // ---- Engine ----
   function stopSource() {
     if (src) {
       src.onended = null;
       try {
         src.stop();
       } catch {
-        /* 已停止 */
+        /* already stopped */
       }
       src.disconnect();
       src = null;
@@ -204,7 +210,7 @@ export function createPlayer(container, gd, opts) {
     }
   }
 
-  // ---- 解码 (页面加载后即后台进行) ----
+  // ---- Decode (starts in the background as soon as the page loads) ----
   (async () => {
     try {
       const ab = await (await fetch(audioUrl)).arrayBuffer();
@@ -223,7 +229,7 @@ export function createPlayer(container, gd, opts) {
     }
   })();
 
-  // ---- 控件 ----
+  // ---- Controls ----
   btn.addEventListener('click', () => {
     if (playing) pause();
     else play(Math.max(savedOffset, OFFSET));
@@ -243,11 +249,11 @@ export function createPlayer(container, gd, opts) {
     try {
       localStorage.setItem(VOL_KEY, String(gain.gain.value));
     } catch {
-      /* 忽略存储失败 */
+      /* ignore storage failure */
     }
   });
 
-  // ---- 跟踪当前视窗 (用于跟随平移) ----
+  // ---- Track the current viewport (for follow panning) ----
   let va = EPOCH_MS;
   let vb = EPOCH_MS + 30000;
   try {
@@ -271,7 +277,7 @@ export function createPlayer(container, gd, opts) {
     }
   });
 
-  // ---- HTML 覆盖层光标 (transform 移动, 零 plotly 开销) ----
+  // ---- HTML overlay cursor (transform-driven, zero plotly overhead) ----
   const ph = document.createElement('div');
   ph.className = 'playhead';
   gd.parentElement.appendChild(ph);
@@ -321,7 +327,7 @@ export function createPlayer(container, gd, opts) {
     rafId = requestAnimationFrame(loop);
   }
 
-  // ---- 频谱区点击: 定位播放进度但不自动播放 ----
+  // ---- Spectrogram click: seek playback without autoplay ----
   gd.on('plotly_click', (e) => {
     if (!e.points || !e.points[0]) return;
     const ms = pMs(e.points[0].x);
