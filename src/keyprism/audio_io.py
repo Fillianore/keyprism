@@ -1,13 +1,14 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""KeyPrism 音频 IO 层: 解码链与浏览器兼容转存
+"""KeyPrism audio IO layer: decode chain and browser-safe transcoding
 
-解码优先级: libsndfile (soundfile) 直读, 失败回退 PyAV (ffmpeg),
-覆盖 mp3/wav/ogg/flac 与 m4a/aac/wma/opus/aiff 等主流容器。
+Decode priority: libsndfile (soundfile) reads directly, falling back to
+PyAV (ffmpeg) on failure, covering mp3/wav/ogg/flac and common containers
+such as m4a/aac/wma/opus/aiff.
 
-本模块同时持有路径常量:
-- PUBLIC_DIR    前端静态产物目录 (data.json / audio.*)
-- KEYPRISM_HOME 工作区 (上传暂存等), 可用环境变量重定向
+This module also owns the path constants:
+- PUBLIC_DIR    frontend static output directory (data.json / audio.*)
+- KEYPRISM_HOME workspace (upload staging etc.), relocatable via env var
 """
 
 import os
@@ -17,10 +18,11 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 def _repo_root() -> Path:
-    """从本文件向上定位仓库根 (含 pyproject.toml 的目录)。
+    """Locate the repo root (the directory containing pyproject.toml) by
+    walking up from this file.
 
-    src layout 下包在 src/keyprism/, 层数可能变化;
-    按 pyproject.toml 探测比数 parent 层数更稳健。
+    Under the src layout the package sits in src/keyprism/ and the depth can
+    change; probing for pyproject.toml is more robust than counting parents.
     """
     for cand in Path(__file__).resolve().parents:
         if (cand / "pyproject.toml").exists():
@@ -28,25 +30,27 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parent.parent.parent
 
 
-# 前端静态产物目录: 仓库根/frontend/public
-# (uv 默认以 editable 方式安装本项目, __file__ 始终指向源码树)
+# Frontend static output directory: repo root/frontend/public
+# (uv installs this project editable by default, so __file__ always points
+# into the source tree)
 PUBLIC_DIR = _repo_root() / "frontend" / "public"
 
-# 演示音频: 无参数启动时的默认输入 (仓库根/assets)
+# Demo audio: default input when started without arguments (repo root/assets)
 DEMO_AUDIO = _repo_root() / "assets" / "demo.m4a"
 
-# 工作区: 上传暂存 / matplotlib 缓存等产物默认集中于此,
-# 可用环境变量 KEYPRISM_HOME 重定向 (启动脚本亦读取 ~/.keyprism/config.env)
+# Workspace: upload staging / matplotlib cache and similar artifacts
+# consolidate here by default; relocatable via the KEYPRISM_HOME env var
+# (the launch scripts also read ~/.keyprism/config.env)
 KEYPRISM_HOME = Path(
     os.environ.get("KEYPRISM_HOME") or Path.home() / ".keyprism"
 ).expanduser()
-UPLOAD_DIR = KEYPRISM_HOME / "uploads"  # 上传音频暂存
-MAX_UPLOAD_BYTES = 512 * 1024 * 1024  # 上传大小上限 512MB
+UPLOAD_DIR = KEYPRISM_HOME / "uploads"  # upload staging
+MAX_UPLOAD_BYTES = 512 * 1024 * 1024  # upload size cap: 512MB
 
 
 def _load_via_av(path: Path) -> tuple[np.ndarray, int]:
-    """PyAV (ffmpeg) 解码 libsndfile 不支持的容器 (m4a/aac 等),
-    返回 (data[n, ch] float64, samplerate)"""
+    """Decode containers libsndfile cannot handle (m4a/aac etc.) with
+    PyAV (ffmpeg); returns (data[n, ch] float64, samplerate)"""
     import av
 
     with av.open(str(path)) as container:
@@ -68,8 +72,9 @@ def _load_via_av(path: Path) -> tuple[np.ndarray, int]:
 
 
 def browser_safe_audio(path: Path) -> str:
-    """保证浏览器 decodeAudioData 一定能解: mp3/wav/ogg/flac 直接复制,
-    其他容器 (m4a/aac/alac...) 用 PyAV 解码转存 PCM WAV"""
+    """Guarantee the browser's decodeAudioData can always decode:
+    mp3/wav/ogg/flac are copied directly; other containers (m4a/aac/alac...)
+    are decoded with PyAV and transcoded to PCM WAV"""
     ext = path.suffix.lower()
     if ext in ('.mp3', '.wav', '.ogg', '.flac'):
         name = f'audio{ext}'
@@ -81,7 +86,8 @@ def browser_safe_audio(path: Path) -> str:
 
 
 def load_channels(path: Path, start: float, end: float | None):
-    """读取原始多声道数据 (不做单声道混合), 返回 (data[n, ch], sr, 时长)"""
+    """Read raw multichannel data (no mono downmix); returns (data[n, ch], sr,
+    duration)"""
     try:
         with sf.SoundFile(str(path)) as f:
             sr = f.samplerate
@@ -95,7 +101,8 @@ def load_channels(path: Path, start: float, end: float | None):
             data = f.read(e - s, dtype="float64", always_2d=True)
         return data, sr, (e - s) / sr
     except sf.LibsndfileError:
-        # libsndfile 不支持该容器 (如 m4a), 回退 PyAV 全量解码后切片
+        # libsndfile cannot handle this container (e.g. m4a); fall back to a
+        # full PyAV decode and slice afterwards
         full, sr = _load_via_av(path)
         s = int(start * sr)
         e = len(full) if end is None else min(int(end * sr), len(full))

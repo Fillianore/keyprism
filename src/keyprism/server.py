@@ -1,14 +1,14 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""KeyPrism HTTP 服务层: 常驻 API + 上传切换曲目
+"""KeyPrism HTTP service layer: long-running API + upload-based track switch
 
-唯一与 stdlib httpd 耦合的模块:
-- GET  /api/ping           健康检查
-- GET  /api/spec?rate&sub  重算指定分辨率频谱 (带缓存)
-- POST /api/upload?name=   上传音频字节流, 解析并切换当前曲目
+The only module coupled to stdlib httpd:
+- GET  /api/ping           health check
+- GET  /api/spec?rate&sub  recompute the spectrum at a given resolution (cached)
+- POST /api/upload?name=   upload audio bytes, analyze and switch tracks
 
-make_server() 返回未启动的 ThreadingHTTPServer, 便于测试中
-以线程启动/shutdown; run_server() 为阻塞入口。
+make_server() returns an unstarted ThreadingHTTPServer so tests can
+start/shutdown it in a thread; run_server() is the blocking entry.
 """
 
 import json
@@ -25,8 +25,10 @@ from .payload import analyze, compute_specs
 def make_server(path: Path, port: int, host: str, start: float,
                 end: float | None, window: int, db_range: float, rate: int,
                 sub: int) -> ThreadingHTTPServer:
-    """构建服务实例 (不启动): 初始分析完成后返回, 可 serve_forever/shutdown"""
-    # 通配地址无法被浏览器直接访问, apiBase 回落到 localhost
+    """Build the server instance (not started): returns after the initial
+    analysis, ready for serve_forever/shutdown"""
+    # A wildcard address is not directly reachable from the browser; apiBase
+    # falls back to localhost
     shown = "localhost" if host in ("", "0.0.0.0", "::") else host
     api_base = f"http://{shown}:{port}"
 
@@ -38,7 +40,8 @@ def make_server(path: Path, port: int, host: str, start: float,
 
     def load_current(src: Path, preload: tuple | None = None,
                      name: str | None = None):
-        """解码 (或复用预解码数据), 输出 data.json, 返回 (当前曲目状态, payload)"""
+        """Decode (or reuse preloaded data), emit data.json, return
+        (current track state, payload)"""
         data2d, sr, dur = preload if preload is not None \
             else audio_io.load_channels(src, start, end)
         payload = analyze(src, start, end, window, db_range, rate, sub,
@@ -49,10 +52,10 @@ def make_server(path: Path, port: int, host: str, start: float,
         return cur, payload
 
     state = {
-        "busy": False,   # 正在上传/分析新曲目
-        "cache": {},     # (rate, sub) -> compute_specs 结果
+        "busy": False,   # an upload/analysis of a new track is running
+        "cache": {},     # (rate, sub) -> compute_specs result
         "lock": threading.Lock(),
-        "cur": None,     # 当前曲目: {path, data2d, sr, dur, rate, sub}
+        "cur": None,     # current track: {path, data2d, sr, dur, rate, sub}
     }
     state["cur"], _ = load_current(path)
     print(f"已输出: {(audio_io.PUBLIC_DIR / 'data.json').resolve()} "
@@ -102,7 +105,7 @@ def make_server(path: Path, port: int, host: str, start: float,
                 except Exception as e:  # noqa: BLE001
                     self._json(500, {"error": str(e)})
                     return
-                if len(state["cache"]) > 3:  # 最多缓存 4 组分辨率
+                if len(state["cache"]) > 3:  # cache at most 4 resolutions
                     state["cache"].clear()
                 state["cache"][key] = res
             self._json(200, res)
@@ -149,7 +152,7 @@ def make_server(path: Path, port: int, host: str, start: float,
                 with state["lock"]:
                     state["cur"] = cur
                     state["cache"].clear()
-                # 暂存目录只保留最近几个文件
+                # Keep only the most recent files in the staging directory
                 olds = sorted(audio_io.UPLOAD_DIR.glob("*_*"),
                               key=lambda p: p.name)
                 for old in olds[:-4]:
@@ -175,7 +178,8 @@ def make_server(path: Path, port: int, host: str, start: float,
 def run_server(path: Path, port: int, host: str, start: float,
                end: float | None, window: int, db_range: float, rate: int,
                sub: int):
-    """常驻服务: 前端可随时请求新分辨率的频谱, 也可上传新音频切换曲目"""
+    """Long-running service: the frontend can request spectra at new
+    resolutions at any time and upload audio to switch tracks"""
     srv = make_server(path, port, host, start, end, window, db_range,
                       rate, sub)
     api_base = f"http://{srv.server_address[0]}:{srv.server_address[1]}"

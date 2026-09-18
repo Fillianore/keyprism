@@ -1,22 +1,25 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""钢琴频谱分析 - CLI 入口: 分析音频并输出数据文件供 Vite 前端使用
+"""Piano spectral analysis - CLI entry: analyze audio and emit data files
+for the Vite frontend.
 
-包内分层 (详见各模块头注释):
-    dsp       纯算法: STFT / 半音聚合 / 降采样 / BPM
-    audio_io  解码链: sndfile -> PyAV 回退, 浏览器兼容转存, 路径常量
-    payload   前端契约: data.json 字段的唯一权威定义
-    server    HTTP 服务: /api/ping /api/spec /api/upload
-    cli       本模块: 命令行入口 (python -m keyprism)
+Package layering (see each module's header docstring for details):
+    dsp       pure algorithms: STFT / semitone aggregation / downsampling / BPM
+    audio_io  decode chain: sndfile -> PyAV fallback, browser-safe
+              transcoding, path constants
+    payload   frontend contract: single source of truth for data.json fields
+    server    HTTP service: /api/ping /api/spec /api/upload
+    cli       this module: command-line entry (python -m keyprism)
 
-输出到 frontend/public/:
-  data.json   元信息 + 频谱矩阵(uint8 base64) + 色标 + 包络图
-  audio.<ext> 原始音频副本 (供前端播放)
+Output goes to frontend/public/:
+  data.json   metadata + spectrum matrices (uint8 base64) + color scales +
+              envelope images
+  audio.<ext> copy of the original audio (for frontend playback)
 
-用法:
-    python -m keyprism                    # 无参数时默认加载 assets/demo.m4a
-    python -m keyprism 歌曲.mp3 --start 30 --end 90
-    python -m keyprism --serve 9630       # 常驻 API 模式
+Usage:
+    python -m keyprism                    # loads assets/demo.m4a by default
+    python -m keyprism song.mp3 --start 30 --end 90
+    python -m keyprism --serve 9630       # long-running API mode
 """
 
 import argparse

@@ -12,7 +12,7 @@ import { registerAdaptiveTicks, registerRangeClamp } from './ticks.js';
 import { createNavbar } from './navbar.js';
 import { createPlayer } from './player.js';
 
-/** 进度弹窗: setPhase 文案 / setProgress(done,total) / setIndeterminate */
+/** Progress modal: setPhase text / setProgress(done,total) / setIndeterminate */
 function showProgressModal(title = '正在更新频谱') {
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
@@ -50,7 +50,8 @@ function showProgressModal(title = '正在更新频谱') {
   };
 }
 
-/** 读取响应体并按 Content-Length 汇报下载进度, 返回解析后的 JSON */
+/** Read the response body and report download progress by Content-Length;
+ *  returns the parsed JSON */
 async function readJsonWithProgress(resp, onProgress) {
   const total = parseInt(resp.headers.get('Content-Length') || '0', 10);
   const reader = resp.body.getReader();
@@ -72,7 +73,8 @@ async function readJsonWithProgress(resp, onProgress) {
   return JSON.parse(new TextDecoder().decode(buf));
 }
 
-/** 先导+尾随节流: 高分辨率热图重着色开销大, 拖动滑块时降低 restyle 频率 */
+/** Leading+trailing throttle: high-resolution heatmap recoloring is costly,
+ *  so lower the restyle rate while a slider is being dragged */
 function throttled(fn, ms = 120) {
   let last = 0;
   let timer = null;
@@ -107,11 +109,12 @@ async function main() {
     );
   }
 
-  // 按需解码: 只保留当前通道的浮点矩阵 (高分辨率下三通道全解码太耗内存)
+  // Decode on demand: keep only the current channel's float matrix resident
+  // (decoding all three channels at high resolution would use too much memory)
   const db = data.dbRange;
   const b64ToU8 = (b64) =>
     Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-  let specRaw = {}; // 通道 -> Uint8Array
+  let specRaw = {}; // channel -> Uint8Array
   for (const [name, b64] of Object.entries(data.specs)) {
     specRaw[name] = b64ToU8(b64);
   }
@@ -135,7 +138,8 @@ async function main() {
   const makeXs = () =>
     Array.from(
       { length: nCols },
-      // 权威映射: 全曲时长均分到每列 (中心对齐), 不依赖后端 hop 字段
+      // Authoritative mapping: the full-track duration is split evenly per
+      // column (center-aligned), independent of the backend hop field
       (_, i) =>
         iso(
           EPOCH_MS +
@@ -147,7 +151,8 @@ async function main() {
 
   const tick = () => new Promise((res) => setTimeout(res, 0));
 
-  /** 分块异步解码 (带进度回调, 避免长时间阻塞 UI) */
+  /** Chunked async decoding (with progress callback, avoids blocking the UI
+   *  for long stretches) */
   const decodeChannelAsync = async (ch, onProgress) => {
     const bin = specRaw[ch];
     const rows = data.noteLabels.length * curSub;
@@ -175,7 +180,8 @@ async function main() {
   registerAdaptiveTicks(gd);
   registerRangeClamp(gd, EPOCH_MS, EPOCH_MS + Math.round(data.durationSec * 1000));
   createPlayer(app, gd, {
-    // 查询串作缓存破坏: 切换曲目后同名 audio.wav 不再读到浏览器缓存旧文件
+    // Query string as cache buster: after a track switch, a same-named
+    // audio.wav is no longer read from the browser cache
     audioUrl: `./${data.audioFile}?t=${Date.now()}`,
     offsetSec: data.offsetSec,
     endSec: data.endSec,
@@ -189,7 +195,7 @@ async function main() {
     envUrl: envelopes.mix,
   });
 
-  // ---- 顶栏: 通道切换 (混合/左/右) ----
+  // ---- Top bar: channel switch (mix/left/right) ----
   const chanSel = document.getElementById('chanSelect');
   chanSel.addEventListener('change', () => {
     curChan = chanSel.value;
@@ -197,7 +203,7 @@ async function main() {
     if (envelopes[curChan]) nav.setEnv(envelopes[curChan]);
   });
 
-  // ---- 顶栏: 分辨率切换 (需要后端 --serve 模式) ----
+  // ---- Top bar: resolution switch (requires backend --serve mode) ----
   const rateSel = document.getElementById('rateSelect');
   const subSel = document.getElementById('subSelect');
   const resStatus = document.getElementById('resStatus');
@@ -273,7 +279,8 @@ async function main() {
   rateSel.addEventListener('change', applyResolution);
   subSel.addEventListener('change', applyResolution);
 
-  // ---- 顶栏: 选择本地音乐 (上传到后端解析并切换曲目, 需 --serve 模式) ----
+  // ---- Top bar: pick local music (upload to the backend for analysis and
+  // track switch, requires --serve mode) ----
   const pickBtn = document.getElementById('pickBtn');
   const fileInput = document.getElementById('fileInput');
   pickBtn.addEventListener('click', () => {
@@ -285,7 +292,7 @@ async function main() {
   });
   fileInput.addEventListener('change', () => {
     const file = fileInput.files && fileInput.files[0];
-    fileInput.value = ''; // 允许再次选择同一文件
+    fileInput.value = ''; // allow picking the same file again
     if (!file) return;
     const modal = showProgressModal('正在导入音乐');
     pickBtn.disabled = true;
@@ -317,11 +324,11 @@ async function main() {
     xhr.addEventListener('error', () => finish('导入失败: 网络错误'));
     xhr.addEventListener('abort', () => finish('导入已取消'));
     modal.setPhase(`上传 ${file.name}`);
-    modal.setIndeterminate(false); // 切换为真实上传进度
+    modal.setIndeterminate(false); // switch to real upload progress
     xhr.send(file);
   });
 
-  // ---- 顶栏: 文件名 / 配色选择 / 色彩下限 ----
+  // ---- Top bar: file name / palette / color floor ----
   const badge = document.getElementById('fileBadge');
   badge.textContent = data.file;
   badge.title = data.file;
@@ -337,8 +344,8 @@ async function main() {
 
   const floor = document.getElementById('floorSlider');
   const floorVal = document.getElementById('floorVal');
-  const floorMin = -Math.min(40, data.dbRange); // 滑块下界 (最多到 -40 dB)
-  const floorDefault = Math.max(floorMin, -30); // 默认 -30 dB
+  const floorMin = -Math.min(40, data.dbRange); // slider lower bound (at most -40 dB)
+  const floorDefault = Math.max(floorMin, -30); // default -30 dB
   floor.min = String(floorMin);
   floor.max = '-5';
   floor.step = '1';
@@ -349,14 +356,15 @@ async function main() {
     const c = Math.round(Math.min(Math.max(v, floorMin), -5));
     floor.value = String(c);
     floorVal.dataset.v = String(c);
-    floorVal.textContent = `${c} dB`; // 数值标签即时跟随
+    floorVal.textContent = `${c} dB`; // numeric label follows immediately
     if (immediate) Plotly.restyle(gd, { zmin: [c] }, [0]);
     else restyleFloor(c);
   };
   floor.addEventListener('input', () => applyFloor(parseFloat(floor.value)));
   applyFloor(floorDefault, true);
 
-  // ---- 高光增强 (gamma): 对色标锚点位置做 pos^γ 幂变换, 不改数据与悬停读数 ----
+  // ---- Highlight boost (gamma): applies a pos^γ power transform to the
+  // colorscale anchor positions; data and hover readouts unchanged ----
   const GAMMA_MIN = 0.6;
   const GAMMA_MAX = 5;
   const gammaSlider = document.getElementById('gammaSlider');
@@ -371,14 +379,15 @@ async function main() {
     const g = Math.min(Math.max(v, GAMMA_MIN), GAMMA_MAX);
     gammaSlider.value = String(g);
     gammaVal.dataset.v = String(g);
-    gammaVal.textContent = `γ ${g.toFixed(2)}`; // 数值标签即时跟随
+    gammaVal.textContent = `γ ${g.toFixed(2)}`; // numeric label follows immediately
     const base = data.colorscales[cmapSel.value];
     const cs = base.map(([p, c]) => [Math.pow(p, g), c]);
     if (immediate) Plotly.restyle(gd, { colorscale: [cs] }, [0]);
     else restyleGamma(cs);
   };
 
-  /** 数值标签点击即转为输入框: Enter/失焦提交, Esc 取消 */
+  /** Clicking a numeric label turns it into an input: Enter/blur commits,
+   *  Esc cancels */
   function makeEditable(span, apply) {
     span.classList.add('num');
     span.title = '点击输入数值';
@@ -395,7 +404,7 @@ async function main() {
         closed = true;
         const v = parseFloat(input.value);
         if (commit && isFinite(v)) apply(v);
-        else apply(cur); // 取消则按原值重渲染
+        else apply(cur); // on cancel, re-render with the original value
       };
       input.addEventListener('keydown', (ev) => {
         if (ev.key === 'Enter') close(true);
@@ -453,7 +462,7 @@ async function main() {
   loSel.addEventListener('change', applyRange);
   hiSel.addEventListener('change', applyRange);
 
-  // ---- 顶栏: BPM / 小节偏移 / 每小节拍数 ----
+  // ---- Top bar: BPM / measure offset / beats per measure ----
   const bpmInput = document.getElementById('bpmInput');
   const offsetInput = document.getElementById('offsetInput');
   const beatsSel = document.getElementById('beatsSel');
@@ -488,7 +497,8 @@ async function main() {
     applyBpmGrid();
   });
 
-  // ---- 布局同步: 任何容器尺寸变化后强制 plotly 重排, 防止底部被遮挡 ----
+  // ---- Layout sync: force a plotly resize after any container size change,
+  // preventing the bottom from being covered ----
   const wrap = document.getElementById('plot-wrap');
   const sync = () => Plotly.Plots.resize(gd);
   new ResizeObserver(sync).observe(wrap);
