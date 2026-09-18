@@ -84,6 +84,9 @@ body,
 }
 
 .brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-weight: 600;
   font-size: 15px;
   letter-spacing: 1.5px;
@@ -92,8 +95,12 @@ body,
 }
 
 .brand .dot {
-  color: var(--gold);
-  text-shadow: 0 0 10px var(--gold-glow);
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.12),
+    0 1px 4px rgba(0, 0, 0, 0.5);
 }
 
 .file {
