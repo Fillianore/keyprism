@@ -9,8 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Release process guide in `AGENTS.md` documenting `scripts/release.sh`
-  usage, cut-off timing and solo-maintainer admin-merge conventions
+- Release process documentation: a dedicated section in `AGENTS.md`
+  (`scripts/release.sh` usage, cut-off timing, solo-maintainer admin-merge
+  conventions, CI check-name pitfalls) plus a developer "Releasing" note and
+  `scripts/` tree entry in both `README.md` and `README_CN.md`
 
 ## [0.2.0] - 2026-09-18
 
