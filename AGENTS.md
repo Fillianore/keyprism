@@ -70,6 +70,38 @@ Reverse imports and circular dependencies are forbidden.
    (wav/m4a/120 BPM click track) and depends on neither demo.m4a nor the
    external environment
 
+## Release Process (devel → master is a release)
+
+Merging devel into master **is** the release. The version cut-off is scripted:
+`scripts/release.sh` bumps the version (`pyproject.toml` + `uv.lock` via
+`uv version`), finalizes the CHANGELOG (`[Unreleased]` → `[X.Y.Z] - date`,
+with a fresh empty `[Unreleased]` prepended), commits, pushes devel and opens
+the release PR. Full usage lives in the script header.
+
+```bash
+scripts/release.sh --bump minor --dry-run   # preview, zero side effects
+scripts/release.sh --bump minor             # real cut + release PR
+gh pr merge <N> --merge --admin             # solo maintainer: admin merge
+git switch master && git pull               # after merging: tag and push
+git tag -a vX.Y.Z -m "KeyPrism X.Y.Z" && git push origin master --tags
+```
+
+Ground rules:
+
+- Keep `[Unreleased]` growing as features land; the version number is decided
+  once per cut (SemVer over the whole batch), never per feature
+- Cut during a quiet window (no in-flight PRs on devel) and merge the release
+  PR promptly so the batch cannot grow underneath it
+- The script refuses: wrong branch, dirty tree, out-of-sync devel, offline
+  (real mode), version equal to the current one, or an empty `[Unreleased]`
+- Solo-maintainer note: master requires 1 approval and you cannot approve
+  your own PR — merging with `--admin` (bypass) is the designed path until
+  collaborators arrive
+- Pitfall learned the hard way: required status checks in the `protect-master`
+  ruleset match check names **by exact string**. Renaming CI jobs orphans the
+  old entries (PR stuck on "waiting for status" forever) — update the ruleset
+  in the same change
+
 ## Known Boundaries & Pitfalls (must read before changing)
 
 - `PUBLIC_DIR`/`DEMO_AUDIO` locate the repo root via `_repo_root()` (walks up
@@ -93,6 +125,7 @@ uv sync                        # install/sync Python deps (incl. dev test group)
 uv run pytest -q               # regression tests (30 cases, ~6s)
 uv run python -m keyprism --serve 9630   # start the backend manually (loads assets/demo.m4a by default)
 bash scripts/start.sh          # one-command start of both ends (ports/workspace see ~/.keyprism/config.env)
+scripts/release.sh --bump minor --dry-run  # preview the next release cut
 cd frontend && npm ci && npm run build   # frontend deps and build
 ```
 

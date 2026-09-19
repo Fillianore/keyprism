@@ -73,9 +73,10 @@ keyprism/
 │       ├── payload.py     # frontend contract: single source of truth for data.json fields
 │       └── server.py      # HTTP service: /api/ping /api/spec /api/upload
 ├── pyproject.toml         # uv project definition (deps locked in uv.lock, TUNA index by default)
-├── scripts/               # one-command launch scripts (config & ports below)
-│   ├── start.sh           # Linux / macOS
-│   └── start.cmd          # Windows
+├── scripts/               # launch & release scripts (config & ports below)
+│   ├── start.sh           # one-command start, Linux / macOS
+│   ├── start.cmd          # one-command start, Windows
+│   └── release.sh         # version cut-off: bump + changelog + release PR
 ├── tests/                 # pytest regression suite: one layer each (see below)
 ├── assets/                # static assets such as the demo audio
 │   └── demo.m4a
@@ -111,6 +112,15 @@ either fix the code or consciously update the tests.
 
 For architecture intent, maintenance rules and known pitfalls aimed at
 developers, see `AGENTS.md` (also read automatically by AI coding agents).
+
+### Releasing (developers)
+
+Merging devel into master **is** a release. The cut is scripted:
+`scripts/release.sh --bump minor` bumps the version (`pyproject.toml` +
+`uv.lock`), finalizes the CHANGELOG and opens the release PR; after merging,
+tag master (`git tag -a vX.Y.Z -m "KeyPrism X.Y.Z" && git push --tags`).
+Full rules and hard-learned pitfalls (solo `--admin` merge, exact-string
+matching of required CI check names) live in `AGENTS.md`.
 
 ## Workspace (`~/.keyprism`)
 

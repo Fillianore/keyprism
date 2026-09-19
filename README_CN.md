@@ -56,9 +56,10 @@ keyprism/
 │       ├── payload.py     # 前端契约: data.json 字段的唯一权威定义
 │       └── server.py      # HTTP 服务: /api/ping /api/spec /api/upload
 ├── pyproject.toml        # uv 项目定义 (依赖锁定见 uv.lock, 默认走清华源)
-├── scripts/              # 一键启动脚本 (配置与端口见下)
-│   ├── start.sh          # Linux / macOS
-│   └── start.cmd         # Windows
+├── scripts/              # 启动与发版脚本 (配置与端口见下)
+│   ├── start.sh          # 一键启动 Linux / macOS
+│   ├── start.cmd         # 一键启动 Windows
+│   └── release.sh        # 版本扎口: 改版本号 + 收口 CHANGELOG + 开发版 PR
 ├── tests/                # pytest 自动化回归: 四层各司其职 (见下节)
 ├── assets/               # 演示音频等静态资产
 │   └── demo.m4a
@@ -90,6 +91,14 @@ CI (`.github/workflows/ci.yml`) 在每次 push / PR 时自动执行同样流程:
 全部约 2 分钟。测试过时会被强制拦截——要么修代码, 要么有意识地更新测试。
 
 面向开发者的架构意图、修改守则与已知陷阱见 `AGENTS.md`（AI 编程智能体亦会自动读取该文件）。
+
+### 发版（面向开发者）
+
+devel 合并到 master **即为发版**。扎口已脚本化：`scripts/release.sh
+--bump minor` 自动改版本号（`pyproject.toml` + `uv.lock`）、收口
+CHANGELOG 并开发版 PR；合并后在 master 打 tag
+（`git tag -a vX.Y.Z -m "KeyPrism X.Y.Z" && git push --tags`）。
+完整规则与踩过的坑（单人 `--admin` 合并、CI 检查名精确匹配）见 `AGENTS.md`。
 
 ## 工作区（`~/.keyprism`）
 
