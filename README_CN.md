@@ -96,9 +96,10 @@ CI (`.github/workflows/ci.yml`) 在每次 push / PR 时自动执行同样流程:
 
 devel 合并到 master **即为发版**。扎口已脚本化：`scripts/release.sh
 --bump minor` 自动改版本号（`pyproject.toml` + `uv.lock`）、收口
-CHANGELOG 并开发版 PR；合并后在 master 打 tag
-（`git tag -a vX.Y.Z -m "KeyPrism X.Y.Z" && git push --tags`）。
-完整规则与踩过的坑（单人 `--admin` 合并、CI 检查名精确匹配）见 `AGENTS.md`。
+CHANGELOG 并开发版 PR。合并后由 workflow 自动接管：打 `v<版本>` tag、
+从 CHANGELOG 对应段落发布 GitHub Release、并把 master 回流 devel
+（使 "devel behind master" 始终归零）。完整规则与踩过的坑
+（单人 `--admin` 合并、CI 检查名精确匹配）见 `AGENTS.md`。
 
 ## 工作区（`~/.keyprism`）
 

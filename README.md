@@ -117,10 +117,12 @@ developers, see `AGENTS.md` (also read automatically by AI coding agents).
 
 Merging devel into master **is** a release. The cut is scripted:
 `scripts/release.sh --bump minor` bumps the version (`pyproject.toml` +
-`uv.lock`), finalizes the CHANGELOG and opens the release PR; after merging,
-tag master (`git tag -a vX.Y.Z -m "KeyPrism X.Y.Z" && git push --tags`).
-Full rules and hard-learned pitfalls (solo `--admin` merge, exact-string
-matching of required CI check names) live in `AGENTS.md`.
+`uv.lock`), finalizes the CHANGELOG and opens the release PR. After the merge
+a workflow takes over automatically: it tags `v<version>`, publishes the
+GitHub Release from the CHANGELOG section and syncs master back into devel
+(keeping "devel behind master" at zero). Full rules and hard-learned pitfalls
+(solo `--admin` merge, exact-string matching of required CI check names) live
+in `AGENTS.md`.
 
 ## Workspace (`~/.keyprism`)
 
