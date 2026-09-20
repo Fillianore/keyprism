@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The release-finalize workflow now always syncs master back into devel;
   previously the "tag already exists" early exit skipped the sync entirely
+- The release-finalize workflow now sets a git identity on the runner
+  (annotated tag creation failed without one)
+- Release PRs must merge with a merge commit: squashing devel → master drops
+  devel's commit lineage and re-creates the same doc conflicts on every
+  release (now stated in the PR body and AGENTS.md)
 
 ## [0.3.0] - 2026-09-19
 

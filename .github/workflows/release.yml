@@ -33,6 +33,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # annotated tags need a committer identity; runners have none
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           VER=$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)".*/\1/')
           echo "version from pyproject: $VER"
 
