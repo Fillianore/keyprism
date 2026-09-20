@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Frontend interface preview screenshot in both READMEs (`assets/preview.png`,
+  shown centered under the intro pipeline)
+
 ## [0.3.2] - 2026-09-20
 
 ### Added

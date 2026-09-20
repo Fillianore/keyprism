@@ -16,6 +16,12 @@
 音频 → STFT → 半音聚合 → 交互式热图 + 播放器
 ```
 
+<div align="center">
+
+<img src="assets/preview.png" alt="KeyPrism 前端界面预览" width="880"/>
+
+</div>
+
 ## 功能一览
 
 ### 频谱分析
