@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Hover tooltip now shows the hovered cell's note name, annotated with the
+  subband index when sub > 1 (e.g. `C4 (2/5)`, low → high frequency)
+- Seek and volume sliders fill the played/applied portion left of the thumb
+  in the theme's champagne gold
+
+### Fixed
+
+- Keyboard strip pattern was rotated three semitones (row 0 is A0, not C):
+  C/F/G were drawn as black keys while C#/F#/G# looked white, and the C
+  axis ticks landed on D#-position keys. Pitch class is now derived from
+  the A0 base; white-key group separators sit under the black keys'
+  centers (E|F and B|C stay on the direct row boundary)
+- Black keys span their full semitone row (same width as white keys) while
+  keeping the real-piano 62% horizontal length
+- Hover placeholder (`%{text}`) now resolves: the per-cell label array must
+  match the heatmap's full z shape ([row][col]), not one label per row
+
 ## [0.3.1] - 2026-09-20
 
 ### Added

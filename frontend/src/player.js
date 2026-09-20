@@ -136,6 +136,20 @@ export function createPlayer(container, gd, opts) {
   bar.append(btn, btnHome, timeLbl, seek, folWrap, volLbl, vol);
   container.appendChild(bar);
 
+  /** Gold left-fill: paints the track portion left of the thumb (played /
+   *  applied part) via the --fill custom property read by the CSS track
+   *  background */
+  function paintFill(el) {
+    const min = parseFloat(el.min);
+    const max = parseFloat(el.max);
+    const v = parseFloat(el.value);
+    const p = isFinite(min) && isFinite(max) && max > min && isFinite(v)
+      ? ((v - min) / (max - min)) * 100
+      : 0;
+    el.style.setProperty('--fill', `${Math.min(Math.max(p, 0), 100)}%`);
+  }
+  paintFill(vol);
+
   // ---- Engine ----
   function stopSource() {
     if (src) {
@@ -246,6 +260,7 @@ export function createPlayer(container, gd, opts) {
   });
   vol.addEventListener('input', () => {
     gain.gain.value = parseFloat(vol.value);
+    paintFill(vol);
     try {
       localStorage.setItem(VOL_KEY, String(gain.gain.value));
     } catch {
@@ -295,6 +310,7 @@ export function createPlayer(container, gd, opts) {
     ph.style.transform = `translateX(${x}px)`;
     ph.style.top = `${fl.margin.t}px`;
     ph.style.bottom = `${fl.margin.b}px`;
+    paintFill(seek);
   }
 
   gd.on('plotly_relayout', reposition);

@@ -447,6 +447,27 @@ input[type='range']:active::-moz-range-thumb {
   width: 130px;
 }
 
+/* ---------- Seek/volume rails: gold fill left of the thumb (the played /
+   applied portion); --fill is kept in sync from player.js ---------- */
+.player-bar .seek::-webkit-slider-runnable-track,
+.player-bar .vol::-webkit-slider-runnable-track {
+  background:
+    linear-gradient(
+      90deg,
+      var(--gold-dim),
+      var(--gold-hi) var(--fill, 0%),
+      rgba(0, 0, 0, 0) var(--fill, 0%)
+    ),
+    linear-gradient(180deg, #060607, #17171c);
+}
+
+.player-bar .seek::-moz-range-progress,
+.player-bar .vol::-moz-range-progress {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--gold-dim), var(--gold-hi));
+}
+
 /* ---------- Plot area: dark piano body, vignetting frames the spectrum ---------- */
 /* Absolutely positioned wrapper: plotly's size is fully determined by the
  * flex layout and no longer overflows over the controls below */

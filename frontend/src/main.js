@@ -260,7 +260,7 @@ async function main() {
       const firstSwitch = curSub !== j.sub;
       curSub = j.sub;
       data.defaultRate = j.rate;
-      if (firstSwitch) setSub(gd, curSub, data);
+      if (firstSwitch) setSub(gd, curSub, data, nCols);
       xs = makeXs();
       const mat = await decodeChannelAsync(curChan, (done, total) =>
         modal.setProgress(done, total)
