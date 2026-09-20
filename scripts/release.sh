@@ -14,7 +14,8 @@
 #
 #  What it deliberately does NOT do:
 #    - merge the PR (that stays with you + branch ruleset)
-#    - tag master (run `git tag -a vX.Y.Z` after merging, see usage below)
+#    - tag / GitHub Release / devel sync-back: automated after the merge by
+#      .github/workflows/release.yml (it fires on every push to master)
 #
 #  Usage:
 #    scripts/release.sh 0.2.0            # explicit version
@@ -24,8 +25,7 @@
 #  Full release flow (human part):
 #    1. scripts/release.sh --bump minor
 #    2. review & merge the PR on GitHub (checks must pass)
-#    3. git switch master && git pull
-#       git tag -a vX.Y.Z -m "KeyPrism X.Y.Z" && git push origin master --tags
+#    3. done - the release workflow tags, publishes and syncs devel
 # ============================================================
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -143,8 +143,8 @@ git push origin devel
 if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
   gh pr create --base master --head devel \
     --title "release v${NEW_VER}" \
-    --body "Version cut-off. After merging, tag master with \`v${NEW_VER}\`."
+    --body "Version cut-off. After merging, the release workflow tags v${NEW_VER}, publishes the GitHub Release and syncs master back into devel."
 else
   echo "open the PR manually: https://github.com/Fillianore/keyprism/compare/master...devel"
 fi
-echo "done: v${NEW_VER} - merge the PR on GitHub, then tag master"
+echo "done: v${NEW_VER} - merge the PR on GitHub, automation finishes the rest"

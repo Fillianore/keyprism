@@ -82,9 +82,14 @@ the release PR. Full usage lives in the script header.
 scripts/release.sh --bump minor --dry-run   # preview, zero side effects
 scripts/release.sh --bump minor             # real cut + release PR
 gh pr merge <N> --merge --admin             # solo maintainer: admin merge
-git switch master && git pull               # after merging: tag and push
-git tag -a vX.Y.Z -m "KeyPrism X.Y.Z" && git push origin master --tags
 ```
+
+Everything after the merge is automated by
+`.github/workflows/release.yml` (fires on push to master): it tags
+`v<version>` from `pyproject.toml`, creates the GitHub Release from the
+matching CHANGELOG section, and merges master back into devel so the
+"devel behind master" counter stays at zero. The job is idempotent — if the
+tag already exists it exits without doing anything.
 
 Ground rules:
 
@@ -128,6 +133,7 @@ bash scripts/start.sh          # one-command start of both ends (ports/workspace
 scripts/release.sh --bump minor --dry-run  # preview the next release cut
 cd frontend && npm ci && npm run build   # frontend deps and build
 ```
+
 
 ## One Sentence for Future Maintainers
 

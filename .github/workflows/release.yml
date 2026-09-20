@@ -1,0 +1,71 @@
+# Release finalization: runs after a release PR is merged into master.
+# release.sh only goes as far as opening the PR; this workflow finishes the
+# release mechanically so no post-merge step can be forgotten:
+#   1. tag master with the version from pyproject.toml (idempotent: skips if
+#      the tag already exists)
+#   2. create the GitHub Release from the matching CHANGELOG.md section
+#   3. sync master back into devel (keeps "devel behind master" at zero)
+
+name: Release finalize
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-finalize
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history + tags, needed for the existence check
+
+      - name: Tag, publish and sync back (skips if already tagged)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VER=$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)".*/\1/')
+          echo "version from pyproject: $VER"
+
+          if git rev-parse -q --verify "refs/tags/v$VER" >/dev/null; then
+            echo "v$VER is already tagged - nothing to do"
+            exit 0
+          fi
+
+          git tag -a "v$VER" -m "KeyPrism v$VER"
+          git push origin "v$VER"
+          echo "tagged v$VER"
+
+          python3 - "$VER" <<'PYEOF'
+          import re, sys, pathlib
+          ver = sys.argv[1]
+          t = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
+          m = re.search(rf"(## \[{re.escape(ver)}\].*?)(?=^## )", t, re.S | re.M)
+          if not m:
+              sys.exit(f"[error] CHANGELOG.md has no section for [{ver}]")
+          pathlib.Path("/tmp/notes.md").write_text(m.group(1).strip())
+          PYEOF
+          gh release create "v$VER" --title "KeyPrism v$VER" \
+            --notes-file /tmp/notes.md --latest
+
+          echo "syncing master back into devel..."
+          if gh api --method POST \
+            "/repos/$GITHUB_REPOSITORY/merges" \
+            -f base=devel -f head=master > /tmp/merge.json 2>/tmp/merge.err; then
+            echo "devel synced: $(grep -o '"sha":[^,]*' /tmp/merge.json | head -1)"
+          elif grep -q "Nothing to merge" /tmp/merge.err 2>/dev/null; then
+            echo "master and devel already in sync"
+          else
+            echo "[error] master -> devel merge failed:" >&2
+            cat /tmp/merge.err >&2
+            echo "if it is a conflict, resolve by merging master into devel" >&2
+            echo "locally and pushing the result." >&2
+            exit 1
+          fi
