@@ -1,5 +1,6 @@
 import Plotly from 'plotly.js-dist-min';
 import { EPOCH_MS, iso, pMs, fmtRel } from './spectrogram.js';
+import { t, onChange } from './i18n.js';
 
 /** Player: fully buffered Web Audio engine + click-to-seek + smooth cursor +
  *  follow viewport
@@ -105,12 +106,13 @@ export function createPlayer(container, gd, opts) {
   bar.className = 'player-bar';
   const btn = document.createElement('button');
   btn.style.minWidth = '42px';
-  btn.setAttribute('aria-label', '播放/暂停');
-  btn.textContent = '解码中…';
+  let decodeState = 'decoding'; // decoding | ok | failed (drives btn text)
+  btn.setAttribute('aria-label', t('playPause'));
+  btn.textContent = t('decoding');
   btn.disabled = true;
   const btnHome = document.createElement('button');
   btnHome.style.minWidth = '38px';
-  btnHome.setAttribute('aria-label', '回到开头');
+  btnHome.setAttribute('aria-label', t('backToStart'));
   btnHome.innerHTML = ICONS.home;
   const timeLbl = document.createElement('span');
   timeLbl.className = 'time';
@@ -118,14 +120,22 @@ export function createPlayer(container, gd, opts) {
   const seek = document.createElement('input');
   seek.type = 'range';
   seek.className = 'seek';
+  // Park the thumb at the start: a valueless range input defaults to the
+  // midpoint of its range, which read as "half played" on first load
+  seek.min = String(OFFSET);
+  seek.max = String(limit() || 0);
+  seek.step = '0.1';
+  seek.value = String(OFFSET);
   let seekHeld = false;
   const folWrap = document.createElement('label');
   const folCb = document.createElement('input');
   folCb.type = 'checkbox';
   folCb.checked = true;
-  folWrap.append(folCb, document.createTextNode('跟随播放'));
+  const folSpan = document.createElement('span');
+  folSpan.textContent = t('followPlayback');
+  folWrap.append(folCb, folSpan);
   const volLbl = document.createElement('span');
-  volLbl.textContent = '音量';
+  volLbl.textContent = t('volume');
   const vol = document.createElement('input');
   vol.type = 'range';
   vol.className = 'vol';
@@ -135,6 +145,20 @@ export function createPlayer(container, gd, opts) {
   vol.value = volSaved.toFixed(3);
   bar.append(btn, btnHome, timeLbl, seek, folWrap, volLbl, vol);
   container.appendChild(bar);
+
+  /** Gold left-fill: paints the track portion left of the thumb (played /
+   *  applied part) via the --fill custom property read by the CSS track
+   *  background */
+  function paintFill(el) {
+    const min = parseFloat(el.min);
+    const max = parseFloat(el.max);
+    const v = parseFloat(el.value);
+    const p = isFinite(min) && isFinite(max) && max > min && isFinite(v)
+      ? ((v - min) / (max - min)) * 100
+      : 0;
+    el.style.setProperty('--fill', `${Math.min(Math.max(p, 0), 100)}%`);
+  }
+  paintFill(vol);
 
   // ---- Engine ----
   function stopSource() {
@@ -215,6 +239,7 @@ export function createPlayer(container, gd, opts) {
     try {
       const ab = await (await fetch(audioUrl)).arrayBuffer();
       buffer = await ctx.decodeAudioData(ab);
+      decodeState = 'ok';
       btn.disabled = false;
       btn.innerHTML = ICONS.play;
       seek.min = String(OFFSET);
@@ -223,11 +248,22 @@ export function createPlayer(container, gd, opts) {
       timeLbl.textContent = `00:00:00 / ${fmtRel(specMs(limit()))}`;
       reposition();
     } catch (e) {
-      btn.textContent = '解码失败';
+      decodeState = 'failed';
+      btn.textContent = t('decodeFailed');
       btn.title = String(e?.message || e);
-      console.error('音频解码失败:', e);
+      console.error('Audio decode failed:', e);
     }
   })();
+
+  // ---- Live language switch: re-render the persistent labels ----
+  onChange(() => {
+    btn.setAttribute('aria-label', t('playPause'));
+    btnHome.setAttribute('aria-label', t('backToStart'));
+    folSpan.textContent = t('followPlayback');
+    volLbl.textContent = t('volume');
+    if (decodeState === 'decoding') btn.textContent = t('decoding');
+    else if (decodeState === 'failed') btn.textContent = t('decodeFailed');
+  });
 
   // ---- Controls ----
   btn.addEventListener('click', () => {
@@ -246,6 +282,7 @@ export function createPlayer(container, gd, opts) {
   });
   vol.addEventListener('input', () => {
     gain.gain.value = parseFloat(vol.value);
+    paintFill(vol);
     try {
       localStorage.setItem(VOL_KEY, String(gain.gain.value));
     } catch {
@@ -295,6 +332,12 @@ export function createPlayer(container, gd, opts) {
     ph.style.transform = `translateX(${x}px)`;
     ph.style.top = `${fl.margin.t}px`;
     ph.style.bottom = `${fl.margin.b}px`;
+    // Paused state keeps the thumb glued to the actual position (playing is
+    // driven per-frame by loop(); never fight an in-progress drag)
+    if (!playing && !seekHeld) {
+      seek.value = String(Math.max(curTime(), OFFSET));
+    }
+    paintFill(seek);
   }
 
   gd.on('plotly_relayout', reposition);
@@ -337,5 +380,19 @@ export function createPlayer(container, gd, opts) {
     seekTo(Math.max(t, OFFSET));
   });
 
-  return { seekTo, play, pause, bar };
+  return {
+    seekTo,
+    play,
+    pause,
+    bar,
+    currentTime: () => curTime(),
+    /** Relative seek in seconds (wheel scrubbing), clamped to the audible
+     *  span like every other seek entry point; returns the applied time so
+     *  the caller can pan the view by the actually applied delta */
+    seekBy: (deltaSec) => {
+      const target = Math.max(Math.min(curTime() + deltaSec, limit()), OFFSET);
+      seekTo(target);
+      return target;
+    },
+  };
 }

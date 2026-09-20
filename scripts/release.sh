@@ -143,8 +143,8 @@ git push origin devel
 if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
   gh pr create --base master --head devel \
     --title "release v${NEW_VER}" \
-    --body "Version cut-off. After merging, the release workflow tags v${NEW_VER}, publishes the GitHub Release and syncs master back into devel."
+    --body "Version cut-off. Merge with **Create a merge commit** (NOT squash - squash breaks the devel lineage and re-creates doc conflicts). After merging, the release workflow tags v${NEW_VER}, publishes the GitHub Release and syncs master back into devel."
 else
   echo "open the PR manually: https://github.com/Fillianore/keyprism/compare/master...devel"
 fi
-echo "done: v${NEW_VER} - merge the PR on GitHub, automation finishes the rest"
+echo "done: v${NEW_VER} - merge the PR on GitHub (merge commit, not squash), automation finishes the rest"

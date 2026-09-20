@@ -5,15 +5,17 @@ import {
   applyPitchRange,
   applyGrid,
   setSub,
+  applyHoverLang,
   EPOCH_MS,
   iso,
+  pMs,
 } from './spectrogram.js';
 import { registerAdaptiveTicks, registerRangeClamp } from './ticks.js';
-import { createNavbar } from './navbar.js';
 import { createPlayer } from './player.js';
+import { t, onChange } from './i18n.js';
 
 /** Progress modal: setPhase text / setProgress(done,total) / setIndeterminate */
-function showProgressModal(title = '正在更新频谱') {
+function showProgressModal(title = t('updatingSpec')) {
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.innerHTML = `
@@ -99,14 +101,10 @@ function throttled(fn, ms = 120) {
 async function main() {
   const res = await fetch(`./data.json?t=${Date.now()}`);
   if (!res.ok)
-    throw new Error(
-      `data.json 加载失败 (${res.status}), 请先运行 backend.py`
-    );
+    throw new Error(t('dataLoadFailed', { status: res.status }));
   const data = await res.json();
   if (!data.specs || !data.noteLabels) {
-    throw new Error(
-      'data.json 结构过期: 请重新运行 backend.py 并强制刷新页面 (Ctrl+F5)'
-    );
+    throw new Error(t('dataStale'));
   }
 
   // Decode on demand: keep only the current channel's float matrix resident
@@ -120,7 +118,6 @@ async function main() {
   }
   let curSub = data.defaultSub || 1;
   let nCols = data.nCols;
-  let envelopes = data.envelopes;
   let curChan = 'mix';
   const decodeChannel = (ch) => {
     const bin = specRaw[ch];
@@ -179,7 +176,7 @@ async function main() {
   const { gd } = buildFigure(plotEl, data, xs, spec);
   registerAdaptiveTicks(gd);
   registerRangeClamp(gd, EPOCH_MS, EPOCH_MS + Math.round(data.durationSec * 1000));
-  createPlayer(app, gd, {
+  const player = createPlayer(app, gd, {
     // Query string as cache buster: after a track switch, a same-named
     // audio.wav is no longer read from the browser cache
     audioUrl: `./${data.audioFile}?t=${Date.now()}`,
@@ -187,20 +184,12 @@ async function main() {
     endSec: data.endSec,
     durMs: Math.round(data.durationSec * 1000),
   });
-  const nav = createNavbar(app, gd, {
-    minMs: EPOCH_MS,
-    maxMs: EPOCH_MS + Math.round(data.durationSec * 1000),
-    initAMs: EPOCH_MS,
-    initBMs: EPOCH_MS + Math.round(data.initViewSec * 1000),
-    envUrl: envelopes.mix,
-  });
 
   // ---- Top bar: channel switch (mix/left/right) ----
   const chanSel = document.getElementById('chanSelect');
   chanSel.addEventListener('change', () => {
     curChan = chanSel.value;
     Plotly.restyle(gd, { z: [decodeChannel(curChan)] }, [0]);
-    if (envelopes[curChan]) nav.setEnv(envelopes[curChan]);
   });
 
   // ---- Top bar: resolution switch (requires backend --serve mode) ----
@@ -224,7 +213,7 @@ async function main() {
   if (!data.apiBase) {
     rateSel.disabled = true;
     subSel.disabled = true;
-    resStatus.textContent = '(静态模式, 切换分辨率需后端 --serve)';
+    resStatus.textContent = t('staticMode');
   }
   const applyResolution = async () => {
     if (!data.apiBase) return;
@@ -235,19 +224,20 @@ async function main() {
     subSel.disabled = true;
     const modal = showProgressModal();
     try {
-      modal.setPhase(`后端计算中: ${rate} 列/s × ${s} 子带/半音 (STFT 重算, 约 2~5 秒)`);
+      modal.setPhase(
+        t('backendComputing', { rate, sub: s })
+      );
       const r = await fetch(
         `${data.apiBase}/api/spec?rate=${rate}&sub=${s}`
       );
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      modal.setPhase('接收频谱数据');
+      modal.setPhase(t('receivingSpec'));
       const j = await readJsonWithProgress(r, (done, total) =>
         modal.setProgress(done, total)
       );
       if (j.error) throw new Error(j.error);
       nCols = j.nCols;
-      envelopes = j.envelopes;
-      modal.setPhase('解码频谱矩阵');
+      modal.setPhase(t('decodingMatrix'));
       const raws = {};
       const names = Object.keys(j.specs);
       for (let i = 0; i < names.length; i++) {
@@ -260,16 +250,15 @@ async function main() {
       const firstSwitch = curSub !== j.sub;
       curSub = j.sub;
       data.defaultRate = j.rate;
-      if (firstSwitch) setSub(gd, curSub, data);
+      if (firstSwitch) setSub(gd, curSub, data, nCols);
       xs = makeXs();
       const mat = await decodeChannelAsync(curChan, (done, total) =>
         modal.setProgress(done, total)
       );
       Plotly.restyle(gd, { z: [mat], x: [xs] }, [0]);
-      nav.setEnv(envelopes[curChan]);
-      resStatus.textContent = `${j.rate} 列/s · ${j.sub} 子带`;
+      resStatus.textContent = t('resStatus', { rate: j.rate, sub: j.sub });
     } catch (e) {
-      resStatus.textContent = `失败: ${e.message}`;
+      resStatus.textContent = t('failed', { msg: e.message });
     } finally {
       modal.close();
       rateSel.disabled = false;
@@ -285,7 +274,7 @@ async function main() {
   const fileInput = document.getElementById('fileInput');
   pickBtn.addEventListener('click', () => {
     if (!data.apiBase) {
-      resStatus.textContent = '(选择音乐需后端 --serve 模式)';
+      resStatus.textContent = t('pickNeedsServe');
       return;
     }
     fileInput.click();
@@ -294,7 +283,7 @@ async function main() {
     const file = fileInput.files && fileInput.files[0];
     fileInput.value = ''; // allow picking the same file again
     if (!file) return;
-    const modal = showProgressModal('正在导入音乐');
+    const modal = showProgressModal(t('importingMusic'));
     pickBtn.disabled = true;
     const finish = (msg) => {
       modal.close();
@@ -313,17 +302,17 @@ async function main() {
     xhr.addEventListener('load', () => {
       const body = xhr.response;
       if (xhr.status === 200 && body && !body.error) {
-        modal.setPhase('分析完成, 正在刷新页面');
+        modal.setPhase(t('analyzeDone'));
         modal.setIndeterminate(true);
         setTimeout(() => location.reload(), 500);
         return;
       }
       const err = (body && body.error) || `HTTP ${xhr.status}`;
-      finish(`导入失败: ${err}`);
+      finish(t('importFailed', { msg: err }));
     });
-    xhr.addEventListener('error', () => finish('导入失败: 网络错误'));
-    xhr.addEventListener('abort', () => finish('导入已取消'));
-    modal.setPhase(`上传 ${file.name}`);
+    xhr.addEventListener('error', () => finish(t('importNetworkError')));
+    xhr.addEventListener('abort', () => finish(t('importCancelled')));
+    modal.setPhase(t('uploading', { name: file.name }));
     modal.setIndeterminate(false); // switch to real upload progress
     xhr.send(file);
   });
@@ -390,7 +379,7 @@ async function main() {
    *  Esc cancels */
   function makeEditable(span, apply) {
     span.classList.add('num');
-    span.title = '点击输入数值';
+    span.title = t('clickToEdit');
     span.addEventListener('click', () => {
       if (span.querySelector('input')) return;
       const cur = parseFloat(span.dataset.v);
@@ -503,13 +492,122 @@ async function main() {
   const sync = () => Plotly.Plots.resize(gd);
   new ResizeObserver(sync).observe(wrap);
   sync();
+
+  // ---- Live language switch: re-render persistent dynamic labels (static
+  // DOM is handled by applyStatic inside setLang; transient status/modal
+  // messages keep the language they were shown in) ----
+  onChange(() => {
+    if (!data.apiBase) resStatus.textContent = t('staticMode');
+    floorVal.title = t('clickToEdit');
+    gammaVal.title = t('clickToEdit');
+    applyHoverLang(gd);
+  });
+
+  // ---- Wheel over the spectrogram: plain wheel scrubs playback and pans
+  // the view along (wheel down = forward, up = backward); Ctrl+wheel zooms
+  // the time axis (Plotly's native scrollZoom is disabled, so zoom is
+  // implemented here) ----
+  const trackStart = EPOCH_MS;
+  const trackEnd = EPOCH_MS + Math.round(data.durationSec * 1000);
+  const MIN_SPAN_MS = 1000;
+  const SEC_PER_NOTCH = 2; // scrub speed for a standard deltaY=100 notch
+
+  /** Time under the cursor (for cursor-anchored zoom), or null if the
+   *  geometry is not (yet) available */
+  const cursorMs = (e) => {
+    try {
+      const fl = gd._fullLayout;
+      const rect = gd.getBoundingClientRect();
+      const [d0, d1] = fl.xaxis.domain;
+      const plotW = gd.clientWidth - fl.margin.l - fl.margin.r;
+      const f =
+        ((e.clientX - rect.left - fl.margin.l) / plotW - d0) / (d1 - d0);
+      const [ra, rb] = [pMs(fl.xaxis.range[0]), pMs(fl.xaxis.range[1])];
+      return ra + f * (rb - ra);
+    } catch {
+      return null;
+    }
+  };
+
+  /** Multiply the visible time span by `factor`, keeping `anchorMs`
+   *  stationary; clamped to the track bounds (registerRangeClamp double-
+   *  guards the relayout anyway) */
+  const zoomX = (factor, anchorMs) => {
+    const r = gd._fullLayout.xaxis.range;
+    const a = pMs(r[0]);
+    const b = pMs(r[1]);
+    const span = b - a;
+    const newSpan = Math.min(
+      Math.max(Math.round(span * factor), MIN_SPAN_MS),
+      trackEnd - trackStart
+    );
+    const f =
+      anchorMs === null || span <= 0
+        ? 0.5
+        : Math.min(Math.max((anchorMs - a) / span, 0), 1);
+    let na = a + f * (span - newSpan);
+    let nb = na + newSpan;
+    if (na < trackStart) {
+      na = trackStart;
+      nb = na + newSpan;
+    }
+    if (nb > trackEnd) {
+      nb = trackEnd;
+      na = nb - newSpan;
+    }
+    Plotly.relayout(gd, { 'xaxis.range': [iso(na), iso(nb)] });
+  };
+
+  /** Shift the visible time window by deltaMs, keeping its span and
+   *  clamping to the track bounds */
+  const panView = (deltaMs) => {
+    const r = gd._fullLayout.xaxis.range;
+    const a = pMs(r[0]);
+    const b = pMs(r[1]);
+    const span = b - a;
+    let na = a + deltaMs;
+    let nb = b + deltaMs;
+    if (na < trackStart) {
+      na = trackStart;
+      nb = na + span;
+    }
+    if (nb > trackEnd) {
+      nb = trackEnd;
+      na = nb - span;
+    }
+    Plotly.relayout(gd, { 'xaxis.range': [iso(na), iso(nb)] });
+  };
+
+  plotEl.addEventListener(
+    'wheel',
+    (e) => {
+      e.preventDefault(); // also blocks the browser's Ctrl+wheel page zoom
+      if (e.ctrlKey) {
+        zoomX(Math.exp((e.deltaY / 100) * 0.5), cursorMs(e));
+      } else {
+        const sec = Math.max(
+          -5 * SEC_PER_NOTCH,
+          Math.min(5 * SEC_PER_NOTCH, (e.deltaY / 100) * SEC_PER_NOTCH)
+        );
+        if (sec) {
+          // Scrub the playhead and shift the spectrogram view by the same
+          // applied delta, so the whole timeline scrolls with the wheel
+          const before = player.currentTime();
+          const after = player.seekBy(sec);
+          const deltaMs = Math.round((after - before) * 1000);
+          if (deltaMs) panView(deltaMs);
+        }
+      }
+    },
+    { passive: false }
+  );
 }
 
 main().catch((err) => {
   document.body.insertAdjacentHTML(
     'afterbegin',
     `<div style="padding:20px;font-family:sans-serif;color:#b00">
-       加载失败: ${err.message}
+       ${t('loadFailed', { msg: err.message })}
      </div>`
   );
   console.error(err);

@@ -106,6 +106,11 @@ Ground rules:
   ruleset match check names **by exact string**. Renaming CI jobs orphans the
   old entries (PR stuck on "waiting for status" forever) — update the ruleset
   in the same change
+- Pitfall learned the hard way: the devel → master release PR must be merged
+  with **"Create a merge commit"**, never squash. A squash drops devel's
+  commit lineage from master, the merge base never advances and every
+  subsequent release PR re-conflicts on the same doc/CHANGELOG regions
+  (squash is fine for feature → devel PRs)
 
 ## Known Boundaries & Pitfalls (must read before changing)
 

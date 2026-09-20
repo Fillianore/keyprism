@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-09-20
+
+### Added
+
+- Bilingual UI (English / 中文) with an EN/中文 toggle in the top bar:
+  English is the default and the choice is remembered across sessions via
+  `localStorage` (live switch, no reload)
+- Hover tooltip now shows the hovered cell's note name, annotated with the
+  subband index when sub > 1 (e.g. `C4 (2/5)`, low → high frequency)
+- Seek and volume sliders fill the played/applied portion left of the thumb
+  in the theme's champagne gold
+
+### Changed
+
+- Wheel over the spectrogram now scrubs playback and pans the visible
+  window along with it (wheel down = forward, wheel up = backward);
+  horizontal time-axis zoom requires holding Ctrl while scrolling
+- Player seek bar no longer sits mid-track on first load: the thumb now
+  starts (and stays, while paused) at the actual playback position
+
+### Removed
+
+- Bottom overview navigation bar (redundant with plot pan/zoom and the
+  player seek bar)
+
+### Fixed
+
+- Resolution/subband switching crashed with "sub is not defined" before the
+  request was sent (i18n refactor renamed a template variable); the message
+  placeholder now receives the actual subband value
+- Keyboard strip pattern was rotated three semitones (row 0 is A0, not C):
+  C/F/G were drawn as black keys while C#/F#/G# looked white, and the C
+  axis ticks landed on D#-position keys. Pitch class is now derived from
+  the A0 base; white-key group separators sit under the black keys'
+  centers (E|F and B|C stay on the direct row boundary)
+- Black keys span their full semitone row (same width as white keys) while
+  keeping the real-piano 62% horizontal length
+- Hover placeholder (`%{text}`) now resolves: the per-cell label array must
+  match the heatmap's full z shape ([row][col]), not one label per row
+
 ## [0.3.1] - 2026-09-20
 
 ### Added
@@ -20,6 +60,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The release-finalize workflow now always syncs master back into devel;
   previously the "tag already exists" early exit skipped the sync entirely
+- The release-finalize workflow now sets a git identity on the runner
+  (annotated tag creation failed without one)
+- Release PRs must merge with a merge commit: squashing devel → master drops
+  devel's commit lineage and re-creates the same doc conflicts on every
+  release (now stated in the PR body and AGENTS.md)
 
 ## [0.3.0] - 2026-09-19
 
