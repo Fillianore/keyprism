@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   GitHub Release from the matching CHANGELOG section and syncs master back
   into devel, keeping "devel behind master" at zero
 
+### Fixed
+
+- The release-finalize workflow now always syncs master back into devel;
+  previously the "tag already exists" early exit skipped the sync entirely
+
 ## [0.3.0] - 2026-09-19
 
 ### Added
