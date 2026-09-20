@@ -7,12 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-20
+
 ### Added
 
 - Automated release finalization: a `release.yml` workflow (triggered by a
   push to master) tags `v<version>` from `pyproject.toml`, publishes the
   GitHub Release from the matching CHANGELOG section and syncs master back
   into devel, keeping "devel behind master" at zero
+
+### Fixed
+
+- The release-finalize workflow now always syncs master back into devel;
+  previously the "tag already exists" early exit skipped the sync entirely
 
 ## [0.3.0] - 2026-09-19
 

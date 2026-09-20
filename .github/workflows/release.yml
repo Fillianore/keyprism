@@ -1,10 +1,12 @@
 # Release finalization: runs after a release PR is merged into master.
 # release.sh only goes as far as opening the PR; this workflow finishes the
 # release mechanically so no post-merge step can be forgotten:
-#   1. tag master with the version from pyproject.toml (idempotent: skips if
-#      the tag already exists)
+#   1. tag master with the version from pyproject.toml (skipped when the
+#      tag already exists)
 #   2. create the GitHub Release from the matching CHANGELOG.md section
-#   3. sync master back into devel (keeps "devel behind master" at zero)
+#      (skipped together with the tag)
+#   3. sync master back into devel — ALWAYS, even when steps 1-2 were
+#      skipped, so "devel behind master" returns to zero after every push
 
 name: Release finalize
 
@@ -24,9 +26,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # full history + tags, needed for the existence check
+          fetch-depth: 0 # full history + tags for the existence checks
 
-      - name: Tag, publish and sync back (skips if already tagged)
+      - name: Tag and publish (skips when already tagged)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -35,7 +37,7 @@ jobs:
           echo "version from pyproject: $VER"
 
           if git rev-parse -q --verify "refs/tags/v$VER" >/dev/null; then
-            echo "v$VER is already tagged - nothing to do"
+            echo "v$VER is already tagged - skipping tag and publication"
             exit 0
           fi
 
@@ -55,17 +57,23 @@ jobs:
           gh release create "v$VER" --title "KeyPrism v$VER" \
             --notes-file /tmp/notes.md --latest
 
+      - name: Sync master back into devel (always)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
           echo "syncing master back into devel..."
           if gh api --method POST \
             "/repos/$GITHUB_REPOSITORY/merges" \
             -f base=devel -f head=master > /tmp/merge.json 2>/tmp/merge.err; then
-            echo "devel synced: $(grep -o '"sha":[^,]*' /tmp/merge.json | head -1)"
-          elif grep -q "Nothing to merge" /tmp/merge.err 2>/dev/null; then
+            SHA=$(grep -o '"sha": *"[^"]*"' /tmp/merge.json | head -1)
+            echo "devel synced: ${SHA:-already up to date}"
+          elif grep -qE "Nothing to merge|No commits between" /tmp/merge.err 2>/dev/null; then
             echo "master and devel already in sync"
           else
             echo "[error] master -> devel merge failed:" >&2
             cat /tmp/merge.err >&2
-            echo "if it is a conflict, resolve by merging master into devel" >&2
-            echo "locally and pushing the result." >&2
+            echo "if it is a conflict, merge master into devel locally," >&2
+            echo "resolve, and push the result to devel." >&2
             exit 1
           fi
