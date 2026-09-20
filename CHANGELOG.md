@@ -9,13 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Bilingual UI (English / 中文) with an EN/中文 toggle in the top bar:
+  English is the default and the choice is remembered across sessions via
+  `localStorage` (live switch, no reload)
 - Hover tooltip now shows the hovered cell's note name, annotated with the
   subband index when sub > 1 (e.g. `C4 (2/5)`, low → high frequency)
 - Seek and volume sliders fill the played/applied portion left of the thumb
   in the theme's champagne gold
 
+### Changed
+
+- Wheel over the spectrogram now scrubs playback and pans the visible
+  window along with it (wheel down = forward, wheel up = backward);
+  horizontal time-axis zoom requires holding Ctrl while scrolling
+- Player seek bar no longer sits mid-track on first load: the thumb now
+  starts (and stays, while paused) at the actual playback position
+
+### Removed
+
+- Bottom overview navigation bar (redundant with plot pan/zoom and the
+  player seek bar)
+
 ### Fixed
 
+- Resolution/subband switching crashed with "sub is not defined" before the
+  request was sent (i18n refactor renamed a template variable); the message
+  placeholder now receives the actual subband value
 - Keyboard strip pattern was rotated three semitones (row 0 is A0, not C):
   C/F/G were drawn as black keys while C#/F#/G# looked white, and the C
   axis ticks landed on D#-position keys. Pitch class is now derived from

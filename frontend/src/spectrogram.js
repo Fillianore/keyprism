@@ -1,4 +1,5 @@
 import Plotly from 'plotly.js-dist-min';
+import { t } from './i18n.js';
 
 export const EPOCH_MS = Date.UTC(2020, 0, 1);
 export const N_ROWS = 88;
@@ -179,6 +180,11 @@ export function setSub(gd, s, data, nCols) {
   Plotly.relayout(gd, { yaxis: yaxisConfig(data) });
 }
 
+/** Re-apply the hover template after a language switch */
+export function applyHoverLang(gd) {
+  Plotly.restyle(gd, { hovertemplate: [t('hoverTemplate')] }, [0]);
+}
+
 function gridShapes() {
   if (!gridState) return [];
   const { bpm, offsetMs, beats, minMs, maxMs } = gridState;
@@ -267,8 +273,7 @@ export function buildFigure(el, data, xs, spec) {
       zmax: 0,
       showscale: false,
       text: rowNotes(data, sub, xs.length),
-      hovertemplate:
-        '时间 %{x|%M:%S.%L}<br>音 %{text}<br>强度 %{z:.1f} dB<extra></extra>',
+      hovertemplate: t('hoverTemplate'),
       zsmooth: false,
     },
   ];
@@ -297,7 +302,9 @@ export function buildFigure(el, data, xs, spec) {
 
   Plotly.newPlot(el, traces, layout, {
     responsive: true,
-    scrollZoom: true, // wheel zoom (the y axis is locked by fixedrange, so only x applies)
+    // Wheel zoom is handled manually in main.js: plain wheel scrubs
+    // playback, Ctrl+wheel zooms the time axis (y is locked by fixedrange)
+    scrollZoom: false,
   });
   return { gd: el };
 }

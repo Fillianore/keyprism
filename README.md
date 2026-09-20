@@ -92,7 +92,7 @@ keyprism/
         ├── main.js        # entry: data loading and control wiring
         ├── spectrogram.js # heatmap + keyboard + measure grid + layout
         ├── ticks.js       # adaptive ticks + time-range clamping
-        ├── navbar.js      # bottom navigation bar
+        ├── i18n.js        # EN/中文 UI translations + language persistence
         ├── player.js      # Web Audio playback engine
         └── style.css
 ```

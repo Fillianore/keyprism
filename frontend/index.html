@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -11,29 +11,29 @@
       <header class="topbar">
         <div class="row">
           <div class="brand"><img class="dot" src="/favicon.png" alt="" /> KeyPrism</div>
-          <button class="pick-btn" id="pickBtn" type="button"
-                  title="选择本地音乐文件, 上传到后端解析">♪ 选择音乐</button>
+          <button class="pick-btn" id="pickBtn" type="button" data-i18n="pickMusic"
+                  data-i18n-title="pickMusicTitle" title="Pick a local music file and upload it for analysis">♪ Select Music</button>
           <input type="file" id="fileInput" hidden
                  accept=".mp3,.wav,.flac,.ogg,.oga,.m4a,.aac,.wma,.opus,.aiff,.aif,.aifc,.alac,.ape,.mp4,.webm,.mkv,audio/*" />
           <div class="file" id="fileBadge" title=""></div>
           <label class="ctrl">
-            分辨率
+            <span data-i18n="resolution">Resolution</span>
             <select id="rateSelect"></select>
-            <span>列/s</span>
+            <span data-i18n="colsPerSec">cols/s</span>
             <select id="subSelect"></select>
-            <span>子带/半音</span>
+            <span data-i18n="subPerSemitone">sub/semitone</span>
           </label>
           <span class="ctrl" id="resStatus"></span>
           <label class="ctrl">
-            通道
+            <span data-i18n="channel">Channel</span>
             <select id="chanSelect">
-              <option value="mix" selected>混合</option>
-              <option value="left">左</option>
-              <option value="right">右</option>
+              <option value="mix" selected data-i18n="chanMix">Mix</option>
+              <option value="left" data-i18n="chanLeft">Left</option>
+              <option value="right" data-i18n="chanRight">Right</option>
             </select>
           </label>
           <label class="ctrl">
-            音域
+            <span data-i18n="pitchRange">Range</span>
             <select id="loSelect"></select>
             <span>–</span>
             <select id="hiSelect"></select>
@@ -41,15 +41,15 @@
           <label class="ctrl">
             BPM
             <input type="number" id="bpmInput" class="num-static" min="30" max="300" step="0.1" />
-            <button class="reset" id="bpmReset" title="还原检测值" type="button">↺</button>
+            <button class="reset" id="bpmReset" data-i18n-title="bpmResetTitle" title="Reset to detected value" type="button">↺</button>
           </label>
           <label class="ctrl">
-            偏移ms
+            <span data-i18n="offsetMs">Offset ms</span>
             <input type="number" id="offsetInput" class="num-static" step="1" />
-            <button class="reset" id="offsetReset" title="还原检测值" type="button">↺</button>
+            <button class="reset" id="offsetReset" data-i18n-title="bpmResetTitle" title="Reset to detected value" type="button">↺</button>
           </label>
           <label class="ctrl">
-            拍/小节
+            <span data-i18n="beatsPerBar">Beats/bar</span>
             <select id="beatsSel">
               <option value="2">2</option>
               <option value="3">3</option>
@@ -60,27 +60,35 @@
         </div>
         <div class="row">
           <label class="ctrl">
-            配色
+            <span data-i18n="cmap">Palette</span>
             <select id="cmapSelect"></select>
           </label>
           <label class="ctrl">
-            色彩下限
+            <span data-i18n="colorFloor">Color floor</span>
             <input type="range" id="floorSlider" />
             <span class="floor-val" id="floorVal"></span>
-            <button class="reset" id="floorReset" title="还原默认" type="button">↺</button>
+            <button class="reset" id="floorReset" data-i18n-title="resetDefault" title="Reset to default" type="button">↺</button>
           </label>
           <label class="ctrl">
-            高光 γ
+            <span data-i18n="highlightGamma">Highlight γ</span>
             <input type="range" id="gammaSlider" />
             <span class="floor-val" id="gammaVal"></span>
-            <button class="reset" id="gammaReset" title="还原默认" type="button">↺</button>
+            <button class="reset" id="gammaReset" data-i18n-title="resetDefault" title="Reset to default" type="button">↺</button>
           </label>
+          <div class="lang-toggle" id="langToggle" role="group" data-i18n-aria="langToggleTitle" aria-label="Switch language">
+            <button type="button" data-lang="en">EN</button>
+            <button type="button" data-lang="zh">中文</button>
+          </div>
         </div>
       </header>
       <div id="plot-wrap">
         <div id="plot"></div>
       </div>
     </div>
+    <script type="module">
+      import { applyStatic } from './src/i18n.js';
+      applyStatic();
+    </script>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>
