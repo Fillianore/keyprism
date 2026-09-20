@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-09-20
+
 ### Added
 
 - Bilingual UI (English / 中文) with an EN/中文 toggle in the top bar:
