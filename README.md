@@ -18,6 +18,12 @@ suite of interactive analysis tools.
 audio → STFT → semitone aggregation → interactive heatmap + player
 ```
 
+<div align="center">
+
+<img src="assets/preview.png" alt="KeyPrism frontend preview" width="880"/>
+
+</div>
+
 ## Feature Overview
 
 ### Spectral Analysis
