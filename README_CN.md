@@ -1,6 +1,8 @@
-# KeyPrism
-
 <div align="center">
+
+<img src="assets/logo.png" alt="KeyPrism logo" width="220"/>
+
+# KeyPrism
 
 [English](README.md) | **简体中文**
 
