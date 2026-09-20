@@ -75,7 +75,7 @@ keyprism/
         ├── main.js         # 入口: 数据加载与控件装配
         ├── spectrogram.js  # 热图 + 键盘 + 小节网格 + 布局
         ├── ticks.js        # 刻度自适应 + 时间范围钳制
-        ├── navbar.js       # 底部导航条
+        ├── i18n.js         # EN/中文 界面文案与语言记忆
         ├── player.js       # Web Audio 播放引擎
         └── style.css
 ```
