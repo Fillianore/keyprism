@@ -39,6 +39,14 @@ audio → STFT → semitone aggregation → interactive heatmap + player
 - **BPM detection**: spectral-flux autocorrelation estimates BPM and first-beat
   offset, with a measure grid overlay (BPM / offset / time signature can be
   corrected manually)
+- **Monophonic transcription (bass / lead)**: preset-driven note detection
+  (harmonic salience with subharmonic suppression, band-limited onsets,
+  Viterbi single-pitch decoding) rendered as colored note rectangles over
+  the heatmap with an Off/Bass/Lead/Both selector; results cached per track
+  and served on demand (`/api/notes`, serve mode required)
+- **MIDI export**: one click downloads the transcribed tracks as a Standard
+  MIDI File (type 0 single track / type 1 for both, detected BPM tempo map,
+  velocity scaled by note confidence)
 - **Online track picking**: the "Select music" button in the top bar picks a
   local audio file, uploads it to the backend for analysis and switches the
   whole page (serve mode required)

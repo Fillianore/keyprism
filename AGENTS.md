@@ -10,9 +10,17 @@
 
 ```
 src/keyprism/cli.py       CLI entry (thin shell, only argparse and dispatch)
-src/keyprism/server.py    HTTP service: ping / spec / upload   ← the only module coupled to stdlib httpd
+src/keyprism/server.py    HTTP service: ping / spec / notes / midi / upload
+                          ← the only module coupled to stdlib httpd
 src/keyprism/analyze.py   staged analysis orchestrator (decode→stft→aggregate→payload)
                           + content-addressed analysis disk cache
+src/keyprism/transcribe.py notes orchestration: cached STFT → salience → onsets
+                          → decode, per-track notes disk cache (+ MIDI export glue)
+src/keyprism/tracks.py    monophonic preset registry (bass / lead) — pure data
+src/keyprism/salience.py  loudness weighting + harmonic salience   ← zero IO
+src/keyprism/onset.py     band-limited adaptive onset detection    ← zero IO
+src/keyprism/decode.py    Viterbi single-pitch decoder + NoteEvent ← zero IO
+src/keyprism/midi_io.py   note events → Standard MIDI File bytes   ← zero IO
 src/keyprism/payload.py   frontend contract: single source of truth for data.json fields (incl. matplotlib envelope rendering)
 src/keyprism/audio_io.py  decode chain (sndfile→PyAV fallback) + path constants (PUBLIC_DIR / KEYPRISM_HOME)
 src/keyprism/transform.py complex STFT/ISTFT + dB magnitude + peak refine  ← zero IO, numpy arrays in and out
@@ -25,8 +33,9 @@ src/keyprism/dsp.py       pure algorithms: semitone aggregation / downsampling /
 > `python -m keyprism`,
 > never write `from src.keyprism import ...`.
 
-Dependencies flow one way: `cli → server → analyze → payload → dsp /
-transform / audio_io`. Reverse imports and circular dependencies are
+Dependencies flow one way: `cli → server → {analyze, transcribe} → payload →
+dsp / transform / audio_io` and `transcribe → {tracks, salience, onset,
+decode, midi_io, analyze}`. Reverse imports and circular dependencies are
 forbidden.
 
 **Layering iron rules**:
@@ -156,6 +165,50 @@ under `$KEYPRISM_HOME/cache/analysis/<pcm16>/<params16>/`:
   `win.sum()`, hop = `win - win*3//4`); `tests/test_transform.py` locks
   this against a naive reference STFT written in the test file. Do not
   "optimize" the framing math without re-locking those tests.
+
+## Monophonic Transcription: Presets & Extension Rules (Phase 1+)
+
+`tracks.py` is the single registry driving the whole transcription
+pipeline (`salience` / `onset` / `decode` / `transcribe` / `midi_io` are
+parameterized exclusively by a `TrackPreset`). **Adding an instrument MUST
+require only a new registry entry** — if you catch yourself writing an
+`if track == ...` branch inside an algorithm module, extend the preset
+schema instead. Frontend exception: `frontend/src/notes.js` mirrors preset
+colors (`TRACK_COLORS`) because the frontend never reads Python data —
+keep the two in sync when a color changes.
+
+- **Cache invalidation**: per-track results live at
+  `<analysis entry>/notes/<MONO_VERSION>/notes_<track>.json`. Bump
+  `MONO_VERSION` in `tracks.py` whenever preset values, salience / onset /
+  decode numerics or the note JSON schema change in a way that must
+  invalidate previously cached files — stale results are then never
+  served and recompute automatically. Do not "just delete the cache"
+  instead; other installs have no you to do it.
+- **Chunk discipline**: the full complex STFT is never in RAM (Phase 0
+  rule). `transcribe` streams `stft.npy` row chunks (≤512 frames) through
+  `np.load(..., mmap_mode="r")` views via `analyze.load_entry`, carrying
+  only the previous chunk's last magnitude row into the onset flux. The
+  intermediate float32 salience matrix (`n_frames × n_pitches`) is fine —
+  it is not the complex STFT and is orders of magnitude smaller.
+- **Determinism contract**: salience is a pure per-frame-slice function
+  (chunk boundaries cannot change any value — locked by a chunk-invariance
+  test); the two-pass global min-max normalization uses exact min/max
+  (commutative) and element-wise arithmetic, so results are
+  chunk-order-independent; Viterbi ties resolve to the lowest state index.
+  Two cold runs must produce byte-identical notes JSON (locked by test).
+- **Frame-rate invariance**: Viterbi transition weights are per-second
+  rates multiplied by the physical frame spacing `hop_sec` — do not
+  "simplify" them back to per-frame constants or behavior drifts when
+  sr/win changes.
+- **On-demand contract**: `data.json` keeps `"notes": null` (owned by
+  `payload.py`, unchanged); note data is served only through
+  `/api/notes` and `/api/midi`, so the heavy payload and its contract
+  test stay untouched.
+- **Loudness curve**: full A-weighting spans ~18 dB over a preset's four
+  octaves, which one global linear salience normalization plus a fixed
+  REST emission cannot cover — `salience.py` compresses the dB response
+  to 1/4 (documented there). Revisit only together with the REST balance,
+  not as a lone tweak.
 
 ## Known Boundaries & Pitfalls (must read before changing)
 

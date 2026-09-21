@@ -11,6 +11,8 @@
 |------|------|------|
 | GET | `/api/ping` | health check, returns `{"ok": true}` |
 | GET | `/api/spec?rate=15&sub=5` | recompute the spectrum at the given resolution (three channels + envelopes), cached |
+| GET | `/api/notes?track=bass\|lead\|both` | monophonic transcription notes of the current track, cached per track under the analysis entry |
+| GET | `/api/midi?track=bass\|lead\|both` | the same notes exported as a Standard MIDI File (attachment download) |
 | POST | `/api/upload?name=song.mp3` | upload a local audio file (request body is raw file bytes); the backend analyzes it, switches the current track and refreshes `data.json`; returns the full payload |
 | OPTIONS | any endpoint | CORS preflight, returns 204 |
 
@@ -32,6 +34,58 @@ curl -X POST --data-binary @song.m4a \
 - Success: `200` + the full payload (identical to the `data.json` contents)
 - Failure: `500` + `{"error": "..."}`; the staged file is cleaned up
   automatically
+
+## Notes & MIDI Endpoints (Phase 1)
+
+Both endpoints run the monophonic transcription (bass / lead presets,
+`src/keyprism/tracks.py`) on demand against the cached complex STFT of the
+currently loaded track — `data.json` deliberately keeps `"notes": null`
+(the heavy payload contract is untouched; notes are never inlined into
+it).
+
+### GET /api/notes?track=bass|lead|both
+
+Response `200` (only the requested tracks appear in `notes`):
+
+```jsonc
+{
+  "track": "bass",
+  "notes": {
+    "bass": [
+      // times in seconds from segment start; conf in [0, 1]
+      {"pitch": 45, "start": 0.5573, "end": 0.9752, "conf": 0.8044}
+    ]
+  }
+}
+```
+
+`track=both` returns `{"track": "both", "notes": {"bass": [...],
+"lead": [...]}}`.
+
+- First call computes the full pipeline (salience → onsets → Viterbi
+  decode) and caches the JSON at
+  `<analysis entry>/notes/<MONO_VERSION>/notes_<track>.json`; subsequent
+  calls serve the cached bytes verbatim (warm path is a file read).
+  `MONO_VERSION` lives in `tracks.py`; bumping it invalidates old note
+  caches automatically. Evicted STFT entries are transparently recomputed
+  through the analysis cache.
+
+### GET /api/midi?track=bass|lead|both
+
+Response `200`: `audio/midi` attachment `keyprism_<slug>_<track>.mid`
+(slug from the display file name). Single requested track → SMF type 0;
+`both` → type 1 (tempo-only conductor track + one named note track per
+preset). 480 ticks/quarter, tempo from the detected BPM (fallback 120),
+note times shifted by the detected first-beat offset, velocity =
+64 + round(63 × conf).
+
+### Error Codes (notes/midi)
+
+| Code | Scenario |
+|----|------|
+| 400 | unknown `track` value (anything but `bass` / `lead` / `both`) |
+| 409 | no track loaded (cannot happen in normal serve mode) |
+| 500 | transcription failed (unreadable analysis artifact etc.) |
 
 ## Error Codes
 

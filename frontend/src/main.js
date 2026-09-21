@@ -13,6 +13,8 @@ import {
 import { registerAdaptiveTicks, registerRangeClamp } from './ticks.js';
 import { createPlayer } from './player.js';
 import { createSpecFeed } from './specfeed.js';
+import { initNotes } from './notes.js';
+import { throttled } from './util.js';
 import { t, onChange } from './i18n.js';
 
 /** Progress modal: setPhase text / setProgress(done,total) / setIndeterminate */
@@ -76,29 +78,6 @@ async function readJsonWithProgress(resp, onProgress) {
   return JSON.parse(new TextDecoder().decode(buf));
 }
 
-/** Leading+trailing throttle: high-resolution heatmap recoloring is costly,
- *  so lower the restyle rate while a slider is being dragged */
-function throttled(fn, ms = 120) {
-  let last = 0;
-  let timer = null;
-  let pending = null;
-  const run = () => {
-    last = Date.now();
-    timer = null;
-    fn(...pending);
-  };
-  return (...args) => {
-    pending = args;
-    const wait = ms - (Date.now() - last);
-    if (wait <= 0) {
-      if (timer) clearTimeout(timer);
-      run();
-    } else if (!timer) {
-      timer = setTimeout(run, wait);
-    }
-  };
-}
-
 async function main() {
   const res = await fetch(`./data.json?t=${Date.now()}`);
   if (!res.ok)
@@ -153,6 +132,14 @@ async function main() {
     offsetSec: data.offsetSec,
     endSec: data.endSec,
     durMs: Math.round(data.durationSec * 1000),
+  });
+
+  // ---- Top bar: monophonic note overlay (bass / lead, Phase 1) ----
+  initNotes({
+    gd,
+    data,
+    apiBase: data.apiBase,
+    getSub: () => curSub,
   });
 
   // ---- Top bar: channel switch (mix/left/right) ----
