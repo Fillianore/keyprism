@@ -15,6 +15,7 @@ import { createPlayer } from './player.js';
 import { createSpecFeed } from './specfeed.js';
 import { initNotes } from './notes.js';
 import { initStems } from './stems.js';
+import { initLanes } from './lanes.js';
 import { throttled } from './util.js';
 import { t, onChange } from './i18n.js';
 
@@ -146,6 +147,16 @@ async function main() {
   // ---- Stem player (classic source separation, Phase 2): shares the
   // player's AudioContext and transport clock ----
   initStems({
+    data,
+    player,
+    apiBase: data.apiBase,
+  });
+
+  // ---- Multi-lane DL workspace (Demucs stems + polyphonic notes,
+  // Phase 3): same shared AudioContext; canvas rendering synced to the
+  // main chart's xaxis range ----
+  initLanes({
+    gd,
     data,
     player,
     apiBase: data.apiBase,

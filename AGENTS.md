@@ -19,6 +19,10 @@ src/keyprism/transcribe.py notes orchestration: cached STFT → salience → ons
 src/keyprism/stems.py     stem orchestration: cached STFT → HPSS/RPCA masks →
                           masked complex STFT → streaming ISTFT, per-entry stem
                           disk cache (Phase 2)
+src/keyprism/dlsep.py     Demucs ONNX chunked separation + DL stem disk cache
+                          (optional [dl] extra, guarded imports) (Phase 3)
+src/keyprism/poly_transcribe.py  Basic Pitch polyphonic notes + fragment
+                          merging, per-stem notes cache (optional [dl]) (Phase 3)
 src/keyprism/hpss.py      median-filter HPSS Wiener masks          ← zero IO
 src/keyprism/rpca.py      chunked inexact-ALM (ADMM) RPCA          ← zero IO
 src/keyprism/tracks.py    monophonic preset registry (bass / lead) — pure data
@@ -38,10 +42,12 @@ src/keyprism/dsp.py       pure algorithms: semitone aggregation / downsampling /
 > `python -m keyprism`,
 > never write `from src.keyprism import ...`.
 
-Dependencies flow one way: `cli → server → {analyze, transcribe, stems} →
-payload → dsp / transform / audio_io` and `transcribe → {tracks, salience,
-onset, decode, midi_io, analyze}`, `stems → {hpss, rpca, transform,
-analyze}`. Reverse imports and circular dependencies are forbidden.
+Dependencies flow one way: `cli → server → {analyze, transcribe, stems,
+dlsep, poly_transcribe} → payload → dsp / transform / audio_io` and
+`transcribe → {tracks, salience, onset, decode, midi_io, analyze}`,
+`stems → {hpss, rpca, transform, analyze}`, `poly_transcribe → dlsep`,
+`dlsep → analyze/audio_io`. Reverse imports and circular dependencies are
+forbidden.
 
 **Layering iron rules**:
 - `dsp.py` and `transform.py` never do IO (no file reads, no print, no
@@ -271,14 +277,69 @@ regressions:
   must be issued in parallel (ThreadingHTTPServer handles it).
 - **Frontend sync contract** (`frontend/src/stems.js` + `player.js`):
   everything plays through the player's ONE shared AudioContext, and the
-  transport emits `('play', {offset, when})` with a single absolute
-  timestamp `when = ctx.currentTime + START_LEAD`; every
-  AudioBufferSourceNode — mix and stems — calls `source.start(when,
-  offset)` with that same `when`. Never serialize starts, never use
-  setTimeout for scheduling. If you change `START_LEAD` in one file,
-  change it in both. Mute/solo/volume only ramp GainNodes
-  (`setTargetAtTime`), which is click-free; stopping sources is allowed
-  to be abrupt (matches the mix transport).
+   transport emits `('play', {offset, when})` with a single absolute
+   timestamp `when = ctx.currentTime + START_LEAD`; every
+   AudioBufferSourceNode — mix and stems — calls `source.start(when,
+   offset)` with that same `when`. Never serialize starts, never use
+   setTimeout for scheduling. If you change `START_LEAD` in one file,
+   change it in both. Mute/solo/volume only ramp GainNodes
+   (`setTargetAtTime`), which is click-free; stopping sources is allowed
+   to be abrupt (matches the mix transport).
+
+## DL Separation & Multi-Track Workspace (Phase 3+)
+
+`dlsep.py` (Demucs ONNX) and `poly_transcribe.py` (Basic Pitch) are
+STRICTLY OPTIONAL `[dl]` features: both heavy imports are try/except
+guarded, availability is exposed as module-level flags
+(`dlsep.ORT_AVAILABLE`, `poly_transcribe.BP_AVAILABLE`), and `server.py`
+maps them to module flags `DL_AVAILABLE`/`POLY_AVAILABLE` that DL
+endpoints check before anything else — a missing extra answers **501
+Not Implemented**, never a 500 or a crash. The tests stub the models
+(`infer=` injection in `dlsep`, `predict_fn=` in `poly_transcribe`) so
+`uv run pytest -q` is green in BOTH environments; keep it that way.
+
+Decisions that are easy to "simplify" into regressions:
+
+- **Hann OLA blending is exact, not decorative.** Chunks of exactly
+  `chunk_sec` (final one pulled back to the track end, prior chunk kept
+  so every seam keeps the nominal overlap) are blended with the PERIODIC
+  Hann at sample centers (`0.5 - 0.5*cos(2π(i+0.5)/L)`,
+  `dlsep.hann_cola`): strictly positive (single-coverage regions at the
+  track head/tail divide out to exactly the covering chunk — a zero-
+  endpoint window would produce 0/0 at sample 0) and 50%-overlap COLA
+  (`w[i] + w[i+L/2] == 1`). Output is `Σ w·y_k / Σ w` — a convex
+  combination, so `out = c1*fade_out + c2*fade_in` with
+  `fade_out + fade_in == 1` at every sample. `plan_chunks` /
+  `ola_separate` are pure and locked by reconstruction tests.
+- **The ONNX session is a singleton** (`_SESSIONS` keyed by path+mtime,
+  lock-guarded). Re-creating `InferenceSession` per request spikes RAM
+  and leaks; don't "make it fresh".
+- **DL jobs run on a single-worker ThreadPoolExecutor** (one heavy
+  inference at a time = the RAM ceiling) and report progress into the
+  in-memory task registry polled via `/api/task/{id}` — long runs never
+  hold an HTTP request open. Finished tasks prune to the newest 32.
+- **DL stem cache invalidation** mirrors Phase 2: files under
+  `<entry>/stems/<DL_STEMS_VERSION>/<method>/` (+ `status.json`,
+  atomic tmp-swap) and `<entry>/notes/<POLY_VERSION>/notes_poly_<stem>.json`;
+  bump `DL_STEMS_VERSION` / `POLY_VERSION` when the numerics or JSON
+  schema change in a way that must invalidate (never "just delete the
+  cache"). Demucs stems are mono PCM16 at 44.1 kHz regardless of the
+  entry's rate — the frontend schedules by seconds, so mixed rates stay
+  sample-locked.
+- **Note merging is not optional.** Frame predictors shred sustained
+  notes into ~50 ms fragments; `merge_fragmented_notes` (same pitch,
+  gap < 50 ms → extend end, fold conf) runs on EVERY compute path in
+  `transcribe_polyphonic`. Bypassing it floods MIDI and the canvas.
+- **Frontend notes are canvas, never `layout.shapes`.** Six polyphonic
+  lanes mean tens of thousands of rects — SVG dies. `lanes.js` keeps a
+  per-lane notes overlay `<canvas>`, redraws from the applied plotly
+  `xaxis.range` on `plotly_relayout`, and renders only the visible
+  window via the spatial index (sorted starts + binary search bounded by
+  the longest note). The frontend source contract is asserted by
+  `tests/test_dl_workspace.py` — do not reintroduce shapes for notes.
+- **Capabilities drive the UI.** `/api/ping` returns
+  `capabilities.dl/poly/dl_methods`; `lanes.js` hides/disables the Demucs
+  options from it. Keep the flag → UI path intact when touching ping.
 
 ## Known Boundaries & Pitfalls (must read before changing)
 

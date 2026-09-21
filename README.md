@@ -60,6 +60,24 @@ audio → STFT → semitone aggregation → interactive heatmap + player
   playback is sample-accurately synchronized; mute/solo switch via ramped
   gain nodes without clicks or pops; stems are downloadable as WAVs for
   external DAWs
+- **DL separation — Demucs (optional `[dl]` extra)**: with the optional
+  deep-learning dependencies installed (`uv sync --extra dl`), htdemucs
+  (4-stem) and htdemucs_6s (6-stem) run locally via ONNX Runtime: the
+  track is processed in 10 s chunks with 1 s overlap blended by a
+  strictly-positive Hann window normalized by the accumulated window sum
+  (seam-free cross-fades, exact edge reconstruction, memory bounded by
+  one chunk — the full track is never handed to the model). Stems are
+  cached like classic stems and downloadable as WAVs. Without the extra
+  every DL endpoint answers a clean `501` and the frontend hides the
+  options — the app keeps working on the Phase 2 pipeline
+- **Multi-lane workspace (optional)**: a stacked-lane panel (Mix +
+  vocals/drums/bass/piano/guitar/other) with per-lane waveform, volume,
+  Mute/Solo, all lanes sample-locked to the shared transport clock.
+  Polyphonic piano/guitar/other note overlays (Basic Pitch with
+  same-pitch fragment merging, 50 ms gap threshold) render on a
+  dedicated HTML canvas per lane — never SVG shapes — spatially indexed
+  (binary search over sorted starts) and re-synced to the main
+  spectrogram's zoom/pan on every relayout
 - **Online track picking**: the "Select music" button in the top bar picks a
   local audio file, uploads it to the backend for analysis and switches the
   whole page (serve mode required)
@@ -111,7 +129,9 @@ keyprism/
 │       ├── hpss.py        # median-filter HPSS masks (zero IO)
 │       ├── rpca.py        # chunked inexact-ALM RPCA (zero IO)
 │       ├── stems.py       # stem synthesis + per-entry stem cache
-│       └── server.py      # HTTP service: /api/ping /api/spec /api/notes /api/stems /api/upload
+│       ├── dlsep.py       # Demucs ONNX chunked separation + DL stem cache (optional [dl])
+│       ├── poly_transcribe.py  # Basic Pitch polyphonic notes + fragment merging (optional [dl])
+│       └── server.py      # HTTP service: /api/ping /api/spec /api/notes /api/stems /api/task /api/upload
 ├── pyproject.toml         # uv project definition (deps locked in uv.lock, TUNA index by default)
 ├── scripts/               # launch & release scripts (config & ports below)
 │   ├── start.sh           # one-command start, Linux / macOS
@@ -134,19 +154,24 @@ keyprism/
         ├── player.js      # Web Audio playback engine + transport events
         ├── notes.js       # note overlay (Phase 1 transcription)
         ├── stems.js       # stem player: Web Audio multi-track sync (Phase 2)
+        ├── lanes.js       # multi-lane DL workspace: canvas lanes + poly notes (Phase 3)
         └── style.css
 ```
 
 ## Testing
 
 `tests/` implements no product features; it is an automated regression suite.
-After changing code, run `uv run pytest -q`: 95 cases covering DSP algorithms
+After changing code, run `uv run pytest -q`: 110 cases covering DSP algorithms
 (including a deterministic 120 BPM click-track case), the decode-chain
 fallback (real m4a encoding), the payload contract (field-by-field assertions
 the frontend depends on), transcription (synthetic note recovery), source
 separation (HPSS/RPCA synthesis, ADMM convergence, chunked-vs-full
-equivalence, streaming ISTFT exactness), and all HTTP routes (upload
-switching / notes / stems / error codes / CORS preflight). It is the safety
+equivalence, streaming ISTFT exactness), the DL workspace (graceful
+degradation to 501, Demucs chunking/reconstruction math, note fragment
+merging, background-task plumbing, frontend canvas-sync source contract),
+and all HTTP routes (upload switching / notes / stems / error codes / CORS
+preflight). The DL cases stub the optional models, so the same suite runs
+green with AND without the `[dl]` extra installed. It is the safety
 net for refactoring and new features — keep it.
 
 CI (`.github/workflows/ci.yml`) runs the same flow automatically on every
@@ -181,6 +206,9 @@ supported):
 ├── cache/matplotlib/   # matplotlib font and config cache
 ├── cache/analysis/     # complex-STFT analysis cache (stft.npy + meta.json,
 │                       #   plus per-entry notes/ and stems/ results)
+├── models/demucs/      # optional Demucs ONNX weights (auto-downloaded by the
+│                       #   [dl] extra; KEYPRISM_DEMUCS4_FILE / KEYPRISM_DEMUCS6_FILE
+│                       #   point at explicit files, *_REPO at alternate HF repos)
 ├── uploads/            # staging for audio uploaded via "Select music" (only the latest few are kept)
 └── config.env          # optional persistent config: KEY=VALUE, lines starting with # are comments
 ```
@@ -204,6 +232,11 @@ never overrides already-exported environment variables):
   (creates the venv and locks dependencies automatically)
 - **Node.js 20.19+** (for the Vite 7 frontend; `npm run dev` will not start on
   lower versions)
+- Optional DL separation/transcription (Phase 3): `uv sync --extra dl`
+  installs `onnxruntime` + `basic-pitch` + `huggingface-hub`; Demucs weights
+  are downloaded automatically on first use into `~/.keyprism/models/demucs/`
+  (or drop any compatible htdemucs ONNX export there). Everything works
+  without it — the DL features simply answer 501 and stay hidden in the UI
 
 ## Quick Start
 
@@ -270,12 +303,16 @@ uv run python -m keyprism [audio] [--serve PORT] [--rate R] [--sub S]
 
 | Endpoint | Description |
 |------|------|
-| `GET /api/ping` | health check |
+| `GET /api/ping` | health check + DL capability flags (`capabilities.dl` / `capabilities.poly`) |
 | `GET /api/spec?rate=15&sub=5` | recompute the spectrum at the given resolution (three channels + envelopes), cached |
 | `GET /api/notes?track=bass\|lead\|both` | monophonic transcription notes, cached per track |
+| `GET /api/notes?track=piano\|guitar\|other&method=poly[&source=demucs_6]` | polyphonic notes of a DL stem (Basic Pitch, merged fragments; 501 without the `[dl]` extra) |
 | `GET /api/midi?track=bass\|lead\|both` | the same notes as a Standard MIDI File download |
 | `GET /api/stems?method=hpss\|rpca\|combined` | separated stems of the current track (`&progress=1` polls a running computation) |
-| `GET /api/stem?method=..&name=..` | one stem as a WAV attachment download |
+| `GET /api/stems?method=demucs_4\|demucs_6` | serve computed DL stems from the entry cache (404 until computed) |
+| `POST /api/stems?method=demucs_4\|demucs_6` | start DL separation as a background task; returns `{"task_id", "status_url"}` (501 without the `[dl]` extra; cached results short-circuit) |
+| `GET /api/task/{task_id}` | background-task poll: `{"status": "running"\|"done"\|"error", "progress": 0..1, "stems": [...]}` |
+| `GET /api/stem?method=..&name=..` | one stem as a WAV attachment download (classic and DL methods) |
 | `POST /api/upload?name=song.mp3` | upload a local audio file (request body is raw file bytes); the backend analyzes it, switches the current track and refreshes `data.json`; returns the full payload |
 
 For the full reference (error codes / response structure / preflight) see
@@ -295,6 +332,8 @@ covering mainstream audio formats.
 | Click the spectrogram | seek playback (no autoplay) |
 | Stems → On | computes/serves the separated stems and opens the stem panel below the plot (serve mode required); the mix is muted automatically and hands back on Off |
 | Stem panel | per-stem volume slider, M (mute), S (solo); method switch (combined / HPSS / RPCA); download via `/api/stem` links |
+| Lanes → On | DL workspace: starts the Demucs separation for the selected variant (background task with live progress) and opens the stacked-lane panel (serve mode + `[dl]` extra required); the mix is muted automatically and hands back on Off |
+| Lane panel | per-lane waveform, volume slider, M (mute), S (solo); PX toggles the polyphonic note overlay (piano/guitar/other); lanes zoom/pan in lockstep with the main spectrogram |
 | Bottom navigation bar | drag the window to pan / drag handles to resize / click empty space to jump |
 | Top bar | resolution, channel, pitch range, BPM, offset, time signature, palette, color floor, highlight γ |
 | Click a numeric label | type a value directly (Enter commits / Esc cancels), ↺ restores the default |

@@ -24,6 +24,13 @@ dependencies = [
 eval = [
     "mir_eval>=0.8",
 ]
+# Deep-learning separation/transcription (Phase 3): strictly optional —
+# the app degrades to the Phase 2 pipeline (API answers 501) when absent
+dl = [
+    "onnxruntime>=1.17",
+    "basic-pitch>=0.4.0",
+    "huggingface-hub>=0.23",
+]
 
 [dependency-groups]
 dev = [
