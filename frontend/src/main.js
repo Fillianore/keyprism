@@ -12,6 +12,7 @@ import {
 } from './spectrogram.js';
 import { registerAdaptiveTicks, registerRangeClamp } from './ticks.js';
 import { createPlayer } from './player.js';
+import { createSpecFeed } from './specfeed.js';
 import { t, onChange } from './i18n.js';
 
 /** Progress modal: setPhase text / setProgress(done,total) / setIndeterminate */
@@ -107,9 +108,11 @@ async function main() {
     throw new Error(t('dataStale'));
   }
 
-  // Decode on demand: keep only the current channel's float matrix resident
-  // (decoding all three channels at high resolution would use too much memory)
-  const db = data.dbRange;
+  // Keep the quantized matrices resident as raw bytes; the plot trace
+  // receives the full pooled matrix built from them (see specfeed.js —
+  // plotly re-rasterizes its whole z matrix on every replot, so the matrix
+  // is pooled down to display resolution instead of viewport-sliced: no
+  // dynamic loading, nothing to refill while panning)
   const b64ToU8 = (b64) =>
     Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
   let specRaw = {}; // channel -> Uint8Array
@@ -119,61 +122,28 @@ async function main() {
   let curSub = data.defaultSub || 1;
   let nCols = data.nCols;
   let curChan = 'mix';
-  const decodeChannel = (ch) => {
-    const bin = specRaw[ch];
-    const rows = data.noteLabels.length * curSub;
-    const mat = [];
-    for (let r = 0; r < rows; r++) {
-      const row = new Array(nCols);
-      for (let c = 0; c < nCols; c++) {
-        row[c] = (bin[r * nCols + c] / 255) * db - db;
-      }
-      mat.push(row);
-    }
-    return mat;
-  };
-  const makeXs = () =>
-    Array.from(
-      { length: nCols },
-      // Authoritative mapping: the full-track duration is split evenly per
-      // column (center-aligned), independent of the backend hop field
-      (_, i) =>
-        iso(
-          EPOCH_MS +
-            Math.round((i + 0.5) * (data.durationSec / nCols) * 1000)
-        )
-    );
-  const spec = decodeChannel(curChan);
-  let xs = makeXs();
-
-  const tick = () => new Promise((res) => setTimeout(res, 0));
-
-  /** Chunked async decoding (with progress callback, avoids blocking the UI
-   *  for long stretches) */
-  const decodeChannelAsync = async (ch, onProgress) => {
-    const bin = specRaw[ch];
-    const rows = data.noteLabels.length * curSub;
-    const mat = [];
-    const BATCH = 48;
-    for (let r = 0; r < rows; r++) {
-      const row = new Array(nCols);
-      for (let c = 0; c < nCols; c++) {
-        row[c] = (bin[r * nCols + c] / 255) * db - db;
-      }
-      mat.push(row);
-      if (r % BATCH === BATCH - 1) {
-        onProgress(r + 1, rows);
-        await tick();
-      }
-    }
-    onProgress(rows, rows);
-    return mat;
-  };
+  let pitchLoHi = [0, data.noteLabels.length - 1];
 
   const plotEl = document.getElementById('plot');
   const app = document.getElementById('app');
 
-  const { gd } = buildFigure(plotEl, data, xs, spec);
+  const feed = createSpecFeed(data, {
+    specRaw: () => specRaw,
+    nCols: () => nCols,
+    curSub: () => curSub,
+    curChan: () => curChan,
+    plotH: () => plotEl.clientHeight,
+    pitchLoHi: () => pitchLoHi,
+  });
+
+  const tick = () => new Promise((res) => setTimeout(res, 0));
+
+  const { gd } = buildFigure(
+    plotEl,
+    data,
+    // Complete pooled matrix: rendered once, panning never reloads
+    feed.build()
+  );
   registerAdaptiveTicks(gd);
   registerRangeClamp(gd, EPOCH_MS, EPOCH_MS + Math.round(data.durationSec * 1000));
   const player = createPlayer(app, gd, {
@@ -189,14 +159,15 @@ async function main() {
   const chanSel = document.getElementById('chanSelect');
   chanSel.addEventListener('change', () => {
     curChan = chanSel.value;
-    Plotly.restyle(gd, { z: [decodeChannel(curChan)] }, [0]);
+    cancelStream();
+    withRenderBusy(() => feed.apply(gd));
   });
 
   // ---- Top bar: resolution switch (requires backend --serve mode) ----
   const rateSel = document.getElementById('rateSelect');
   const subSel = document.getElementById('subSelect');
   const resStatus = document.getElementById('resStatus');
-  (data.timeRates || [5, 10, 15, 30]).forEach((r) => {
+  (data.timeRates || [15, 30, 60]).forEach((r) => {
     const o = document.createElement('option');
     o.value = String(r);
     o.textContent = String(r);
@@ -250,12 +221,13 @@ async function main() {
       const firstSwitch = curSub !== j.sub;
       curSub = j.sub;
       data.defaultRate = j.rate;
-      if (firstSwitch) setSub(gd, curSub, data, nCols);
-      xs = makeXs();
-      const mat = await decodeChannelAsync(curChan, (done, total) =>
-        modal.setProgress(done, total)
-      );
-      Plotly.restyle(gd, { z: [mat], x: [xs] }, [0]);
+      if (firstSwitch) setSub(gd, curSub, data);
+      modal.setPhase(t('decodingMatrix'));
+      await tick();
+      // Swap in the full pooled matrix for the new resolution (one replot,
+      // modal covers it)
+      cancelStream();
+      feed.apply(gd);
       resStatus.textContent = t('resStatus', { rate: j.rate, sub: j.sub });
     } catch (e) {
       resStatus.textContent = t('failed', { msg: e.message });
@@ -446,7 +418,10 @@ async function main() {
       loSel.value = String(lo);
       hiSel.value = String(hi);
     }
+    pitchLoHi = [lo, hi];
     applyPitchRange(gd, data, lo, hi);
+    // Row window changed (fewer semitones -> finer pooling budget)
+    withRenderBusy(() => feed.apply(gd));
   };
   loSel.addEventListener('change', applyRange);
   hiSel.addEventListener('change', applyRange);
@@ -490,7 +465,16 @@ async function main() {
   // preventing the bottom from being covered ----
   const wrap = document.getElementById('plot-wrap');
   const sync = () => Plotly.Plots.resize(gd);
-  new ResizeObserver(sync).observe(wrap);
+  let resizeT = 0;
+  new ResizeObserver(() => {
+    sync();
+    // Row pooling budget follows the plot height: rebuild the rows when it
+    // changed enough to move the pooling factor (debounced)
+    clearTimeout(resizeT);
+    resizeT = setTimeout(() => {
+      if (feed.rowsStale()) withRenderBusy(() => feed.apply(gd));
+    }, 250);
+  }).observe(wrap);
   sync();
 
   // ---- Live language switch: re-render persistent dynamic labels (static
@@ -529,13 +513,25 @@ async function main() {
     }
   };
 
-  /** Multiply the visible time span by `factor`, keeping `anchorMs`
-   *  stationary; clamped to the track bounds (registerRangeClamp double-
-   *  guards the relayout anyway) */
-  const zoomX = (factor, anchorMs) => {
-    const r = gd._fullLayout.xaxis.range;
-    const a = pMs(r[0]);
-    const b = pMs(r[1]);
+  /** Clamp [a, b] to the track bounds, keeping the span */
+  const clampRange = (a, b) => {
+    const span = b - a;
+    if (span >= trackEnd - trackStart) return [trackStart, trackEnd];
+    if (a < trackStart) {
+      a = trackStart;
+      b = a + span;
+    }
+    if (b > trackEnd) {
+      b = trackEnd;
+      a = b - span;
+    }
+    return [a, b];
+  };
+
+  /** Multiply the visible span by `factor`, keeping `anchorMs` stationary;
+   *  clamped to the track bounds (registerRangeClamp double-guards the
+   *  relayout anyway) */
+  const zoomRange = (a, b, factor, anchorMs) => {
     const span = b - a;
     const newSpan = Math.min(
       Math.max(Math.round(span * factor), MIN_SPAN_MS),
@@ -545,45 +541,191 @@ async function main() {
       anchorMs === null || span <= 0
         ? 0.5
         : Math.min(Math.max((anchorMs - a) / span, 0), 1);
-    let na = a + f * (span - newSpan);
-    let nb = na + newSpan;
-    if (na < trackStart) {
-      na = trackStart;
-      nb = na + newSpan;
-    }
-    if (nb > trackEnd) {
-      nb = trackEnd;
-      na = nb - newSpan;
-    }
-    Plotly.relayout(gd, { 'xaxis.range': [iso(na), iso(nb)] });
+    const na = a + f * (span - newSpan);
+    return clampRange(na, na + newSpan);
   };
 
-  /** Shift the visible time window by deltaMs, keeping its span and
-   *  clamping to the track bounds */
-  const panView = (deltaMs) => {
+  /** Shift the visible window by deltaMs, keeping its span and clamping to
+   *  the track bounds */
+  const panRange = (a, b, deltaMs) => clampRange(a + deltaMs, b + deltaMs);
+
+  // Transform-settle wheel handling: a Plotly relayout re-rasterizes the
+  // whole heatmap slice (~tens of ms), so one per wheel notch would freeze
+  // the view. While a wheel stream is active, the applied range stays put
+  // and the pending pan/zoom is shown by sliding/scaling the trace layer
+  // via an SVG transform (the same trick plotly's own drag pan uses). The
+  // commit is lazy: it runs after the gesture goes idle, on pointerdown
+  // (clicks/drags need an accurate axis), or early when the pending view
+  // escapes the loaded slice — whichever comes first.
+  const SETTLE_MS = 500;
+  let stream = null; // { raf, timer } while a wheel stream is active
+  let pendingPanMs = 0;
+  let pendingZoom = null; // { factor, anchorMs }
+
+  /** Range the pending ops would produce, on top of the applied one */
+  const pendingRange = () => {
     const r = gd._fullLayout.xaxis.range;
+    let a = pMs(r[0]);
+    let b = pMs(r[1]);
+    if (pendingZoom) {
+      [a, b] = zoomRange(a, b, pendingZoom.factor, pendingZoom.anchorMs);
+    }
+    if (pendingPanMs) {
+      [a, b] = panRange(a, b, pendingPanMs);
+    }
+    return [a, b];
+  };
+
+  /** SVG translate+scale mapping the applied range onto [na, nb]; the
+   *  playhead overlay follows the same affine so it stays glued to the
+   *  content while the view slides */
+  const applyViewTransform = (na, nb) => {
+    const fl = gd._fullLayout;
+    const [d0, d1] = fl.xaxis.domain;
+    const plotW = gd.clientWidth - fl.margin.l - fl.margin.r;
+    const X0 = fl.margin.l + d0 * plotW;
+    const domW = (d1 - d0) * plotW; // usable axis width (domain fraction)
+    const r = fl.xaxis.range;
     const a = pMs(r[0]);
     const b = pMs(r[1]);
-    const span = b - a;
-    let na = a + deltaMs;
-    let nb = b + deltaMs;
-    if (na < trackStart) {
-      na = trackStart;
-      nb = na + span;
+    const s = (b - a) / (nb - na);
+    const C = ((a - na) * domW) / (nb - na);
+    const tx = X0 * (1 - s) + C;
+    const layer = gd.querySelector('.heatmaplayer');
+    if (layer) {
+      layer.setAttribute(
+        'transform',
+        `translate(${tx.toFixed(2)},0) scale(${s.toFixed(5)},1)`
+      );
     }
-    if (nb > trackEnd) {
-      nb = trackEnd;
-      na = nb - span;
+    const x = player.cursorX();
+    const ph = player.cursorEl();
+    if (x !== null && ph) {
+      ph.style.transform = `translateX(${(X0 + C + s * (x - X0)).toFixed(1)}px)`;
     }
-    Plotly.relayout(gd, { 'xaxis.range': [iso(na), iso(nb)] });
   };
 
+  const clearViewTransform = () => {
+    const layer = gd.querySelector('.heatmaplayer');
+    if (layer) layer.removeAttribute('transform');
+  };
+
+  /** Modal-style overlay while a heavy replot blocks the main thread
+   *  (committing a wheel gesture, swapping channels...): the same visual
+   *  language as the resolution-switch progress modal, in a lighter
+   *  variant — dimmer backdrop, no input blocking. The sliding bar is a
+   *  composited transform animation, so it keeps moving through the block,
+   *  but it must be started a couple of frames BEFORE the blocking call.
+   *  Engaged only when the pause is perceptible; re-entrant calls run
+   *  without the ceremony. */
+  const BUSY_CELLS = 120000;
+  let busyEl = null;
+  let busyDepth = 0;
+  const busyCells = () => gd.data[0].z.length * gd.data[0].z[0].length;
+  const withRenderBusy = async (op) => {
+    if (busyDepth || busyCells() < BUSY_CELLS) {
+      await op();
+      return;
+    }
+    busyDepth = 1;
+    if (!busyEl) {
+      busyEl = document.createElement('div');
+      busyEl.className = 'modal-overlay render-busy-overlay';
+      busyEl.innerHTML = `
+        <div class="modal">
+          <h3>${t('renderingSpec')}</h3>
+          <div class="bar"><div class="bar-fill indeterminate"></div></div>
+        </div>`;
+      document.body.appendChild(busyEl);
+    }
+    busyEl.style.display = 'flex';
+    await new Promise((res) =>
+      requestAnimationFrame(() => requestAnimationFrame(res))
+    );
+    try {
+      await op();
+    } finally {
+      busyEl.style.display = 'none';
+      busyDepth = 0;
+    }
+  };
+
+  /** Commit the pending range with one relayout (the pooled matrix is
+   *  complete, so no data work follows; player.reposition restores the
+   *  playhead via the same event). immediate (pointer-initiated) commits
+   *  synchronously so click/drag coordinates resolve against the fresh
+   *  range; idle-timer commits show the render-busy spinner and keep the
+   *  transform until the relayout has drawn (same task — no flicker). */
+  const settleStream = (immediate = false) => {
+    if (!stream) return;
+    clearTimeout(stream.timer);
+    cancelAnimationFrame(stream.raf);
+    stream = null;
+    const [na, nb] = pendingRange();
+    pendingZoom = null;
+    pendingPanMs = 0;
+    const r = gd._fullLayout.xaxis.range;
+    if (na === pMs(r[0]) && nb === pMs(r[1])) {
+      clearViewTransform();
+      player.refresh();
+      return;
+    }
+    const commit = () =>
+      Plotly.relayout(gd, { 'xaxis.range': [iso(na), iso(nb)] });
+    if (immediate) {
+      clearViewTransform();
+      commit();
+      return;
+    }
+    withRenderBusy(async () => {
+      await commit();
+      clearViewTransform();
+    });
+  };
+
+  const streamUpdate = () => {
+    stream.raf = 0;
+    // The trace holds the complete pooled matrix: a gesture never needs
+    // data work, only the transient transform
+    applyViewTransform(...pendingRange());
+  };
+
+  /** Drop an in-flight stream without committing (before external data
+   *  swaps like channel/resolution changes) */
+  const cancelStream = () => {
+    if (!stream) return;
+    clearTimeout(stream.timer);
+    cancelAnimationFrame(stream.raf);
+    stream = null;
+    pendingZoom = null;
+    pendingPanMs = 0;
+    clearViewTransform();
+    player.refresh(); // undo the affine playhead shift (no relayout fires)
+  };
+
+  // Clicks and drags resolve coordinates against the applied axis range:
+  // commit any pending view first (synchronously) so they land accurately
+  plotEl.addEventListener(
+    'pointerdown',
+    () => settleStream(true),
+    { capture: true }
+  );
+
+  // ---- Wheel over the spectrogram: plain wheel scrubs playback and pans
+  // the view; no damping — the pooled matrix is complete, so a gesture is
+  // pure transform work ----
   plotEl.addEventListener(
     'wheel',
     (e) => {
       e.preventDefault(); // also blocks the browser's Ctrl+wheel page zoom
       if (e.ctrlKey) {
-        zoomX(Math.exp((e.deltaY / 100) * 0.5), cursorMs(e));
+        const op = {
+          factor: Math.exp((e.deltaY / 100) * 0.5),
+          anchorMs: cursorMs(e),
+        };
+        pendingZoom = pendingZoom
+          ? { factor: pendingZoom.factor * op.factor, anchorMs: op.anchorMs }
+          : op;
       } else {
         const sec = Math.max(
           -5 * SEC_PER_NOTCH,
@@ -595,8 +737,14 @@ async function main() {
           const before = player.currentTime();
           const after = player.seekBy(sec);
           const deltaMs = Math.round((after - before) * 1000);
-          if (deltaMs) panView(deltaMs);
+          if (deltaMs) pendingPanMs += deltaMs;
         }
+      }
+      if (pendingPanMs || pendingZoom) {
+        if (!stream) stream = { raf: 0, timer: 0 };
+        if (!stream.raf) stream.raf = requestAnimationFrame(streamUpdate);
+        clearTimeout(stream.timer);
+        stream.timer = setTimeout(settleStream, SETTLE_MS);
       }
     },
     { passive: false }

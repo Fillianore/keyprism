@@ -319,16 +319,25 @@ export function createPlayer(container, gd, opts) {
   ph.className = 'playhead';
   gd.parentElement.appendChild(ph);
 
-  function reposition() {
+  /** Playhead x in plot pixels for the current playback position, against
+   *  the applied axis range (main.js composes the wheel-stream transform
+   *  on top of this value) */
+  function cursorX() {
     const fl = gd._fullLayout;
-    if (!fl) return;
+    if (!fl) return null;
     const r0 = pMs(fl.xaxis.range[0]);
     const r1 = pMs(fl.xaxis.range[1]);
     const pm = Math.min(Math.max(specMs(curTime()), r0), r1);
     const frac = r1 > r0 ? (pm - r0) / (r1 - r0) : 0;
     const [d0, d1] = fl.xaxis.domain;
     const plotW = gd.clientWidth - fl.margin.l - fl.margin.r;
-    const x = fl.margin.l + (d0 + frac * (d1 - d0)) * plotW;
+    return fl.margin.l + (d0 + frac * (d1 - d0)) * plotW;
+  }
+
+  function reposition() {
+    const fl = gd._fullLayout;
+    if (!fl) return;
+    const x = cursorX();
     ph.style.transform = `translateX(${x}px)`;
     ph.style.top = `${fl.margin.t}px`;
     ph.style.bottom = `${fl.margin.b}px`;
@@ -386,6 +395,9 @@ export function createPlayer(container, gd, opts) {
     pause,
     bar,
     currentTime: () => curTime(),
+    cursorX,
+    cursorEl: () => ph,
+    refresh: reposition,
     /** Relative seek in seconds (wheel scrubbing), clamped to the audible
      *  span like every other seek entry point; returns the applied time so
      *  the caller can pan the view by the actually applied delta */

@@ -314,6 +314,9 @@ body,
 .modal .bar-fill.indeterminate {
   width: 34%;
   animation: bar-slide 1.1s ease-in-out infinite;
+  /* keep the slide running on the compositor while a heavy replot blocks
+   * the main thread (render-busy overlay) */
+  will-change: transform;
 }
 
 @keyframes bar-slide {
@@ -685,4 +688,13 @@ input[type='range']:active::-moz-range-thumb {
   pointer-events: none;
   z-index: 5;
   will-change: transform;
+}
+
+/* ---------- Render-busy overlay: the progress-modal visual language
+ * (centered box + sliding gold bar) in a lighter variant for the short
+ * replot pauses — dimmer backdrop and no input blocking; the bar keeps
+ * sliding through the main-thread block. */
+.render-busy-overlay {
+  background: rgba(4, 4, 6, 0.45);
+  pointer-events: none;
 }

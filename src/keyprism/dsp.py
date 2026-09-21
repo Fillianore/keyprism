@@ -15,7 +15,7 @@ NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 MIDI_MIN = 21   # A0, lowest piano note
 MIDI_MAX = 108  # C8, highest piano note
 
-TIME_RATES = [5, 10, 15, 30]  # time columns per second options
+TIME_RATES = [15, 30, 60]     # time columns per second options
 SUB_OPTIONS = [1, 5, 10]      # subbands per semitone options
 
 

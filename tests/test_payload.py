@@ -25,7 +25,7 @@ def test_compute_specs_clamps_resolution(tmp_path):
     data, sr, dur = audio_io.load_channels(p, 0.0, None)
     res = compute_specs(data, sr, dur, rate=99, sub=7, db_range=70.0,
                         window=2048)
-    assert res["rate"] == 30  # clamped to the TIME_RATES ceiling
+    assert res["rate"] == 60  # clamped to the TIME_RATES ceiling
     assert res["sub"] == 1    # invalid sub falls back to 1
 
 
@@ -70,7 +70,7 @@ def test_analyze_payload_contract(tmp_path):
     cs = d["colorscales"]["Inferno"]
     assert cs[0][1] == "#000000"  # lower anchor pure black
     assert 30 <= d["bpm"] <= 300
-    assert d["timeRates"] == [5, 10, 15, 30] and d["subOptions"] == [1, 5, 10]
+    assert d["timeRates"] == [15, 30, 60] and d["subOptions"] == [1, 5, 10]
     assert d["apiBase"] is None
 
 
