@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-09-21
+
 ### Added
 
 - Phase 2 classic source separation (training-free) over the Phase 0
