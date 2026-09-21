@@ -19,7 +19,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from . import audio_io
-from .payload import analyze, compute_specs
+from .analyze import run_analysis
+from .payload import compute_specs
 
 
 def make_server(path: Path, port: int, host: str, start: float,
@@ -40,12 +41,13 @@ def make_server(path: Path, port: int, host: str, start: float,
 
     def load_current(src: Path, preload: tuple | None = None,
                      name: str | None = None):
-        """Decode (or reuse preloaded data), emit data.json, return
-        (current track state, payload)"""
-        data2d, sr, dur = preload if preload is not None \
-            else audio_io.load_channels(src, start, end)
-        payload = analyze(src, start, end, window, db_range, rate, sub,
-                          api_base, preloaded=(data2d, sr, dur), name=name)
+        """Run the staged analysis (decode/stft/aggregate/payload, with the
+        complex-STFT disk cache), emit data.json, return (track state,
+        payload)"""
+        payload, (data2d, sr, dur) = run_analysis(
+            src, start=start, end=end, window=window, db_range=db_range,
+            rate=rate, sub=sub, api_base=api_base, name=name,
+            preloaded=preload)
         emit(payload)
         cur = {"path": src, "data2d": data2d, "sr": sr, "dur": dur,
                "rate": payload["defaultRate"], "sub": payload["defaultSub"]}

@@ -118,6 +118,7 @@ CHANGELOG 并开发版 PR。合并后由 workflow 自动接管：打 `v<版本>`
 ~/.keyprism/
 ├── logs/               # backend.log / vite.log (启动脚本重定向)
 ├── cache/matplotlib/   # matplotlib 字体与配置缓存
+├── cache/analysis/     # 复数 STFT 分析缓存 (stft.npy + meta.json)
 ├── uploads/            # "选择音乐" 上传的音频暂存 (自动只保留最近几个)
 └── config.env          # 可选持久配置: KEY=VALUE, # 开头为注释
 ```
@@ -129,6 +130,7 @@ CHANGELOG 并开发版 PR。合并后由 workflow 自动接管：打 `v<版本>`
 |------|------|------|
 | `KEYPRISM_HOME` | 工作区根目录 | `~/.keyprism` |
 | `KEYPRISM_LOG_DIR` | 日志目录 | `$KEYPRISM_HOME/logs` |
+| `KEYPRISM_CACHE_MAX_ENTRIES` | 分析缓存 LRU 容量（按曲目+参数） | `8` |
 | `KEYPRISM_API_HOST` | 后端监听地址（局域网访问用 `0.0.0.0`） | `127.0.0.1` |
 | `KEYPRISM_API_PORT` | 后端 API 端口 | `9630` |
 | `KEYPRISM_FRONTEND_PORT` | 前端页面端口 | `5270` |
@@ -231,6 +233,10 @@ uv run python -m keyprism [音频] [--serve PORT] [--rate R] [--sub S]
 - **在线选曲链路**：前端 XHR 直传原始文件字节（带上传进度条），后端流式落盘系统
   临时目录 → 解码分析 → 原子切换服务端曲目状态并清空分辨率缓存；音频 URL 带缓存
   破坏参数，切换曲目后不会读到浏览器缓存的旧文件
+- **分析缓存**：全分辨率 mix 通道复数 STFT 以可 memmap 的 complex64 工件
+  缓存在 `~/.keyprism/cache/analysis/`（键为解码音频 + 分析参数的内容哈希；
+  LRU 淘汰，容量由 `KEYPRISM_CACHE_MAX_ENTRIES` 控制，默认 8）。
+  相同曲目与参数的重复分析直接跳过 STFT 阶段；删除该目录即可回收空间或强制重算
 
 ## License
 

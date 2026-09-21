@@ -103,28 +103,18 @@ def compute_specs(data2d: np.ndarray, sr: int, dur: float, rate: int,
     }
 
 
-def analyze(path: Path, start: float, end: float | None, window: int,
-            db_range: float, rate: int, sub: int,
-            api_base: str | None = None, preloaded: tuple | None = None,
-            name: str | None = None) -> dict:
-    """Full analysis: decode (or reuse preloaded data) -> BPM ->
-    three-channel spectra -> payload"""
-    if preloaded is not None:
-        data2d, sr, dur = preloaded
-    else:
-        data2d, sr, dur = load_channels(path, start, end)
-    print(f"[1/3] 已加载 {dur:.1f}s @ {sr} Hz, {data2d.shape[1]} 声道")
+def finalize_payload(path: Path, dur: float, bpm: float, beat_offset: float,
+                     res: dict, *, start: float, end: float | None,
+                     window: int, db_range: float, api_base: str | None = None,
+                     name: str | None = None) -> dict:
+    """Assemble the data.json payload from computed analysis results.
 
-    # BPM is estimated from a full-resolution STFT of the mix channel (once)
-    freqs, mix_power = stft_power(data2d.mean(axis=1), sr, window)
-    hop_full = dur / max(mix_power.shape[1] - 1, 1)
-    bpm, beat_offset = estimate_bpm(mix_power, hop_full)
-    print(f"[2/3] 估计 BPM {bpm} (首拍偏移 {beat_offset * 1000:.0f}ms)")
-
-    res = compute_specs(data2d, sr, dur, rate, sub, db_range, window)
-    print(f"[3/3] 分辨率 {res['rate']} 列/s x {res['sub']} 子带/半音 "
-          f"-> {88 * res['sub']} 行 x {res['nCols']} 列 x 3 通道")
-
+    The tail of ``analyze``, split out so the staged orchestrator
+    (``keyprism.analyze``) can reuse it without re-deriving BPM or spectra.
+    Field set and values are identical to the historical inline assembly,
+    plus the ``notes`` / ``stems`` reservation fields (always null in
+    Phase 0; reserved for note-level transcription / source separation).
+    """
     notes = list(range(MIDI_MIN, MIDI_MAX + 1))
     audio_name = browser_safe_audio(path)
 
@@ -149,6 +139,38 @@ def analyze(path: Path, start: float, end: float | None, window: int,
         "audioFile": audio_name,
         "bpm": bpm,
         "beatOffsetSec": beat_offset,
+        # Reserved for future phases — always null in Phase 0:
+        #   notes: note-level transcription (Phase 1)
+        #   stems: separated source stems (Phase 2)
+        "notes": None,
+        "stems": None,
         **res,
     }
     return payload
+
+
+def analyze(path: Path, start: float, end: float | None, window: int,
+            db_range: float, rate: int, sub: int,
+            api_base: str | None = None, preloaded: tuple | None = None,
+            name: str | None = None) -> dict:
+    """Full analysis: decode (or reuse preloaded data) -> BPM ->
+    three-channel spectra -> payload"""
+    if preloaded is not None:
+        data2d, sr, dur = preloaded
+    else:
+        data2d, sr, dur = load_channels(path, start, end)
+    print(f"[1/3] 已加载 {dur:.1f}s @ {sr} Hz, {data2d.shape[1]} 声道")
+
+    # BPM is estimated from a full-resolution STFT of the mix channel (once)
+    freqs, mix_power = stft_power(data2d.mean(axis=1), sr, window)
+    hop_full = dur / max(mix_power.shape[1] - 1, 1)
+    bpm, beat_offset = estimate_bpm(mix_power, hop_full)
+    print(f"[2/3] 估计 BPM {bpm} (首拍偏移 {beat_offset * 1000:.0f}ms)")
+
+    res = compute_specs(data2d, sr, dur, rate, sub, db_range, window)
+    print(f"[3/3] 分辨率 {res['rate']} 列/s x {res['sub']} 子带/半音 "
+          f"-> {88 * res['sub']} 行 x {res['nCols']} 列 x 3 通道")
+
+    return finalize_payload(path, dur, bpm, beat_offset, res, start=start,
+                            end=end, window=window, db_range=db_range,
+                            api_base=api_base, name=name)

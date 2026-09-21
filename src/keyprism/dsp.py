@@ -5,11 +5,17 @@
 Pure algorithm layer, no IO whatsoever: numpy arrays in, numpy arrays out.
 Includes STFT, semitone aggregation, subband subdivision, time downsampling
 and BPM estimation.
+
+Since Phase 0 the complex STFT lives in ``keyprism.transform``; this module
+keeps its full public API and delegates the spectral core to it (the
+STFT/power numerics are bit-identical to the previous scipy.signal.stft
+implementation, locked by tests/test_transform.py).
 """
 
 import numpy as np
-from scipy import signal
 from scipy.ndimage import convolve1d
+
+from .transform import stft_pair
 
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 MIDI_MIN = 21   # A0, lowest piano note
@@ -29,12 +35,12 @@ def note_name(midi: int) -> str:
 
 
 def stft_power(x: np.ndarray, sr: int, nperseg: int):
-    """STFT -> (frequency array, power spectrogram [freq, time])"""
-    f, _, Z = signal.stft(
-        x, fs=sr, window="hann", nperseg=nperseg, noverlap=nperseg * 3 // 4,
-        padded=True, boundary="zeros",
-    )
-    return f, np.abs(Z) ** 2
+    """STFT -> (frequency array, power spectrogram [freq, time])
+
+    Thin delegation to ``transform.stft_pair``; output bits are identical
+    to the legacy ``scipy.signal.stft(...)``-based implementation."""
+    freqs, Z = stft_pair(x, sr, win=nperseg)
+    return freqs, np.abs(Z) ** 2
 
 
 def power_to_pitch_bins(freqs: np.ndarray, power: np.ndarray) -> np.ndarray:
