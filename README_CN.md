@@ -14,6 +14,7 @@
 
 ```
 音频 → STFT → 半音聚合 → 交互式热图 + 播放器
+            └→ 源分离 (HPSS / RPCA) → 分轨播放器
 ```
 
 <div align="center">
@@ -36,6 +37,14 @@
   顶栏 关/贝斯/旋律/全部 切换；结果按音轨缓存、按需提供（`/api/notes`，需 serve 模式）
 - **MIDI 导出**：一键下载转写音轨为标准 MIDI 文件（单音轨 type 0 / 双音轨 type 1，
   携带检测 BPM 速度轨，力度随音符置信度缩放）
+- **经典源分离（分轨）**：免训练的 HPSS（中值滤波谐波/打击掩码）、
+  RPCA（分块 ADMM 低秩/稀疏）与融合模式，按需对缓存的复数 STFT 计算，
+  保留原始相位渲染为分轨 WAV 文件，缓存于分析条目下、按需提供
+  （`/api/stems`，需 serve 模式）
+- **分轨播放器**：多轨面板（每轨音量、静音 M、独奏 S，外加原曲 Mix 行），
+  与主播放走同一套传输控制——所有分轨与原曲在同一个绝对 AudioContext
+  时间戳上一起启动，采样级精确同步；静音/独奏通过增益节点斜坡切换，
+  无咔哒声；分轨可下载 WAV 供外部 DAW 使用
 - **在线选曲**：顶栏"选择音乐"按钮选择本地音频，上传后端解析并整页切换（需 serve 模式）
 - **音频格式**：mp3/wav/ogg/flac 直接读取；m4a/aac/wma/opus/aiff 等其他主流容器
   经 PyAV (ffmpeg) 解码（sndfile 不支持时自动回退），并自动转存浏览器全兼容的
@@ -65,15 +74,26 @@ keyprism/
 │       ├── __main__.py    # python -m keyprism 入口
 │       ├── cli.py         # CLI 参数解析与调度
 │       ├── dsp.py         # 纯算法: STFT / 半音聚合 / 降采样 / BPM 估计
+│       ├── transform.py   # 复数 STFT/ISTFT + dB 幅度 + 峰值细化 (零 IO)
 │       ├── audio_io.py    # 解码链: sndfile→PyAV 回退 / 浏览器转存 / 路径常量
+│       ├── analyze.py     # 分阶段分析编排 + 复数 STFT 磁盘缓存
 │       ├── payload.py     # 前端契约: data.json 字段的唯一权威定义
-│       └── server.py      # HTTP 服务: /api/ping /api/spec /api/upload
+│       ├── tracks.py      # 单音轨预设注册表 (贝斯 / 旋律)
+│       ├── salience.py    # 响度加权 + 谐波显著度 (零 IO)
+│       ├── onset.py       # 限带自适应起始检测 (零 IO)
+│       ├── decode.py      # Viterbi 单音解码器 (零 IO)
+│       ├── midi_io.py     # 音符事件 → 标准 MIDI 文件 (零 IO)
+│       ├── transcribe.py  # 音符编排 + 按音轨的 notes 缓存
+│       ├── hpss.py        # 中值滤波 HPSS 掩码 (零 IO)
+│       ├── rpca.py        # 分块 inexact-ALM (ADMM) RPCA (零 IO)
+│       ├── stems.py       # 分轨合成 + 按条目的 stems 缓存
+│       └── server.py      # HTTP 服务: /api/ping /api/spec /api/notes /api/stems /api/upload
 ├── pyproject.toml        # uv 项目定义 (依赖锁定见 uv.lock, 默认走清华源)
 ├── scripts/              # 启动与发版脚本 (配置与端口见下)
 │   ├── start.sh          # 一键启动 Linux / macOS
 │   ├── start.cmd         # 一键启动 Windows
 │   └── release.sh        # 版本扎口: 改版本号 + 收口 CHANGELOG + 开发版 PR
-├── tests/                # pytest 自动化回归: 四层各司其职 (见下节)
+├── tests/                # pytest 自动化回归: 各层各司其职 (见下节)
 ├── assets/               # 演示音频等静态资产
 │   └── demo.m4a
 ├── docs/                 # 开发者文档 (HTTP API 参考等)
@@ -87,17 +107,20 @@ keyprism/
         ├── spectrogram.js  # 热图 + 键盘 + 小节网格 + 布局
         ├── ticks.js        # 刻度自适应 + 时间范围钳制
         ├── i18n.js         # EN/中文 界面文案与语言记忆
-        ├── player.js       # Web Audio 播放引擎
+        ├── player.js       # Web Audio 播放引擎 + 传输事件
+        ├── notes.js        # 音符叠加层 (Phase 1 转写)
+        ├── stems.js        # 分轨播放器: Web Audio 多轨同步 (Phase 2)
         └── style.css
 ```
 
 ## 测试
 
 `tests/` 不实现产品功能, 是自动化回归测试: 修改代码后运行
-`uv run pytest -q`, 30 个用例覆盖 DSP 算法 (含 120 BPM 节拍器确定性用例)、
+`uv run pytest -q`, 95 个用例覆盖 DSP 算法 (含 120 BPM 节拍器确定性用例)、
 解码链回退 (真实 m4a 编码)、payload 契约 (前端依赖字段逐一断言)、
-HTTP 全路由 (上传切换 / 错误码 / CORS 预检)。它是重构与加功能时的安全网,
-建议保留。
+转写 (合成音符恢复)、源分离 (HPSS/RPCA 合成分离、ADMM 收敛、分块与
+全曲等价、流式 ISTFT 精确性)、HTTP 全路由 (上传切换 / notes / stems /
+错误码 / CORS 预检)。它是重构与加功能时的安全网, 建议保留。
 
 CI (`.github/workflows/ci.yml`) 在每次 push / PR 时自动执行同样流程:
 后端 `uv sync + pytest` + 启动脚本语法检查, 前端 `npm ci + build`,
@@ -123,7 +146,8 @@ CHANGELOG 并开发版 PR。合并后由 workflow 自动接管：打 `v<版本>`
 ~/.keyprism/
 ├── logs/               # backend.log / vite.log (启动脚本重定向)
 ├── cache/matplotlib/   # matplotlib 字体与配置缓存
-├── cache/analysis/     # 复数 STFT 分析缓存 (stft.npy + meta.json)
+├── cache/analysis/     # 复数 STFT 分析缓存 (stft.npy + meta.json,
+│                       #   以及各条目下的 notes/ 与 stems/ 结果)
 ├── uploads/            # "选择音乐" 上传的音频暂存 (自动只保留最近几个)
 └── config.env          # 可选持久配置: KEY=VALUE, # 开头为注释
 ```
@@ -207,6 +231,10 @@ uv run python -m keyprism [音频] [--serve PORT] [--rate R] [--sub S]
 |------|------|
 | `GET /api/ping` | 健康检查 |
 | `GET /api/spec?rate=15&sub=5` | 重算指定分辨率的频谱（三通道 + 包络），带缓存 |
+| `GET /api/notes?track=bass\|lead\|both` | 单音轨转写音符，按音轨缓存 |
+| `GET /api/midi?track=bass\|lead\|both` | 同样的音符导出为标准 MIDI 文件下载 |
+| `GET /api/stems?method=hpss\|rpca\|combined` | 当前曲目的分轨（`&progress=1` 轮询计算进度） |
+| `GET /api/stem?method=..&name=..` | 单个分轨的 WAV 附件下载 |
 | `POST /api/upload?name=歌曲.mp3` | 上传本地音频（请求体为原始文件字节），后端解析并切换当前曲目，刷新 `data.json`；返回完整 payload |
 
 完整参考（错误码 / 响应结构 / 预检）见 `docs/api.md`。
@@ -222,8 +250,10 @@ uv run python -m keyprism [音频] [--serve PORT] [--rate R] [--sub S]
 | 拖动频谱区 | 平移（两端截止，不可拖出全曲） |
 | 双击 | 恢复全曲视图 |
 | 点击频谱 | 定位播放进度（不自动播放） |
+| 分轨 → 开 | 计算/读取分轨并在频谱图下方展开分轨面板（需 serve 模式）；原曲自动静音，关闭时恢复 |
+| 分轨面板 | 每轨音量滑块、M (静音)、S (独奏)；方法切换（融合 / HPSS / RPCA）；经 `/api/stem` 链接下载 |
 | 底部导航条 | 拖窗口平移 / 拖手柄调宽 / 点击空白跳转 |
-| 顶栏 | 分辨率、通道、音域、BPM、偏移、拍号、配色、色彩下限、高光 γ |
+| 顶栏 | 分辨率、通道、音符、分轨、音域、BPM、偏移、拍号、配色、色彩下限、高光 γ |
 | 点击数值标签 | 直接输入（Enter 提交 / Esc 取消），↺ 还原默认 |
 
 ## 技术说明
@@ -235,13 +265,22 @@ uv run python -m keyprism [音频] [--serve PORT] [--rate R] [--sub S]
 - **性能**：热图 restyle 节流（先导+尾随 120ms）；高分辨率解码分块异步，
   只驻留当前通道的浮点矩阵
 - **配色下限锚点强制纯黑**：只改首锚点颜色，锚点间仍线性过渡，与 γ 变换正交
-- **在线选曲链路**：前端 XHR 直传原始文件字节（带上传进度条），后端流式落盘系统
-  临时目录 → 解码分析 → 原子切换服务端曲目状态并清空分辨率缓存；音频 URL 带缓存
+- **在线选曲链路**：前端 XHR 直传原始文件字节（带上传进度条），后端流式落盘
+  暂存目录 → 解码分析 → 原子切换服务端曲目状态并清空分辨率缓存；音频 URL 带缓存
   破坏参数，切换曲目后不会读到浏览器缓存的旧文件
 - **分析缓存**：全分辨率 mix 通道复数 STFT 以可 memmap 的 complex64 工件
   缓存在 `~/.keyprism/cache/analysis/`（键为解码音频 + 分析参数的内容哈希；
   LRU 淘汰，容量由 `KEYPRISM_CACHE_MAX_ENTRIES` 控制，默认 8）。
   相同曲目与参数的重复分析直接跳过 STFT 阶段；删除该目录即可回收空间或强制重算
+- **分轨分离**：HPSS/RPCA 掩码以 memmap 行分块计算（RAM 中永不出现全曲复数
+  矩阵或全曲掩码矩阵），乘到复数 STFT 上以保留原始相位；流式 ISTFT 只输出
+  overlap-add 贡献者齐备的采样区间，输出与全矩阵重合成逐样本一致。
+  分轨缓存在 STFT 条目旁（`stems/<版本>/<方法>/`），某个方法的首次请求支付
+  计算耗时（演示曲目约几秒），后续请求即时返回文件
+- **分轨播放器同步**：所有分轨与原曲都在同一个共享 AudioContext 上、以同一个
+  绝对时间戳（`ctx.currentTime + 0.06`）调用 `source.start(when, offset)`，
+  多轨播放采样级精确、无漂移；静音/独奏/音量只对增益节点做斜坡
+  （`setTargetAtTime`），从不重新调度，切换无咔哒声
 
 ## License
 

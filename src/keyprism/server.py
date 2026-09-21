@@ -8,6 +8,10 @@ The only module coupled to stdlib httpd:
 - GET  /api/notes?track=   monophonic transcription notes (bass/lead/both),
                            cached per track under the analysis entry
 - GET  /api/midi?track=    the same notes exported as a Standard MIDI File
+- GET  /api/stems?method=  source-separated stems (hpss/rpca/combined),
+                           cached under the analysis entry; &progress=1
+                           polls a running computation without blocking
+- GET  /api/stem?method&name  one computed stem as a WAV download
 - POST /api/upload?name=   upload audio bytes, analyze and switch tracks
 
 make_server() returns an unstarted ThreadingHTTPServer so tests can
@@ -15,13 +19,14 @@ start/shutdown it in a thread; run_server() is the blocking entry.
 """
 
 import json
+import re
 import threading
 import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import audio_io, transcribe
+from . import audio_io, stems, transcribe
 from .analyze import run_analysis
 from .payload import compute_specs
 from .tracks import TRACK_QUERY_VALUES
@@ -63,6 +68,8 @@ def make_server(path: Path, port: int, host: str, start: float,
         "cache": {},     # (rate, sub) -> compute_specs result
         "lock": threading.Lock(),
         "notes_lock": threading.Lock(),  # serializes note computations
+        "stems_lock": threading.Lock(),  # serializes stem computations
+        "stems_progress": {},  # method -> {"done": n, "total": m}
         "cur": None,     # current track: {path, name, data2d, sr, dur, ...}
     }
     state["cur"], _ = load_current(path)
@@ -98,6 +105,12 @@ def make_server(path: Path, port: int, host: str, start: float,
                 return
             if u.path in ("/api/notes", "/api/midi"):
                 self._notes_or_midi(u)
+                return
+            if u.path == "/api/stems":
+                self._stems(u)
+                return
+            if u.path == "/api/stem":
+                self._stem_wav(u)
                 return
             if u.path != "/api/spec":
                 self.send_error(404)
@@ -160,6 +173,93 @@ def make_server(path: Path, port: int, host: str, start: float,
                 self.wfile.write(data)
             except Exception as e:  # noqa: BLE001
                 self._json(500, {"error": str(e)})
+
+        def _stems(self, u):
+            """GET /api/stems?method=hpss|rpca|combined[&progress=1]
+
+            Computes (or serves from the entry cache) the separated stems
+            of the current track and returns their download URLs; with
+            ``progress=1`` returns immediately with the live progress of a
+            running computation instead of blocking on it."""
+            cur = state["cur"]
+            if cur is None:
+                self._json(409, {"error": "暂无已加载的曲目"})
+                return
+            q = urllib.parse.parse_qs(u.query)
+            method = (q.get("method", ["combined"])[0] or "combined").strip()
+            if method not in stems.METHODS:
+                self._json(400, {
+                    "error": f"未知分离方法: {method} "
+                             f"(可用: {', '.join(stems.METHODS)})"})
+                return
+            if (q.get("progress", ["0"])[0] or "").strip() not in \
+                    ("", "0", "false"):
+                prog = state["stems_progress"].get(
+                    method, {"done": 0, "total": 0})
+                self._json(200, {"method": method, **prog})
+                return
+            entry = self._notes_entry(cur)
+
+            def progress(done, total):
+                state["stems_progress"][method] = {"done": done,
+                                                   "total": total}
+
+            try:
+                status = stems.get_stems(entry, method, progress=progress,
+                                         lock=state["stems_lock"])
+            except Exception as e:  # noqa: BLE001
+                self._json(500, {"error": str(e)})
+                return
+            self._json(200, {
+                "method": method,
+                "cached": bool(status.get("cached")),
+                "elapsed_sec": status.get("elapsed_sec"),
+                "duration": status.get("duration"),
+                "sample_rate": status.get("sr"),
+                "stems": [
+                    {"key": key,
+                     "url": f"{api_base}/api/stem?method={method}"
+                            f"&name={urllib.parse.quote(key)}"}
+                    for key in status.get("stems", [])
+                ],
+            })
+
+        def _stem_wav(self, u):
+            """GET /api/stem?method=..&name=.. : one stem as a WAV
+            attachment, streamed verbatim from the entry cache."""
+            cur = state["cur"]
+            if cur is None:
+                self._json(409, {"error": "暂无已加载的曲目"})
+                return
+            q = urllib.parse.parse_qs(u.query)
+            method = (q.get("method", [""])[0] or "").strip()
+            name = (q.get("name", [""])[0] or "").strip()
+            if method not in stems.METHODS or name not in \
+                    stems.STEM_SPECS.get(method, ()):
+                self._json(400, {
+                    "error": f"未知 stem: {method}/{name} "
+                             f"(可用: {stems.STEM_SPECS})"})
+                return
+            entry = self._notes_entry(cur)
+            path = stems.stem_file_path(entry, method, name)
+            if not path.is_file():
+                self._json(404, {
+                    "error": "stems 尚未计算: 先请求 /api/stems"})
+                return
+            stem_slug = re.sub(r"[^A-Za-z0-9_-]+", "_",
+                               Path(cur.get("name") or cur["path"].name)
+                               .stem).strip("_") or "track"
+            data = path.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/wav")
+            self._cors()
+            self.send_header(
+                "Content-Disposition",
+                f'attachment; filename="keyprism_{stem_slug}_'
+                f'{method}_{name}.wav"')
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
 
         def do_POST(self):
             u = urllib.parse.urlparse(self.path)

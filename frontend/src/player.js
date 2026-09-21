@@ -19,6 +19,11 @@ export function createPlayer(container, gd, opts) {
   const END = endSec ?? -1;
   const TRUE_DUR = durMs / 1000;
 
+  // Schedule every source this far in the future: the whole transport
+  // (mix + Phase 2 stems) starts at one absolute AudioContext timestamp,
+  // which is what keeps multi-source playback sample-accurate
+  const START_LEAD = 0.06;
+
   const AudioCtx = window.AudioContext || window.webkitAudioContext;
   const ctx = new AudioCtx();
   const gain = ctx.createGain();
@@ -161,6 +166,20 @@ export function createPlayer(container, gd, opts) {
   paintFill(vol);
 
   // ---- Engine ----
+  const transportSubs = new Set();
+  /** Transport events for companion engines (Phase 2 stem player):
+   *  ('play', {offset, when}) with the shared absolute start timestamp,
+   *  ('pause', {offset}), ('mixgain', {norm}) */
+  const emit = (type, info) => {
+    transportSubs.forEach((fn) => {
+      try {
+        fn(type, info);
+      } catch {
+        /* a broken subscriber must not kill the transport */
+      }
+    });
+  };
+
   function stopSource() {
     if (src) {
       src.onended = null;
@@ -189,10 +208,12 @@ export function createPlayer(container, gd, opts) {
     src = ctx.createBufferSource();
     src.buffer = buffer;
     src.connect(gain);
-    src.start(0, startOffset);
-    startCtx = ctx.currentTime;
+    const when = ctx.currentTime + START_LEAD;
+    src.start(when, startOffset);
+    startCtx = when;
     playing = true;
     btn.innerHTML = ICONS.pause;
+    emit('play', { offset: startOffset, when });
     src.onended = () => {
       if (playing && !src) return;
       if (playing) {
@@ -210,7 +231,7 @@ export function createPlayer(container, gd, opts) {
             savedOffset = lim;
           }
         },
-        Math.max(0, (lim - startOffset) * 1000)
+        Math.max(0, (lim - startOffset) * 1000 - START_LEAD * 1000)
       );
     }
     if (!rafId) rafId = requestAnimationFrame(loop);
@@ -222,6 +243,7 @@ export function createPlayer(container, gd, opts) {
     playing = false;
     stopSource();
     btn.innerHTML = ICONS.play;
+    emit('pause', { offset: savedOffset });
   }
 
   function seekTo(t) {
@@ -281,14 +303,25 @@ export function createPlayer(container, gd, opts) {
     seekHeld = false;
   });
   vol.addEventListener('input', () => {
-    gain.gain.value = parseFloat(vol.value);
-    paintFill(vol);
-    try {
-      localStorage.setItem(VOL_KEY, String(gain.gain.value));
-    } catch {
-      /* ignore storage failure */
-    }
+    setGainNorm(parseFloat(vol.value) / VOL_MAX, { syncSlider: false });
   });
+
+  /** Master gain from a 0..1 normalized value; click-free ramped, keeps
+   *  the slider, persistence and transport subscribers in sync */
+  function setGainNorm(norm, { syncSlider = true, persist = true } = {}) {
+    const v = Math.min(Math.max(norm, 0), 1) * VOL_MAX;
+    gain.gain.setTargetAtTime(v, ctx.currentTime, 0.012);
+    if (syncSlider) vol.value = v.toFixed(3);
+    paintFill(vol);
+    if (persist) {
+      try {
+        localStorage.setItem(VOL_KEY, String(v));
+      } catch {
+        /* ignore storage failure */
+      }
+    }
+    emit('mixgain', { norm: v / VOL_MAX });
+  }
 
   // ---- Track the current viewport (for follow panning) ----
   let va = EPOCH_MS;
@@ -398,6 +431,18 @@ export function createPlayer(container, gd, opts) {
     cursorX,
     cursorEl: () => ph,
     refresh: reposition,
+    isPlaying: () => playing,
+    /** Shared AudioContext: the stem engine decodes into it and
+     *  schedules on the same clock — one context, zero drift */
+    getContext: () => ctx,
+    /** Subscribe to transport events; returns an unsubscribe fn */
+    onTransport: (fn) => {
+      transportSubs.add(fn);
+      return () => transportSubs.delete(fn);
+    },
+    /** Master gain control for the stems panel Mix row (0..1) */
+    setMixGain: (norm, opts) => setGainNorm(norm, opts),
+    mixGainNorm: () => gain.gain.value / VOL_MAX,
     /** Relative seek in seconds (wheel scrubbing), clamped to the audible
      *  span like every other seek entry point; returns the applied time so
      *  the caller can pan the view by the actually applied delta */

@@ -14,6 +14,7 @@ import { registerAdaptiveTicks, registerRangeClamp } from './ticks.js';
 import { createPlayer } from './player.js';
 import { createSpecFeed } from './specfeed.js';
 import { initNotes } from './notes.js';
+import { initStems } from './stems.js';
 import { throttled } from './util.js';
 import { t, onChange } from './i18n.js';
 
@@ -140,6 +141,14 @@ async function main() {
     data,
     apiBase: data.apiBase,
     getSub: () => curSub,
+  });
+
+  // ---- Stem player (classic source separation, Phase 2): shares the
+  // player's AudioContext and transport clock ----
+  initStems({
+    data,
+    player,
+    apiBase: data.apiBase,
   });
 
   // ---- Top bar: channel switch (mix/left/right) ----
