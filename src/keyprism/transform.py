@@ -31,16 +31,19 @@ from scipy import signal
 
 __all__ = [
     "stft_complex", "stft_pair", "istft_complex", "magnitude_db",
-    "parabolic_peak", "iter_stft_chunks", "n_frames_of",
+    "parabolic_peak", "iter_stft_chunks", "n_frames_of", "default_hop",
 ]
 
 DEFAULT_WIN = 8192
 CHUNK_FRAMES = 512  # frame block size for streamed STFT/ISTFT (<= 2048)
 
 
-def _default_hop(win: int) -> int:
+def default_hop(win: int) -> int:
     """Legacy hop: ``nperseg - nperseg*3//4`` (== win//4 for even win)."""
     return win - win * 3 // 4
+
+
+_default_hop = default_hop  # internal alias
 
 
 def _window(window, win: int) -> np.ndarray:
