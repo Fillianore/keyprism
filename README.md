@@ -31,7 +31,7 @@ audio → STFT → semitone aggregation → interactive heatmap + player
   tick per second for windows within 16s), 88 semitones on the vertical axis
 - **Stereo, three channels**: mix / left / right spectra, unified peak
   normalization (dB comparable across channels)
-- **Switchable resolution**: time-column density 5/10/15/30 columns per second
+- **Switchable resolution**: time-column density 15/30/60 columns per second
   × semitone subdivision 1/5/10 subbands, recomputed live by the backend
   (serve mode required) with a progress dialog and staged progress bar
 - **Subband widening**: in high-subdivision modes, energy is widened along the

@@ -57,12 +57,12 @@ def test_ping(srv):
 
 
 def test_spec(srv):
-    code, res = get(f"{srv['base']}/api/spec?rate=5&sub=1")
+    code, res = get(f"{srv['base']}/api/spec?rate=15&sub=1")
     assert code == 200
     assert set(res["specs"]) == {"mix", "left", "right"}
-    assert res["rate"] == 5 and res["sub"] == 1
+    assert res["rate"] == 15 and res["sub"] == 1
     # same parameters hit the cache the second time; results identical
-    _, res2 = get(f"{srv['base']}/api/spec?rate=5&sub=1")
+    _, res2 = get(f"{srv['base']}/api/spec?rate=15&sub=1")
     assert res2 == res
 
 
@@ -81,7 +81,7 @@ def test_upload_switches_track(srv):
     # data.json switched; spec reflects the new track
     d = json.loads((srv["pub"] / "data.json").read_text(encoding="utf-8"))
     assert d["file"] == "newsong.wav"
-    _, res = get(f"{srv['base']}/api/spec?rate=5&sub=1")
+    _, res = get(f"{srv['base']}/api/spec?rate=15&sub=1")
     assert res["nCols"] == payload["nCols"]
     # staging directory keeps the uploaded copy
     assert any(p.name.endswith("newsong.wav") for p in srv["uploads"].glob("*"))
