@@ -35,7 +35,6 @@ import numpy as np  # noqa: E402
 
 AUDIO_EXTS = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus",
               ".wma", ".aiff"}
-ONSET_TOL = 0.05     # seconds, standard note-tracking tolerance
 PITCH_TOL = 0.5      # semitones
 
 
@@ -75,7 +74,7 @@ def midi_to_notes(path: Path) -> list:
     return sorted(notes)
 
 
-def match_builtin(ref, est) -> tuple:
+def match_builtin(ref, est, onset_tol) -> tuple:
     """Greedy pitch-exact/onset-window matcher -> (tp, fp, fn)."""
     used = [False] * len(est)
     tp = 0
@@ -84,7 +83,7 @@ def match_builtin(ref, est) -> tuple:
         for i, (p2, s2, e2) in enumerate(est):
             if used[i] or abs(p2 - pitch) > PITCH_TOL:
                 continue
-            if abs(s2 - s) > ONSET_TOL:
+            if abs(s2 - s) > onset_tol:
                 continue
             ov = min(e, e2) - max(s, s2)
             if ov > 0 and (best is None or ov > best[1]):
@@ -95,8 +94,8 @@ def match_builtin(ref, est) -> tuple:
     return tp, used.count(False), len(ref) - tp
 
 
-def match_mir_eval(ref, est) -> tuple:
-    """mir_eval transcription matching -> (tp, fp, fn)."""
+def match_mir_eval(ref, est, onset_tol) -> tuple:
+    """mir_eval transcription matching -> (precision, recall, f1)."""
     from mir_eval import transcription as met
 
     def arr(notes):
@@ -109,12 +108,12 @@ def match_mir_eval(ref, est) -> tuple:
     est_i, est_p = arr(est)
     p, r, f, _ = met.precision_recall_f1_overlap(
         ref_i, ref_p, est_i, est_p,
-        onset_tolerance=ONSET_TOL, pitch_tolerance=PITCH_TOL)
+        onset_tolerance=onset_tol, pitch_tolerance=PITCH_TOL)
     return p, r, f
 
 
 def evaluate_pair(audio: Path, ref_midi: Path, tracks: list, window: int,
-                  use_mir: bool) -> dict:
+                  use_mir: bool, onset_tol: float) -> dict:
     from keyprism import audio_io, transcribe
 
     cur = {}
@@ -132,12 +131,15 @@ def evaluate_pair(audio: Path, ref_midi: Path, tracks: list, window: int,
                for n in body["notes"][track]]
         if use_mir:
             try:
-                p, r, f = match_mir_eval(ref, est)
+                p, r, f = match_mir_eval(ref, est, onset_tol)
             except ImportError:
                 use_mir = False
-                p, r, f = match_builtin(ref, est)
+                tp, fp, fn = match_builtin(ref, est, onset_tol)
+                p = tp / (tp + fp) if tp + fp else 0.0
+                r = tp / (tp + fn) if tp + fn else 0.0
+                f = 2 * p * r / (p + r) if p + r else 0.0
         else:
-            tp, fp, fn = match_builtin(ref, est)
+            tp, fp, fn = match_builtin(ref, est, onset_tol)
             p = tp / (tp + fp) if tp + fp else 0.0
             r = tp / (tp + fn) if tp + fn else 0.0
             f = 2 * p * r / (p + r) if p + r else 0.0
@@ -153,6 +155,8 @@ def main() -> int:
     ap.add_argument("--track", default="both",
                     choices=["bass", "lead", "both"])
     ap.add_argument("--window", type=int, default=8192)
+    ap.add_argument("--onset-tol", type=float, default=0.05,
+                    help="起始匹配容差秒数 (默认 0.05, MIREX 惯例)")
     args = ap.parse_args()
     if not args.dataset and not (args.audio and args.reference):
         ap.error("需要 <audio> <reference> 或 --dataset 目录")
@@ -186,7 +190,8 @@ def main() -> int:
 
         agg = {t: [0.0, 0.0, 0.0, 0] for t in tracks}
         for audio, midi in pairs:
-            res = evaluate_pair(audio, midi, tracks, args.window, use_mir)
+            res = evaluate_pair(audio, midi, tracks, args.window, use_mir,
+                                args.onset_tol)
             for t, (p, r, f, n_ref, n_est) in res.items():
                 print(f"{audio.name} [{t}] P={p:.3f} R={r:.3f} F1={f:.3f} "
                       f"(ref {n_ref} / est {n_est} notes)")
@@ -201,6 +206,7 @@ def main() -> int:
         matcher = "mir_eval" if use_mir else "builtin"
         print(f"EVAL-SUMMARY tracks={'/'.join(agg)} files={len(pairs)} "
               f"matcher={matcher} window={args.window} "
+              f"onset_tol={args.onset_tol} "
               + " ".join(f"{t}_F1={agg[t][2] / max(agg[t][3], 1):.3f}"
                          for t in tracks))
         return 0
