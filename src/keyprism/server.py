@@ -3,19 +3,30 @@
 """KeyPrism HTTP service layer: long-running API + upload-based track switch
 
 The only module coupled to stdlib httpd:
-- GET  /api/ping           health check
+- GET  /api/ping           health check + DL capability flags
 - GET  /api/spec?rate&sub  recompute the spectrum at a given resolution (cached)
-- GET  /api/notes?track=   monophonic transcription notes (bass/lead/both),
-                           cached per track under the analysis entry
-- GET  /api/midi?track=    the same notes exported as a Standard MIDI File
-- GET  /api/stems?method=  source-separated stems (hpss/rpca/combined),
-                           cached under the analysis entry; &progress=1
-                           polls a running computation without blocking
+- GET  /api/notes?track=&method=  transcription notes: monophonic presets
+                           (default) or method=poly (Basic Pitch on a DL
+                           stem, Phase 3)
+- GET  /api/midi?track=    the monophonic notes exported as a Standard MIDI File
+- GET  /api/stems?method=  classic stems (hpss/rpca/combined) computed
+                           synchronously; DL stems (demucs_4/demucs_6)
+                           served from their cache, &progress=1 polls
+- POST /api/stems?method=demucs_4|demucs_6
+                           start DL separation as a background task;
+                           returns {"task_id", "status_url"} (501 without
+                           the optional [dl] dependencies)
+- GET  /api/task/{id}      background-task status/progress/result
 - GET  /api/stem?method&name  one computed stem as a WAV download
 - POST /api/upload?name=   upload audio bytes, analyze and switch tracks
 
 make_server() returns an unstarted ThreadingHTTPServer so tests can
 start/shutdown it in a thread; run_server() is the blocking entry.
+
+DL tasks (Phase 3) run on a single-worker ThreadPoolExecutor: one heavy
+inference at a time (RAM ceiling), progress reported into an in-memory
+task registry polled via /api/task/{id} — long separations never hold a
+browser HTTP connection open.
 """
 
 import json
@@ -23,13 +34,24 @@ import re
 import threading
 import time
 import urllib.parse
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import audio_io, stems, transcribe
+from . import audio_io, dlsep, poly_transcribe, stems, transcribe
 from .analyze import run_analysis
 from .payload import compute_specs
 from .tracks import TRACK_QUERY_VALUES
+
+#: Graceful-degradation flags (Phase 3): the DL dependencies are
+#: optional; when absent the DL endpoints answer 501 instead of the
+#: server crashing. Module-level so tests can flip them.
+DL_AVAILABLE = dlsep.ORT_AVAILABLE
+POLY_AVAILABLE = poly_transcribe.BP_AVAILABLE
+
+_DL_NOT_INSTALLED = ("未安装 DL 依赖: 请执行 uv sync --extra dl "
+                     "(需要 onnxruntime / basic-pitch)")
 
 
 def make_server(path: Path, port: int, host: str, start: float,
@@ -70,11 +92,41 @@ def make_server(path: Path, port: int, host: str, start: float,
         "notes_lock": threading.Lock(),  # serializes note computations
         "stems_lock": threading.Lock(),  # serializes stem computations
         "stems_progress": {},  # method -> {"done": n, "total": m}
+        "dl_lock": threading.Lock(),  # serializes poly-note computations
+        "executor": ThreadPoolExecutor(  # ONE DL job at a time (RAM ceiling)
+            max_workers=1, thread_name_prefix="keyprism-dl"),
+        "tasks": {},     # task_id -> {"status", "progress", "result", ...}
+        "tasks_lock": threading.Lock(),
         "cur": None,     # current track: {path, name, data2d, sr, dur, ...}
     }
     state["cur"], _ = load_current(path)
     print(f"已输出: {(audio_io.PUBLIC_DIR / 'data.json').resolve()} "
           f"(apiBase={api_base})")
+
+    def start_task(fn) -> dict:
+        """Register a background task and run ``fn(task)`` on the
+        single-worker executor (one heavy DL job at a time). The task
+        dict carries status/progress/result; finished tasks are pruned
+        to the newest 32 so the registry cannot grow unbounded."""
+        task_id = uuid.uuid4().hex
+        task = {"id": task_id, "status": "running", "progress": 0.0,
+                "result": None, "error": None}
+        with state["tasks_lock"]:
+            for k in [k for k, v in state["tasks"].items()
+                      if v["status"] in ("done", "error")][:-32]:
+                state["tasks"].pop(k, None)
+            state["tasks"][task_id] = task
+
+        def run():
+            try:
+                task["result"] = fn(task)
+                task["status"] = "done"
+            except Exception as e:  # noqa: BLE001 - surfaced verbatim
+                task["status"] = "error"
+                task["error"] = str(e)
+
+        state["executor"].submit(run)
+        return task
 
     class Handler(BaseHTTPRequestHandler):
         def _cors(self):
@@ -82,6 +134,16 @@ def make_server(path: Path, port: int, host: str, start: float,
             self.send_header("Access-Control-Allow-Methods",
                              "GET, POST, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "*")
+
+        def _api_base(self) -> str:
+            """Externally reachable base URL resolved from the BOUND
+            address at call time (the constructor arg may be port 0 =
+            ephemeral; reading the socket afterwards always yields the
+            real port)."""
+            host, port = self.server.server_address[:2]
+            if host in ("", "0.0.0.0", "::"):
+                host = "localhost"
+            return f"http://{host}:{port}"
 
         def _json(self, code: int, obj):
             body = json.dumps(obj).encode()
@@ -101,7 +163,18 @@ def make_server(path: Path, port: int, host: str, start: float,
         def do_GET(self):
             u = urllib.parse.urlparse(self.path)
             if u.path == "/api/ping":
-                self._json(200, {"ok": True})
+                self._json(200, {
+                    "ok": True,
+                    "capabilities": {
+                        "dl": DL_AVAILABLE,
+                        "poly": POLY_AVAILABLE,
+                        "dl_methods": list(dlsep.DL_METHODS)
+                        if DL_AVAILABLE else [],
+                    },
+                })
+                return
+            if u.path.startswith("/api/task/"):
+                self._task_status(u)
                 return
             if u.path in ("/api/notes", "/api/midi"):
                 self._notes_or_midi(u)
@@ -141,12 +214,104 @@ def make_server(path: Path, port: int, host: str, start: float,
                 cur, window=window, db_range=db_range, rate=cur["rate"],
                 sub=cur["sub"], start=start, end=end)
 
+        def _poly_notes(self, u, q):
+            """GET /api/notes?track=piano|guitar|other&method=poly[&source=]
+
+            Basic Pitch polyphonic transcription of a DL stem, cached
+            under the analysis entry (Phase 3)."""
+            if not POLY_AVAILABLE:
+                self._json(501, {"error": _DL_NOT_INSTALLED})
+                return
+            track = (q.get("track", ["piano"])[0] or "").strip()
+            if track not in poly_transcribe.POLY_TRACKS:
+                self._json(400, {
+                    "error": f"poly 方法不支持音轨: {track} "
+                             f"(可用: {', '.join(poly_transcribe.POLY_TRACKS)})"})
+                return
+            source = (q.get("source", ["demucs_6"])[0] or "demucs_6").strip()
+            if source not in dlsep.DL_METHODS:
+                self._json(400, {
+                    "error": f"未知 DL 分离方法: {source} "
+                             f"(可用: {', '.join(dlsep.DL_METHODS)})"})
+                return
+            cur = state["cur"]
+            entry = self._notes_entry(cur)
+            try:
+                stem_path = dlsep.dl_stem_path(entry, source, track)
+            except KeyError:
+                self._json(400, {
+                    "error": f"{source} 没有 stem {track} "
+                             f"(可用: {', '.join(dlsep.STEM_SPECS[source])})"})
+                return
+            if not stem_path.is_file():
+                self._json(409, {
+                    "error": f"DL 分轨尚未计算: 先请求 "
+                             f"POST /api/stems?method={source}"})
+                return
+            try:
+                body, cached = poly_transcribe.get_poly_notes(
+                    entry, track, stem_path, lock=state["dl_lock"])
+            except Exception as e:  # noqa: BLE001
+                self._json(500, {"error": str(e)})
+                return
+            self._json(200, {**body, "cached": cached})
+
+        def _task_status(self, u):
+            """GET /api/task/{id}: background-task poll (non-blocking)."""
+            task_id = u.path.rsplit("/", 1)[-1]
+            with state["tasks_lock"]:
+                task = state["tasks"].get(task_id)
+                if task is None:
+                    self._json(404, {"error": "未知任务"})
+                    return
+                body = {"id": task_id, "status": task["status"],
+                        "progress": round(float(task["progress"]), 4)}
+                if task["status"] == "done":
+                    body.update(task["result"] or {})
+                elif task["status"] == "error":
+                    body["error"] = task["error"]
+            self._json(200, body)
+
+        def _dl_stems_urls(self, method: str, status: dict) -> list:
+            return [
+                {"key": key,
+                 "url": f"{self._api_base()}/api/stem?method={method}"
+                        f"&name={urllib.parse.quote(key)}"}
+                for key in status.get("stems", [])
+            ]
+
+        def _stems_dl_get(self, u, method: str):
+            """GET /api/stems?method=demucs_4|demucs_6: serve the DL
+            stem cache (computation is started via POST, never here)."""
+            status = dlsep.load_status(self._notes_entry(state["cur"]),
+                                       method)
+            if status is None:
+                self._json(404, {
+                    "error": f"{method} 分轨尚未计算: 用 "
+                             f"POST /api/stems?method={method} 启动"})
+                return
+            self._json(200, {
+                "method": method,
+                "cached": True,
+                "duration": status.get("duration"),
+                "sample_rate": status.get("sr"),
+                "stems": self._dl_stems_urls(method, status),
+            })
+
         def _notes_or_midi(self, u):
             cur = state["cur"]
             if cur is None:
                 self._json(409, {"error": "暂无已加载的曲目"})
                 return
             q = urllib.parse.parse_qs(u.query)
+            method = (q.get("method", ["mono"])[0] or "mono").strip()
+            if method == "poly":
+                self._poly_notes(u, q)
+                return
+            if method != "mono":
+                self._json(400, {"error": f"未知转录方法: {method} "
+                                          "(可用: mono, poly)"})
+                return
             track = (q.get("track", ["both"])[0] or "").strip()
             if track not in TRACK_QUERY_VALUES:
                 self._json(400, {
@@ -187,6 +352,9 @@ def make_server(path: Path, port: int, host: str, start: float,
                 return
             q = urllib.parse.parse_qs(u.query)
             method = (q.get("method", ["combined"])[0] or "combined").strip()
+            if method in dlsep.DL_METHODS:
+                self._stems_dl_get(u, method)
+                return
             if method not in stems.METHODS:
                 self._json(400, {
                     "error": f"未知分离方法: {method} "
@@ -218,10 +386,67 @@ def make_server(path: Path, port: int, host: str, start: float,
                 "sample_rate": status.get("sr"),
                 "stems": [
                     {"key": key,
-                     "url": f"{api_base}/api/stem?method={method}"
+                     "url": f"{self._api_base()}/api/stem?method={method}"
                             f"&name={urllib.parse.quote(key)}"}
                     for key in status.get("stems", [])
                 ],
+            })
+
+        def _start_dl_stems(self, u):
+            """POST /api/stems?method=demucs_4|demucs_6: start DL
+            separation as a background task (501 without the optional
+            [dl] dependencies, 200 with the cached list when already
+            computed)."""
+            if not DL_AVAILABLE:
+                self._json(501, {"error": _DL_NOT_INSTALLED})
+                return
+            cur = state["cur"]
+            if cur is None:
+                self._json(409, {"error": "暂无已加载的曲目"})
+                return
+            q = urllib.parse.parse_qs(u.query)
+            method = (q.get("method", [""])[0] or "").strip()
+            if method not in dlsep.DL_METHODS:
+                self._json(400, {
+                    "error": f"未知 DL 分离方法: {method} "
+                             f"(可用: {', '.join(dlsep.DL_METHODS)})"})
+                return
+            entry = self._notes_entry(cur)
+            cached = dlsep.load_status(entry, method)
+            if cached is not None:
+                self._json(200, {
+                    "method": method, "cached": True,
+                    "duration": cached.get("duration"),
+                    "sample_rate": cached.get("sr"),
+                    "stems": self._dl_stems_urls(method, cached)})
+                return
+
+            def job(task):
+                # mono float32 of the decoded segment; the separator
+                # resamples to the model rate internally, per-chunk
+                mono = cur["data2d"].mean(axis=1).astype("float32")
+
+                def progress(done, total):
+                    task["progress"] = done / float(total)
+
+                started = time.time()
+                out = dlsep.get_separator(method).separate(
+                    mono, cur["sr"], progress=progress)
+                status = dlsep.write_stems(
+                    entry, method, out, dlsep.TARGET_SR, cur["dur"],
+                    time.time() - started)
+                return {
+                    "method": method,
+                    "duration": status.get("duration"),
+                    "sample_rate": status.get("sr"),
+                    "stems": self._dl_stems_urls(method, status),
+                }
+
+            task = start_task(job)
+            self._json(200, {
+                "task_id": task["id"],
+                "status_url": f"/api/task/{task['id']}",
+                "status": "started",
             })
 
         def _stem_wav(self, u):
@@ -234,17 +459,21 @@ def make_server(path: Path, port: int, host: str, start: float,
             q = urllib.parse.parse_qs(u.query)
             method = (q.get("method", [""])[0] or "").strip()
             name = (q.get("name", [""])[0] or "").strip()
-            if method not in stems.METHODS or name not in \
-                    stems.STEM_SPECS.get(method, ()):
+            is_dl = method in dlsep.DL_METHODS
+            specs = dlsep.STEM_SPECS if is_dl else stems.STEM_SPECS
+            if method not in (stems.METHODS + dlsep.DL_METHODS) or \
+                    name not in specs.get(method, ()):
                 self._json(400, {
                     "error": f"未知 stem: {method}/{name} "
-                             f"(可用: {stems.STEM_SPECS})"})
+                             f"(可用: {specs})"})
                 return
             entry = self._notes_entry(cur)
-            path = stems.stem_file_path(entry, method, name)
+            path = (dlsep.dl_stem_path(entry, method, name) if is_dl
+                    else stems.stem_file_path(entry, method, name))
             if not path.is_file():
-                self._json(404, {
-                    "error": "stems 尚未计算: 先请求 /api/stems"})
+                hint = (f"DL 分轨尚未计算: 先请求 "
+                        f"POST /api/stems?method={method}")
+                self._json(404, {"error": hint})
                 return
             stem_slug = re.sub(r"[^A-Za-z0-9_-]+", "_",
                                Path(cur.get("name") or cur["path"].name)
@@ -263,6 +492,9 @@ def make_server(path: Path, port: int, host: str, start: float,
 
         def do_POST(self):
             u = urllib.parse.urlparse(self.path)
+            if u.path == "/api/stems":
+                self._start_dl_stems(u)
+                return
             if u.path != "/api/upload":
                 self.send_error(404)
                 return
