@@ -13,6 +13,8 @@
 | GET | `/api/spec?rate=15&sub=5` | recompute the spectrum at the given resolution (three channels + envelopes), cached |
 | GET | `/api/notes?track=bass\|lead\|both` | monophonic transcription notes of the current track, cached per track under the analysis entry |
 | GET | `/api/midi?track=bass\|lead\|both` | the same notes exported as a Standard MIDI File (attachment download) |
+| GET | `/api/stems?method=hpss\|rpca\|combined` | separated stems of the current track (Phase 2); `&progress=1` polls a running computation |
+| GET | `/api/stem?method=..&name=..` | one computed stem as a PCM16 WAV attachment download |
 | POST | `/api/upload?name=song.mp3` | upload a local audio file (request body is raw file bytes); the backend analyzes it, switches the current track and refreshes `data.json`; returns the full payload |
 | OPTIONS | any endpoint | CORS preflight, returns 204 |
 
@@ -87,6 +89,74 @@ note times shifted by the detected first-beat offset, velocity =
 | 409 | no track loaded (cannot happen in normal serve mode) |
 | 500 | transcription failed (unreadable analysis artifact etc.) |
 
+## Stems Endpoints (Phase 2)
+
+Classic (training-free) source separation of the currently loaded track,
+computed on demand against the cached complex STFT — `data.json` keeps
+`"stems": null` by contract, stem audio is served only here.
+
+Methods (`src/keyprism/hpss.py`, `rpca.py`, `stems.py`):
+
+- `hpss` — median-filter HPSS (Fitzgerald): harmonic vs percussive Wiener
+  masks
+- `rpca` — Robust PCA via chunked inexact ALM/ADMM: low-rank (`lowrank`)
+  vs sparse (`sparse`) masks
+- `combined` (default) — agreement-weighted fusion of both: Stem 1 =
+  Harmonic+LowRank, Stem 2 = Percussive+Sparse
+
+Stems are real masks applied to the COMPLEX STFT (original phase
+preserved) and rendered through the Phase 0 ISTFT as mono PCM16 WAVs,
+cached under the analysis entry as
+`<entry>/stems/<STEMS_VERSION>/<method>/<stem>.wav` (+ `status.json`).
+Bumping `STEMS_VERSION` in `stems.py` invalidates old caches; evicted
+STFT entries are transparently recomputed.
+
+### GET /api/stems?method=hpss|rpca|combined
+
+Blocking (first call computes, subsequent calls are cache hits). Response
+`200`:
+
+```jsonc
+{
+  "method": "combined",
+  "cached": false,
+  "elapsed_sec": 17.7,       // compute time of the last computation
+  "duration": 89.118,        // stem duration in seconds
+  "sample_rate": 44100,
+  "stems": [
+    {"key": "harmonic",
+     "url": "http://localhost:9630/api/stem?method=combined&name=harmonic"}
+    // stem keys per method: hpss/combined -> harmonic+percussive,
+    //                        rpca -> lowrank+sparse
+  ]
+}
+```
+
+Progress reporting: because the computation can take tens of seconds, the
+frontend (or any client) may poll
+
+    GET /api/stems?method=combined&progress=1
+
+which returns immediately with `{"method": "combined", "done": 3,
+"total": 6}` (work blocks processed; zeros before the first call). The
+blocking call should be issued in parallel; progress is per method.
+
+### GET /api/stem?method=..&name=..
+
+Response `200`: `audio/wav` attachment
+`keyprism_<slug>_<method>_<name>.wav` (slug from the display file name),
+streamed verbatim from the entry cache. Mono PCM16, same sample rate and
+duration as the analysis segment; amplitude is clipped to [-1, 1].
+
+### Error Codes (stems)
+
+| Code | Scenario |
+|----|------|
+| 400 | unknown `method` or `name` (not in the method's stem list) |
+| 404 | stem not computed yet (request `/api/stems` first) |
+| 409 | no track loaded |
+| 500 | separation failed (unreadable analysis artifact etc.) |
+
 ## Error Codes
 
 | Code | Scenario |
@@ -115,6 +185,7 @@ The authoritative definition of the full `data.json` field contract lives in
 it field by field — when the contract changes, both places must be synced.
 
 Reserved contract fields: the payload always contains `"notes": null` and
-`"stems": null`. They are placeholders for upcoming features (note-level
-transcription and separated source stems) and carry no data yet; consumers
-should treat them as optional and ignore `null`.
+`"stems": null`. They are on-demand feature reservations — note-level
+transcription is served through `/api/notes` (Phase 1) and separated
+stems through `/api/stems` (Phase 2); the heavy payload itself stays
+untouched. Consumers should treat them as optional and ignore `null`.

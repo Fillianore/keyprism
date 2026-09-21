@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Phase 2 classic source separation (training-free) over the Phase 0
+  cached complex STFT: `keyprism.hpss` (median-filter HPSS with Wiener
+  soft masks), `keyprism.rpca` (Robust PCA via inexact ALM/ADMM with a
+  two-stage mu schedule, residual early stopping and scale-invariant
+  solve, full-track decomposition built from 400-frame chunks with
+  80-frame cross-faded overlap-add — never a whole-track SVD) and
+  `keyprism.stems` (real masks applied to the complex STFT so the
+  original phase is preserved, streaming ISTFT that emits only sample
+  ranges with complete overlap-add contributors, mono PCM16 WAVs cached
+  per entry as `stems/<version>/<method>/` with atomic swap and
+  byte-deterministic recompute)
+- New HTTP endpoints `GET /api/stems?method=hpss|rpca|combined`
+  (`&progress=1` polls live computation progress) and
+  `GET /api/stem?method=..&name=..` (WAV attachment download); `data.json`
+  keeps `"stems": null` by contract — stem audio is served on demand only
+- Frontend stem player: a Stems On/Off toggle in the top bar plus a panel
+  (per-stem volume, Mute, Solo and a Mix row for the original track,
+  method switch, live progress); all stems and the mix are scheduled on
+  ONE shared AudioContext at ONE absolute timestamp
+  (`source.start(when, offset)`) for sample-accurate multi-track sync,
+  and gain changes ramp via `setTargetAtTime` so mute/solo are click-free
+- player.js now schedules playback with a small absolute lead time and
+  emits transport events (`play`/`pause`/`mixgain`) so companion engines
+  can join the same clock
+
 ## [0.4.0] - 2026-09-21
 
 ### Added
