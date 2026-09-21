@@ -47,6 +47,13 @@
                     title="Download the selected tracks as MIDI">Export MIDI</button>
           </label>
           <label class="ctrl">
+            <span data-i18n="stems">Stems</span>
+            <span class="seg-toggle" id="stemsToggle" role="group" data-i18n-aria="stems" aria-label="Stems">
+              <button type="button" data-stems="off" class="active" data-i18n="notesOff">Off</button>
+              <button type="button" data-stems="on" data-i18n="on">On</button>
+            </span>
+          </label>
+          <label class="ctrl">
             <span data-i18n="pitchRange">Range</span>
             <select id="loSelect"></select>
             <span>–</span>
@@ -98,6 +105,7 @@
       <div id="plot-wrap">
         <div id="plot"></div>
       </div>
+      <div class="stems-panel" id="stemsPanel" hidden></div>
     </div>
     <script type="module">
       import { applyStatic } from './src/i18n.js';

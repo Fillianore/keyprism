@@ -10,12 +10,17 @@
 
 ```
 src/keyprism/cli.py       CLI entry (thin shell, only argparse and dispatch)
-src/keyprism/server.py    HTTP service: ping / spec / notes / midi / upload
+src/keyprism/server.py    HTTP service: ping / spec / notes / midi / stems / upload
                           ← the only module coupled to stdlib httpd
 src/keyprism/analyze.py   staged analysis orchestrator (decode→stft→aggregate→payload)
                           + content-addressed analysis disk cache
 src/keyprism/transcribe.py notes orchestration: cached STFT → salience → onsets
                           → decode, per-track notes disk cache (+ MIDI export glue)
+src/keyprism/stems.py     stem orchestration: cached STFT → HPSS/RPCA masks →
+                          masked complex STFT → streaming ISTFT, per-entry stem
+                          disk cache (Phase 2)
+src/keyprism/hpss.py      median-filter HPSS Wiener masks          ← zero IO
+src/keyprism/rpca.py      chunked inexact-ALM (ADMM) RPCA          ← zero IO
 src/keyprism/tracks.py    monophonic preset registry (bass / lead) — pure data
 src/keyprism/salience.py  loudness weighting + harmonic salience   ← zero IO
 src/keyprism/onset.py     band-limited adaptive onset detection    ← zero IO
@@ -33,10 +38,10 @@ src/keyprism/dsp.py       pure algorithms: semitone aggregation / downsampling /
 > `python -m keyprism`,
 > never write `from src.keyprism import ...`.
 
-Dependencies flow one way: `cli → server → {analyze, transcribe} → payload →
-dsp / transform / audio_io` and `transcribe → {tracks, salience, onset,
-decode, midi_io, analyze}`. Reverse imports and circular dependencies are
-forbidden.
+Dependencies flow one way: `cli → server → {analyze, transcribe, stems} →
+payload → dsp / transform / audio_io` and `transcribe → {tracks, salience,
+onset, decode, midi_io, analyze}`, `stems → {hpss, rpca, transform,
+analyze}`. Reverse imports and circular dependencies are forbidden.
 
 **Layering iron rules**:
 - `dsp.py` and `transform.py` never do IO (no file reads, no print, no
@@ -65,7 +70,7 @@ forbidden.
 ## Modification Rules (pre-merge checklist)
 
 1. **Changed any code under `src/keyprism/`** → `uv run pytest -q` must be
-   fully green (about 6 seconds; no excuse to skip)
+   fully green (about 12 seconds; no excuse to skip)
 2. **Changed the data.json contract** (added/removed/changed fields) → sync
    three places: `payload.py`, `tests/test_payload.py`,
    `frontend/src/main.js`. The contract test's field-by-field assertions
@@ -210,6 +215,71 @@ keep the two in sync when a color changes.
   to 1/4 (documented there). Revisit only together with the REST balance,
   not as a lone tweak.
 
+## Classic Source Separation: Stems (Phase 2+)
+
+`stems.py` orchestrates separation over the Phase 0 cached complex STFT;
+`hpss.py` / `rpca.py` are pure mask factories (zero IO, same discipline
+as `dsp` / `transform`). Decisions that are easy to "simplify" into
+regressions:
+
+- **Masks multiply the COMPLEX STFT.** `X_stem = mask · X_complex` keeps
+  the original phase — masking the magnitude and inventing a phase would
+  smear transients and destroy stereo feel. The mask is real-valued Wiener
+  (Fitzgerald) or low-rank/sparse ratio; never re-render phase.
+- **RPCA chunking is not optional.** A whole-track SVD is OOM-prone and
+  pointless: `rpca.iter_rpca_blocks` processes 400-frame chunks with
+  80-frame overlap and linear cross-fade (complementary ramps summing to
+  1) between chunks. Hard `np.concatenate` of chunk solutions leaves
+  energy steps at seams → clicks after ISTFT. `rpca_full_track` exists
+  only as the tests'/small-inputs reference.
+- **Two-stage mu schedule (ADMM).** Blind geometric mu growth shrinks the
+  SVT/soft thresholds towards zero, silently cancelling BOTH regularizers:
+  the split then satisfies `L+S=X` exactly while `L` absorbs `S`
+  (measured: sparse error 0.54 vs 1e-14 with the schedule). `mu` grows
+  only while `||X-L-S||/||X|| > freeze_tol`, then freezes so the
+  regularizers keep forcing rank/sparsity. The solve is scale-invariant by
+  construction (input normalized by its spectral norm) because raw STFT
+  magnitudes are ~1e-4..1e-1 and absolute thresholds would zero them.
+  Default `tol=5e-4` is deliberate: derived masks shift by ~1e-2
+  (≈0.1 dB, inaudible) while the SVD count drops ~3x — tighten it only if
+  the split itself (not its masks) becomes the product.
+- **Streaming ISTFT emission is sample-exact.** Per work block the masked
+  complex rows of the previous `win//hop` frames are kept as a tail; a
+  block emits exactly the samples `[a·hop − win//2, b·hop − win//2)`
+  whose overlap-add contributors are all inside the buffer — the
+  concatenation equals a hypothetical full-matrix ISTFT bit for bit
+  (locked by test against the full reference, tolerance = PCM16
+  quantization). Do not replace this with per-chunk ISTFT + concatenate.
+- **Chunk-boundary exactness for HPSS.** `medfilt2d` reaches
+  `Kt//2` frames across boundaries, so each block loads real magnitude
+  rows of context from the memmap and keeps only the interior — streamed
+  masks are bit-equal to a full-track call (locked by test). The block
+  edges use zero padding exactly like a full-track medfilt would.
+- **Cache invalidation**: stems live at
+  `<analysis entry>/stems/<STEMS_VERSION>/<method>/<stem>.wav` +
+  `status.json`. Bump `STEMS_VERSION` in `stems.py` when masks, the
+  fusion, the ISTFT emission or the WAV layout change in a way that must
+  invalidate old files (same rule as `MONO_VERSION`). Writes go to a
+  `.tmp-<pid>` directory with an atomic `os.replace` so a crashed compute
+  never leaves half-written stems.
+- **On-demand contract**: `data.json` keeps `"stems": null` (owned by
+  `payload.py`, unchanged); audio is served only through `/api/stems` +
+  `/api/stem` — the endpoint streams WAV bytes directly from the entry
+  cache (no copy into `frontend/public`, so static-mode builds and cache
+  eviction stay consistent). `/api/stems?...&progress=1` is a
+  non-blocking poll of the in-memory progress registry; the blocking call
+  must be issued in parallel (ThreadingHTTPServer handles it).
+- **Frontend sync contract** (`frontend/src/stems.js` + `player.js`):
+  everything plays through the player's ONE shared AudioContext, and the
+  transport emits `('play', {offset, when})` with a single absolute
+  timestamp `when = ctx.currentTime + START_LEAD`; every
+  AudioBufferSourceNode — mix and stems — calls `source.start(when,
+  offset)` with that same `when`. Never serialize starts, never use
+  setTimeout for scheduling. If you change `START_LEAD` in one file,
+  change it in both. Mute/solo/volume only ramp GainNodes
+  (`setTargetAtTime`), which is click-free; stopping sources is allowed
+  to be abrupt (matches the mix transport).
+
 ## Known Boundaries & Pitfalls (must read before changing)
 
 - `PUBLIC_DIR`/`DEMO_AUDIO` locate the repo root via `_repo_root()` (walks up
@@ -230,7 +300,7 @@ keep the two in sync when a color changes.
 
 ```bash
 uv sync                        # install/sync Python deps (incl. dev test group)
-uv run pytest -q               # regression tests (30 cases, ~6s)
+uv run pytest -q               # regression tests (95 cases, ~12s)
 uv run python -m keyprism --serve 9630   # start the backend manually (loads assets/demo.m4a by default)
 bash scripts/start.sh          # one-command start of both ends (ports/workspace see ~/.keyprism/config.env)
 scripts/release.sh --bump minor --dry-run  # preview the next release cut

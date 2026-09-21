@@ -638,6 +638,129 @@ input[type='range']:active::-moz-range-thumb {
   background: rgba(255, 255, 255, 0.06) !important;
 }
 
+/* ---------- Stem player panel (Phase 2): bottom strip between the plot
+ *  and the transport bar; one row per stem with volume + Mute/Solo
+ *  hardware keys in the console language ---------- */
+.stems-panel {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  padding: 6px 16px;
+  background: linear-gradient(180deg, #101014, #0d0d10);
+  border-top: 1px solid var(--edge-lo);
+  box-shadow: inset 0 1px 0 var(--edge-hi);
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--text);
+  user-select: none;
+}
+
+.stems-title {
+  color: var(--ivory);
+  letter-spacing: 0.5px;
+  font-weight: 600;
+}
+
+.stems-method {
+  appearance: none;
+  -webkit-appearance: none;
+  background-color: #0c0c0f;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='9' height='6'%3E%3Cpath d='M1 1l3.5 3.5L8 1' fill='none' stroke='%239a8f72' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 6px center;
+  color: var(--text);
+  border: 1px solid #26262c;
+  border-radius: 6px;
+  padding: 2px 20px 2px 7px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.stems-method:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.stems-status {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.stem-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.stem-name {
+  color: var(--stem-color, var(--text));
+  min-width: 68px;
+  white-space: nowrap;
+}
+
+.stem-row-mix .stem-name {
+  color: var(--ivory);
+  border-bottom: 1px dotted rgba(152, 145, 127, 0.55);
+}
+
+.stem-vol {
+  width: 96px;
+}
+
+.stem-vol::-webkit-slider-runnable-track {
+  background:
+    linear-gradient(
+      90deg,
+      var(--gold-dim),
+      var(--gold-hi) var(--fill, 0%),
+      rgba(0, 0, 0, 0) var(--fill, 0%)
+    ),
+    linear-gradient(180deg, #060607, #17171c);
+}
+
+.stem-vol::-moz-range-progress {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--gold-dim), var(--gold-hi));
+}
+
+.stem-btn {
+  background: linear-gradient(180deg, #2b2b32, #1b1b20 62%, #17171b);
+  border: 1px solid #35353d;
+  color: #a49c8a;
+  border-radius: 5px;
+  cursor: pointer;
+  padding: 0 7px;
+  font-size: 10px;
+  line-height: 1.6;
+  font-family: inherit;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 1px 2px rgba(0, 0, 0, 0.5);
+  transition:
+    color var(--t),
+    border-color var(--t),
+    background var(--t),
+    box-shadow var(--t);
+}
+
+.stem-btn:hover {
+  border-color: var(--gold-line);
+  color: var(--gold-hi);
+}
+
+.stem-btn.active {
+  background: linear-gradient(180deg, #eeda9e, #d3ad66 55%, #b98f47);
+  border-color: #8a6d3b;
+  color: #241c0e;
+  font-weight: 700;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.5),
+    0 0 8px rgba(214, 171, 102, 0.25);
+}
+
 /* ---------- Player: bottom lacquered beam ---------- */
 .player-bar {
   display: flex;

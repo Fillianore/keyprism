@@ -16,6 +16,7 @@ suite of interactive analysis tools.
 
 ```
 audio → STFT → semitone aggregation → interactive heatmap + player
+              └→ source separation (HPSS / RPCA) → stem player
 ```
 
 <div align="center">
@@ -47,6 +48,18 @@ audio → STFT → semitone aggregation → interactive heatmap + player
 - **MIDI export**: one click downloads the transcribed tracks as a Standard
   MIDI File (type 0 single track / type 1 for both, detected BPM tempo map,
   velocity scaled by note confidence)
+- **Classic source separation (stems)**: training-free HPSS (median-filter
+  harmonic/percussive masks), RPCA (chunked ADMM low-rank/sparse) and a
+  combined fusion are computed on demand against the cached complex STFT
+  and rendered to per-stem WAV files (original phase preserved), cached
+  under the analysis entry and served on demand (`/api/stems`, serve mode
+  required)
+- **Stem player**: a multi-track panel (per-stem volume, Mute, Solo plus a
+  Mix row for the original track) driven by the same transport — all stems
+  start on one absolute AudioContext timestamp together with the mix, so
+  playback is sample-accurately synchronized; mute/solo switch via ramped
+  gain nodes without clicks or pops; stems are downloadable as WAVs for
+  external DAWs
 - **Online track picking**: the "Select music" button in the top bar picks a
   local audio file, uploads it to the backend for analysis and switches the
   whole page (serve mode required)
@@ -85,9 +98,20 @@ keyprism/
 │       ├── __main__.py    # python -m keyprism entry point
 │       ├── cli.py         # CLI argument parsing and dispatch
 │       ├── dsp.py         # pure algorithms: STFT / semitone aggregation / downsampling / BPM
+│       ├── transform.py   # complex STFT/ISTFT + dB magnitude + peak refine (zero IO)
 │       ├── audio_io.py    # decode chain: sndfile→PyAV fallback / browser transcoding / path constants
+│       ├── analyze.py     # staged analysis orchestrator + complex-STFT disk cache
 │       ├── payload.py     # frontend contract: single source of truth for data.json fields
-│       └── server.py      # HTTP service: /api/ping /api/spec /api/upload
+│       ├── tracks.py      # monophonic preset registry (bass / lead)
+│       ├── salience.py    # loudness weighting + harmonic salience (zero IO)
+│       ├── onset.py       # band-limited adaptive onset detection (zero IO)
+│       ├── decode.py      # Viterbi single-pitch decoder (zero IO)
+│       ├── midi_io.py     # note events → Standard MIDI File (zero IO)
+│       ├── transcribe.py  # notes orchestration + per-track notes cache
+│       ├── hpss.py        # median-filter HPSS masks (zero IO)
+│       ├── rpca.py        # chunked inexact-ALM RPCA (zero IO)
+│       ├── stems.py       # stem synthesis + per-entry stem cache
+│       └── server.py      # HTTP service: /api/ping /api/spec /api/notes /api/stems /api/upload
 ├── pyproject.toml         # uv project definition (deps locked in uv.lock, TUNA index by default)
 ├── scripts/               # launch & release scripts (config & ports below)
 │   ├── start.sh           # one-command start, Linux / macOS
@@ -107,19 +131,23 @@ keyprism/
         ├── spectrogram.js # heatmap + keyboard + measure grid + layout
         ├── ticks.js       # adaptive ticks + time-range clamping
         ├── i18n.js        # EN/中文 UI translations + language persistence
-        ├── player.js      # Web Audio playback engine
+        ├── player.js      # Web Audio playback engine + transport events
+        ├── notes.js       # note overlay (Phase 1 transcription)
+        ├── stems.js       # stem player: Web Audio multi-track sync (Phase 2)
         └── style.css
 ```
 
 ## Testing
 
 `tests/` implements no product features; it is an automated regression suite.
-After changing code, run `uv run pytest -q`: 30 cases covering DSP algorithms
+After changing code, run `uv run pytest -q`: 95 cases covering DSP algorithms
 (including a deterministic 120 BPM click-track case), the decode-chain
 fallback (real m4a encoding), the payload contract (field-by-field assertions
-the frontend depends on), and all HTTP routes (upload switching / error codes
-/ CORS preflight). It is the safety net for refactoring and new features —
-keep it.
+the frontend depends on), transcription (synthetic note recovery), source
+separation (HPSS/RPCA synthesis, ADMM convergence, chunked-vs-full
+equivalence, streaming ISTFT exactness), and all HTTP routes (upload
+switching / notes / stems / error codes / CORS preflight). It is the safety
+net for refactoring and new features — keep it.
 
 CI (`.github/workflows/ci.yml`) runs the same flow automatically on every
 push / PR: backend `uv sync + pytest` + launch-script syntax check, frontend
@@ -151,7 +179,8 @@ supported):
 ~/.keyprism/
 ├── logs/               # backend.log / vite.log (redirected by launch scripts)
 ├── cache/matplotlib/   # matplotlib font and config cache
-├── cache/analysis/     # complex-STFT analysis cache (stft.npy + meta.json)
+├── cache/analysis/     # complex-STFT analysis cache (stft.npy + meta.json,
+│                       #   plus per-entry notes/ and stems/ results)
 ├── uploads/            # staging for audio uploaded via "Select music" (only the latest few are kept)
 └── config.env          # optional persistent config: KEY=VALUE, lines starting with # are comments
 ```
@@ -243,6 +272,10 @@ uv run python -m keyprism [audio] [--serve PORT] [--rate R] [--sub S]
 |------|------|
 | `GET /api/ping` | health check |
 | `GET /api/spec?rate=15&sub=5` | recompute the spectrum at the given resolution (three channels + envelopes), cached |
+| `GET /api/notes?track=bass\|lead\|both` | monophonic transcription notes, cached per track |
+| `GET /api/midi?track=bass\|lead\|both` | the same notes as a Standard MIDI File download |
+| `GET /api/stems?method=hpss\|rpca\|combined` | separated stems of the current track (`&progress=1` polls a running computation) |
+| `GET /api/stem?method=..&name=..` | one stem as a WAV attachment download |
 | `POST /api/upload?name=song.mp3` | upload a local audio file (request body is raw file bytes); the backend analyzes it, switches the current track and refreshes `data.json`; returns the full payload |
 
 For the full reference (error codes / response structure / preflight) see
@@ -260,6 +293,8 @@ covering mainstream audio formats.
 | Drag the spectrogram | pan (clamped at both ends; cannot drag past the track) |
 | Double click | restore the full-track view |
 | Click the spectrogram | seek playback (no autoplay) |
+| Stems → On | computes/serves the separated stems and opens the stem panel below the plot (serve mode required); the mix is muted automatically and hands back on Off |
+| Stem panel | per-stem volume slider, M (mute), S (solo); method switch (combined / HPSS / RPCA); download via `/api/stem` links |
 | Bottom navigation bar | drag the window to pan / drag handles to resize / click empty space to jump |
 | Top bar | resolution, channel, pitch range, BPM, offset, time signature, palette, color floor, highlight γ |
 | Click a numeric label | type a value directly (Enter commits / Esc cancels), ↺ restores the default |
@@ -290,6 +325,20 @@ covering mainstream audio formats.
   LRU eviction capped by `KEYPRISM_CACHE_MAX_ENTRIES`, default 8).
   Re-analyzing the same track with the same settings skips the STFT stage
   entirely; delete the directory to reclaim space or force a recompute
+- **Stem separation**: HPSS/RPCA masks are computed in memmap row chunks
+  (never a full-track complex or mask matrix in RAM) and multiplied into
+  the complex STFT so the original phase is kept; the streaming ISTFT
+  emits only sample ranges whose overlap-add contributors are complete,
+  making the output bit-consistent with a full-matrix reconstruction.
+  Stems cache next to the STFT entry (`stems/<version>/<method>/`), so
+  the first request for a method pays the compute (a few seconds for the
+  demo track) and later requests serve files instantly
+- **Stem player sync**: every stem and the mix are scheduled with
+  `source.start(when, offset)` on ONE shared AudioContext at ONE absolute
+  timestamp (`ctx.currentTime + 0.06`), so multi-track playback is
+  sample-accurate with no drift; mute/solo/volume only ramp GainNodes
+  (`setTargetAtTime`), never rescheduling, which keeps switching
+  click-free
 
 ## License
 
