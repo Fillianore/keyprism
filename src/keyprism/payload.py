@@ -111,7 +111,9 @@ def finalize_payload(path: Path, dur: float, bpm: float, beat_offset: float,
 
     The tail of ``analyze``, split out so the staged orchestrator
     (``keyprism.analyze``) can reuse it without re-deriving BPM or spectra.
-    Field set and values are identical to the historical inline assembly.
+    Field set and values are identical to the historical inline assembly,
+    plus the ``notes`` / ``stems`` reservation fields (always null in
+    Phase 0; reserved for note-level transcription / source separation).
     """
     notes = list(range(MIDI_MIN, MIDI_MAX + 1))
     audio_name = browser_safe_audio(path)
@@ -137,6 +139,11 @@ def finalize_payload(path: Path, dur: float, bpm: float, beat_offset: float,
         "audioFile": audio_name,
         "bpm": bpm,
         "beatOffsetSec": beat_offset,
+        # Reserved for future phases — always null in Phase 0:
+        #   notes: note-level transcription (Phase 1)
+        #   stems: separated source stems (Phase 2)
+        "notes": None,
+        "stems": None,
         **res,
     }
     return payload

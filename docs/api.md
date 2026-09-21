@@ -59,3 +59,8 @@ curl -X POST --data-binary @song.m4a \
 The authoritative definition of the full `data.json` field contract lives in
 `src/keyprism/payload.py`; the contract test `tests/test_payload.py` asserts
 it field by field — when the contract changes, both places must be synced.
+
+Reserved contract fields: the payload always contains `"notes": null` and
+`"stems": null`. They are placeholders for upcoming features (note-level
+transcription and separated source stems) and carry no data yet; consumers
+should treat them as optional and ignore `null`.
