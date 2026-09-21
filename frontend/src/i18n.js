@@ -31,6 +31,7 @@ const dict = {
     langToggleTitle: 'Switch language',
 
     updatingSpec: 'Updating spectrogram',
+    renderingSpec: 'Rendering spectrogram',
     dataLoadFailed:
       'Failed to load data.json ({status}). Start the backend first',
     dataStale:
@@ -83,6 +84,7 @@ const dict = {
     langToggleTitle: '切换语言',
 
     updatingSpec: '正在更新频谱',
+    renderingSpec: '正在渲染频谱',
     dataLoadFailed: 'data.json 加载失败 ({status}), 请先启动后端',
     dataStale: 'data.json 结构过期: 请重新运行后端并强制刷新页面 (Ctrl+F5)',
     staticMode: '(静态模式, 切换分辨率需后端 --serve)',

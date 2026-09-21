@@ -139,23 +139,9 @@ let sub = 1; // subbands per semitone (row count = N_ROWS * sub)
 /** y-axis semitone ticks: the center row of semitone m = m*sub + (sub-1)/2 */
 const rowOf = (m) => m * sub + (sub - 1) / 2;
 
-/** Per-cell note label array for the hover tooltip, shaped exactly like z
- *  ([row][col]); heatmap hover reads text[row][col] — a row-wise-only array
- *  leaves %{text} unresolved. One row = one subband, so all cells of a row
- *  share the semitone's label (rows share one filled array of the same
- *  string reference, cheap even at 88 x several-thousand columns). With
- *  sub > 1 the subband is appended low -> high, e.g. "C4 (2/5)" */
-export function rowNotes(data, s, nCols) {
-  const labels = data.noteLabels;
-  const nRows = labels.length * s;
-  const out = new Array(nRows);
-  for (let r = 0; r < nRows; r++) {
-    const m = Math.floor(r / s);
-    const label = s > 1 ? `${labels[m]} (${(r % s) + 1}/${s})` : labels[m];
-    out[r] = new Array(nCols).fill(label);
-  }
-  return out;
-}
+/** Per-cell note labels for the hover tooltip are built by the spec feed
+ *  (specfeed.js) together with z — pooled width keeps the allocation tiny
+ *  at high resolutions */
 
 function yaxisConfig(data) {
   const [lo, hi] = pitchRange;
@@ -172,11 +158,10 @@ function yaxisConfig(data) {
 }
 
 /** Switch subbands per semitone (row count changes); re-apply the y axis
- *  (shapes use axis-domain fractions so they are unaffected) and rebuild the
- *  per-cell hover labels */
-export function setSub(gd, s, data, nCols) {
+ *  (shapes use axis-domain fractions so they are unaffected). The per-cell
+ *  hover text and z/y are rebuilt by the spec feed (specfeed.js) */
+export function setSub(gd, s, data) {
   sub = s;
-  Plotly.restyle(gd, { text: [rowNotes(data, s, nCols)] }, [0]);
   Plotly.relayout(gd, { yaxis: yaxisConfig(data) });
 }
 
@@ -223,7 +208,7 @@ function gridShapes() {
 
 /** Assemble all current shapes: keyboard + measure grid (the playback cursor
  *  is an HTML overlay and does not occupy a shape) */
-function currentShapes(gd, xs) {
+function currentShapes() {
   return [
     ...keyboardShapes(pitchRange[0], pitchRange[1]),
     ...gridShapes(),
@@ -233,7 +218,7 @@ function currentShapes(gd, xs) {
 /** Apply the measure grid (BPM / offset in ms / beats per measure) */
 export function applyGrid(gd, opts) {
   gridState = opts;
-  Plotly.relayout(gd, { shapes: currentShapes(gd, null) });
+  Plotly.relayout(gd, { shapes: currentShapes() });
 }
 
 /** Apply the pitch range: clip the y axis + full shape rebuild (grid and
@@ -242,12 +227,13 @@ export function applyPitchRange(gd, data, lo, hi) {
   pitchRange = [lo, hi];
   Plotly.relayout(gd, {
     yaxis: yaxisConfig(data),
-    shapes: currentShapes(gd, null),
+    shapes: currentShapes(),
   });
 }
 
-/** Create the heatmap and layout, returns { gd, playheadIdx } */
-export function buildFigure(el, data, xs, spec) {
+/** Create the heatmap and layout; `spec` is the complete pooled matrix
+ *  built by the spec feed (specfeed.js). Returns { gd } */
+export function buildFigure(el, data, spec) {
   const initViewMs = data.initViewSec * 1000;
   sub = data.defaultSub || 1;
   if (data.bpm) {
@@ -265,14 +251,15 @@ export function buildFigure(el, data, xs, spec) {
   const traces = [
     {
       type: 'heatmap',
-      z: spec,
-      x: xs,
-      y: Array.from({ length: spec.length }, (_, i) => i), // numeric row index
+      z: spec.z,
+      x: spec.xs,
+      // pooled row centers in input-row units (see specfeed.js)
+      y: spec.y,
       colorscale: data.colorscales[data.defaultCmap],
       zmin: -data.dbRange,
       zmax: 0,
       showscale: false,
-      text: rowNotes(data, sub, xs.length),
+      text: spec.text,
       hovertemplate: t('hoverTemplate'),
       zsmooth: false,
     },
@@ -285,11 +272,11 @@ export function buildFigure(el, data, xs, spec) {
     paper_bgcolor: 'rgba(0,0,0,0)',
     plot_bgcolor: 'rgba(0,0,0,0)',
     margin: { l: 20, r: 20, t: 16, b: 40 },
-    shapes: currentShapes(null, xs),
+    shapes: currentShapes(),
     xaxis: {
       type: 'date',
       domain: [0.062, 1.0],
-      range: [xs[0], iso(EPOCH_MS + initViewMs)],
+      range: [spec.xs[0], iso(EPOCH_MS + initViewMs)],
       tickformat: '%M:%S',
       dtick: pickDtickMs(initViewMs),
       tickfont: tickStyle,

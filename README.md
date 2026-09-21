@@ -18,6 +18,12 @@ suite of interactive analysis tools.
 audio → STFT → semitone aggregation → interactive heatmap + player
 ```
 
+<div align="center">
+
+<img src="assets/preview.png" alt="KeyPrism frontend preview" width="880"/>
+
+</div>
+
 ## Feature Overview
 
 ### Spectral Analysis
@@ -25,7 +31,7 @@ audio → STFT → semitone aggregation → interactive heatmap + player
   tick per second for windows within 16s), 88 semitones on the vertical axis
 - **Stereo, three channels**: mix / left / right spectra, unified peak
   normalization (dB comparable across channels)
-- **Switchable resolution**: time-column density 5/10/15/30 columns per second
+- **Switchable resolution**: time-column density 15/30/60 columns per second
   × semitone subdivision 1/5/10 subbands, recomputed live by the backend
   (serve mode required) with a progress dialog and staged progress bar
 - **Subband widening**: in high-subdivision modes, energy is widened along the
@@ -215,7 +221,7 @@ uv run python -m keyprism [audio] [--serve PORT] [--rate R] [--sub S]
 | `audio` | input audio file; `assets/demo.m4a` is loaded when omitted | `assets/demo.m4a` |
 | `--serve PORT` | long-running API mode; the frontend can hot-switch resolution / upload audio | off |
 | `--host` | serve-mode listen address (use `0.0.0.0` for LAN access) | `127.0.0.1` |
-| `--rate` | time-column density (columns/second), one of 5/10/15/30 | 15 |
+| `--rate` | time-column density (columns/second), one of 15/30/60 | 15 |
 | `--sub` | subbands per semitone, one of 1/5/10 | 1 |
 | `--start` / `--end` | analyze only a segment of the audio | whole track |
 | `--window` | STFT window size (samples, power of two) | 8192 |

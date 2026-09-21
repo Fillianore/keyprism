@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-09-21
+
+### Added
+
+- Frontend interface preview screenshot in both READMEs (`assets/preview.png`,
+  shown centered under the intro pipeline)
+
+### Changed
+
+- Resolution options trimmed to 15/30/60 columns per second (5 and 10
+  removed); 15 remains the default
+
+### Fixed
+
+- Spectrogram scrolling at 60 cols/s × 10 subbands reworked: the trace now
+  holds the complete pooled matrix — subband rows max-pooled to ~one row
+  per screen pixel (peaks preserved) and columns capped for very long
+  tracks (`frontend/src/specfeed.js`) — rendered once per data change with
+  no viewport slicing or dynamic loading. Pan/zoom during a wheel gesture
+  slides the trace layer via a transient SVG transform (the same trick as
+  plotly's own drag pan), pixel-perfect seamless, committed with a single
+  relayout after the gesture goes idle or on pointerdown; the playhead
+  follows the same affine so it stays glued to the content. While that
+  commit replot blocks the main thread on large matrices, a modal-style
+  overlay in the progress-dialog visual language (lighter backdrop, no
+  input blocking) shows a composited sliding bar that keeps moving through
+  the block
+
 ## [0.3.2] - 2026-09-20
 
 ### Added
