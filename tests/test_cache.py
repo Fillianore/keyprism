@@ -13,7 +13,7 @@ import pytest
 
 from keyprism import analyze, audio_io
 from keyprism.transform import iter_stft_chunks, stft_complex
-from helpers import SR, tone_stereo
+from helpers import SR, make_wav, tone_stereo
 
 
 @pytest.fixture(autouse=True)
@@ -180,3 +180,76 @@ def test_evict_keeps_most_recent_entries():
         del os.environ["KEYPRISM_CACHE_MAX_ENTRIES"]
     assert newest.is_dir()
     assert not any(d.is_dir() for d in entries)
+
+
+# ----------------------------------------------------- staged analysis
+
+@pytest.fixture()
+def isolated_pub(tmp_path, monkeypatch):
+    pub = tmp_path / "pub"
+    pub.mkdir()
+    monkeypatch.setattr(audio_io, "PUBLIC_DIR", pub)
+    return pub
+
+
+@pytest.fixture()
+def wav_file(tmp_path):
+    p = tmp_path / "t.wav"
+    make_wav(p, seconds=2.0)
+    return p
+
+
+def test_run_analysis_payload_matches_legacy(wav_file, isolated_pub):
+    from keyprism.payload import analyze as legacy_analyze
+    payload, (data2d, sr, dur) = analyze.run_analysis(
+        wav_file, window=2048, rate=5, sub=1)
+    pre = audio_io.load_channels(wav_file, 0.0, None)
+    legacy = legacy_analyze(wav_file, 0.0, None, 2048, 70.0, 5, 1,
+                            preloaded=pre)
+    assert payload == legacy  # includes bpm/beat_offset/quantized bytes
+
+
+def test_second_run_skips_stft_compute(wav_file, isolated_pub, monkeypatch):
+    counter = {"n": 0}
+    real = analyze._compute_and_store
+
+    def counting(*a, **k):
+        counter["n"] += 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(analyze, "_compute_and_store", counting)
+    p1, _ = analyze.run_analysis(wav_file, window=2048, rate=5, sub=1)
+    assert counter["n"] == 1
+    stfts = list(analyze.cache_root().glob("*/*/stft.npy"))
+    assert len(stfts) == 1
+    mtime1 = stfts[0].stat().st_mtime_ns
+    p2, _ = analyze.run_analysis(wav_file, window=2048, rate=5, sub=1)
+    assert counter["n"] == 1  # stft stage served from cache
+    assert stfts[0].stat().st_mtime_ns == mtime1  # stft.npy untouched
+    assert p2 == p1  # cache-hit payload identical to the fresh one
+
+
+def test_param_change_causes_recompute(wav_file, isolated_pub, monkeypatch):
+    counter = {"n": 0}
+    real = analyze._compute_and_store
+
+    def counting(*a, **k):
+        counter["n"] += 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(analyze, "_compute_and_store", counting)
+    analyze.run_analysis(wav_file, window=2048, rate=5, sub=1)
+    analyze.run_analysis(wav_file, window=2048, rate=5, sub=1)
+    assert counter["n"] == 1  # same params -> cache hit
+    analyze.run_analysis(wav_file, window=2048, rate=30, sub=5)
+    assert counter["n"] == 2  # different params -> separate key, recompute
+    assert len(list(analyze.cache_root().glob("*/*/stft.npy"))) == 2
+
+
+def test_console_progress_reproduces_legacy_lines(wav_file, isolated_pub,
+                                                  capsys):
+    analyze.run_analysis(wav_file, window=2048, rate=5, sub=1)
+    out = capsys.readouterr().out.splitlines()
+    assert out[0].startswith("[1/3] 已加载 2.0s @ 22050 Hz, 2 声道")
+    assert "[2/3] 估计 BPM " in out[1] and "首拍偏移" in out[1]
+    assert out[2] == "[3/3] 分辨率 15 列/s x 1 子带/半音 -> 88 行 x 44 列 x 3 通道"
