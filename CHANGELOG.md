@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Phase 0 analysis foundation: the complex-valued STFT now lives in a new
+  `keyprism.transform` module (byte-identical numerics to the previous
+  scipy-based path, locked by round-trip / naive-reference-equivalence /
+  Parseval / byte-determinism tests) together with an ISTFT overlap-add
+  inverse, legacy-semantics dB magnitude helper and a sub-bin parabolic
+  peak refiner; `dsp.py` keeps its full public API as a thin façade
+- Content-addressed analysis cache under
+  `~/.keyprism/cache/analysis/<pcm16>/<params16>/`: repeated analysis of
+  the same track and parameters reuses the stored full-resolution
+  mix-channel complex STFT (`stft.npy`, complex64 memmap artifact
+  chunk-filled in ≤2048-frame slices with per-chunk flush, plus
+  `meta.json`) instead of recomputing it; LRU eviction capped by
+  `KEYPRISM_CACHE_MAX_ENTRIES` (default 8)
+- Staged analysis orchestration shared by CLI static mode and serve mode
+  (decode → stft → aggregate → payload) with stage weights (stft 0.6 /
+  aggregate 0.3 / payload 0.1) surfaced through a progress callback;
+  console progress output is unchanged
+- Payload contract reservations: `notes` and `stems` fields are always
+  present and `null` in this release (reserved for note-level
+  transcription and separated source stems in later phases)
+
 ## [0.3.3] - 2026-09-21
 
 ### Added

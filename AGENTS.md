@@ -11,9 +11,12 @@
 ```
 src/keyprism/cli.py       CLI entry (thin shell, only argparse and dispatch)
 src/keyprism/server.py    HTTP service: ping / spec / upload   ← the only module coupled to stdlib httpd
+src/keyprism/analyze.py   staged analysis orchestrator (decode→stft→aggregate→payload)
+                          + content-addressed analysis disk cache
 src/keyprism/payload.py   frontend contract: single source of truth for data.json fields (incl. matplotlib envelope rendering)
 src/keyprism/audio_io.py  decode chain (sndfile→PyAV fallback) + path constants (PUBLIC_DIR / KEYPRISM_HOME)
-src/keyprism/dsp.py       pure algorithms: STFT / semitone aggregation / downsampling / BPM   ← zero IO, numpy arrays in and out
+src/keyprism/transform.py complex STFT/ISTFT + dB magnitude + peak refine  ← zero IO, numpy arrays in and out
+src/keyprism/dsp.py       pure algorithms: semitone aggregation / downsampling / BPM (+ stft_power façade)  ← zero IO, numpy arrays in and out
 ```
 
 > src layout note: source lives in `src/keyprism/`, but the package name is
@@ -22,16 +25,17 @@ src/keyprism/dsp.py       pure algorithms: STFT / semitone aggregation / downsam
 > `python -m keyprism`,
 > never write `from src.keyprism import ...`.
 
-Dependencies flow one way: `cli → server → payload → dsp / audio_io`.
-Reverse imports and circular dependencies are forbidden.
+Dependencies flow one way: `cli → server → analyze → payload → dsp /
+transform / audio_io`. Reverse imports and circular dependencies are
+forbidden.
 
 **Layering iron rules**:
-- `dsp.py` never does IO (no file reads, no print, no network) — that is the
-  prerequisite for testing it in isolation
+- `dsp.py` and `transform.py` never do IO (no file reads, no print, no
+  network) — that is the prerequisite for testing them in isolation
 - `data.json` fields may only be defined in one place, `payload.py`; the
   frontend `frontend/src/main.js` is a consumer
 - If the web framework is ever swapped (FastAPI/WebSocket etc.), only
-  `server.py` should be thrown away and rewritten; the other four layers
+  `server.py` should be thrown away and rewritten; the other layers
   survive untouched — that is the core reason for the split
 
 ## Design Intent Archive (why it is the way it is)
@@ -111,6 +115,47 @@ Ground rules:
   commit lineage from master, the merge base never advances and every
   subsequent release PR re-conflicts on the same doc/CHANGELOG regions
   (squash is fine for feature → devel PRs)
+
+## Analysis Cache & Memmap Discipline (Phase 0+)
+
+The complex STFT is the internal source of truth for future analysis
+features (source separation, transcription). Since Phase 0 it is cached
+under `$KEYPRISM_HOME/cache/analysis/<pcm16>/<params16>/`:
+
+- **Key scheme**: `pcm16` = sha256[:16] of the decoded segment's canonical
+  PCM16 bytes (row-interleaved int16 of clipped floats); `params16` =
+  sha256[:16] of canonical JSON of `{sr, win, hop, window, center, rate,
+  sub, db_range, start, end}`. Note `rate`/`sub` do not influence the STFT
+  itself but are part of the key — each resolution therefore gets its own
+  entry. That duplication is deliberate (cheap disk, simple invalidation);
+  do not "deduplicate" it without revisiting the contract.
+- **Artifacts**: `stft.npy` — complex64, shape `(n_frames, win//2+1)`,
+  time-major so one frame = one contiguous row (memmap friendly) — plus
+  `meta.json` (params, sr/win/hop, n_frames/n_bins, duration, and the
+  derived `bpm`/`beat_offset_sec`; Python float → JSON → float round-trips
+  exactly, which is what makes cache hits bit-reproducible).
+- **Never hold the full complex STFT in RAM.** Writes go through
+  `np.lib.format.open_memmap` in row chunks of at most 2048 frames
+  (`STORE_CHUNK_FRAMES = 512`), flushed per chunk, atomic rename into
+  place; reads go through `np.load(..., mmap_mode="r")` row slices
+  (`analyze.iter_chunks`). Float64 *power* matrices of legacy size are
+  fine — the ban targets complex matrices (2–4× the bytes).
+- **complex64 is lossy vs the float64 core.** Anything feeding the payload
+  quantization must derive from the float64 core (the orchestrator squares
+  the pre-cast float64 chunks). The cached complex64 artifact exists for
+  future phases, not for byte-identical payload replay.
+- **Eviction**: LRU by `stft.npy` mtime, cap `KEYPRISM_CACHE_MAX_ENTRIES`
+  (default 8; usual env > config.env > default precedence — config.env is
+  materialized into the environment by the launch scripts).
+- **Test seam**: `analyze.cache_root()` reads `audio_io.KEYPRISM_HOME` at
+  call time (module attribute, never a from-import value) — same pattern
+  the server tests rely on for `PUBLIC_DIR`.
+- **Numerics contract**: `transform.py` reproduces the legacy
+  `scipy.signal.stft` conventions bit for bit (periodic hann, center
+  `win//2` zero padding on both sides, tail padding, divide by
+  `win.sum()`, hop = `win - win*3//4`); `tests/test_transform.py` locks
+  this against a naive reference STFT written in the test file. Do not
+  "optimize" the framing math without re-locking those tests.
 
 ## Known Boundaries & Pitfalls (must read before changing)
 
