@@ -31,6 +31,11 @@
   切换由后端实时重算（需 serve 模式），进度弹窗 + 分阶段进度条
 - **子带展宽**：高细分模式下沿频率轴做三角核能量展宽，避免信息碎片化
 - **BPM 识别**：频谱通量自相关估计 BPM 与首拍偏移，小节网格叠加（可手动修正 BPM/偏移/拍号）
+- **单音轨转写（贝斯/旋律）**：预设驱动的音符检测（谐波显著度 + 次谐波抑制、
+  限带起始检测、Viterbi 单音解码），以彩色音符矩形叠加在频谱图上，
+  顶栏 关/贝斯/旋律/全部 切换；结果按音轨缓存、按需提供（`/api/notes`，需 serve 模式）
+- **MIDI 导出**：一键下载转写音轨为标准 MIDI 文件（单音轨 type 0 / 双音轨 type 1，
+  携带检测 BPM 速度轨，力度随音符置信度缩放）
 - **在线选曲**：顶栏"选择音乐"按钮选择本地音频，上传后端解析并整页切换（需 serve 模式）
 - **音频格式**：mp3/wav/ogg/flac 直接读取；m4a/aac/wma/opus/aiff 等其他主流容器
   经 PyAV (ffmpeg) 解码（sndfile 不支持时自动回退），并自动转存浏览器全兼容的
@@ -118,6 +123,7 @@ CHANGELOG 并开发版 PR。合并后由 workflow 自动接管：打 `v<版本>`
 ~/.keyprism/
 ├── logs/               # backend.log / vite.log (启动脚本重定向)
 ├── cache/matplotlib/   # matplotlib 字体与配置缓存
+├── cache/analysis/     # 复数 STFT 分析缓存 (stft.npy + meta.json)
 ├── uploads/            # "选择音乐" 上传的音频暂存 (自动只保留最近几个)
 └── config.env          # 可选持久配置: KEY=VALUE, # 开头为注释
 ```
@@ -129,6 +135,7 @@ CHANGELOG 并开发版 PR。合并后由 workflow 自动接管：打 `v<版本>`
 |------|------|------|
 | `KEYPRISM_HOME` | 工作区根目录 | `~/.keyprism` |
 | `KEYPRISM_LOG_DIR` | 日志目录 | `$KEYPRISM_HOME/logs` |
+| `KEYPRISM_CACHE_MAX_ENTRIES` | 分析缓存 LRU 容量（按曲目+参数） | `8` |
 | `KEYPRISM_API_HOST` | 后端监听地址（局域网访问用 `0.0.0.0`） | `127.0.0.1` |
 | `KEYPRISM_API_PORT` | 后端 API 端口 | `9630` |
 | `KEYPRISM_FRONTEND_PORT` | 前端页面端口 | `5270` |
@@ -231,6 +238,10 @@ uv run python -m keyprism [音频] [--serve PORT] [--rate R] [--sub S]
 - **在线选曲链路**：前端 XHR 直传原始文件字节（带上传进度条），后端流式落盘系统
   临时目录 → 解码分析 → 原子切换服务端曲目状态并清空分辨率缓存；音频 URL 带缓存
   破坏参数，切换曲目后不会读到浏览器缓存的旧文件
+- **分析缓存**：全分辨率 mix 通道复数 STFT 以可 memmap 的 complex64 工件
+  缓存在 `~/.keyprism/cache/analysis/`（键为解码音频 + 分析参数的内容哈希；
+  LRU 淘汰，容量由 `KEYPRISM_CACHE_MAX_ENTRIES` 控制，默认 8）。
+  相同曲目与参数的重复分析直接跳过 STFT 阶段；删除该目录即可回收空间或强制重算
 
 ## License
 

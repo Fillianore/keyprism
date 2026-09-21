@@ -33,6 +33,20 @@
             </select>
           </label>
           <label class="ctrl">
+            <span data-i18n="notes">Notes</span>
+            <span class="seg-toggle" id="notesToggle" role="group" data-i18n-aria="notesAria" aria-label="Note tracks">
+              <button type="button" data-notes="off" class="active" data-i18n="notesOff">Off</button>
+              <button type="button" data-notes="bass" data-i18n="notesBass">Bass</button>
+              <button type="button" data-notes="lead" data-i18n="notesLead">Lead</button>
+              <button type="button" data-notes="both" data-i18n="notesBoth">Both</button>
+            </span>
+            <span class="notes-spin" id="notesSpin" hidden></span>
+            <span class="notes-hint" id="notesHint"></span>
+            <button class="reset" id="midiBtn" type="button" hidden
+                    data-i18n="midiExport" data-i18n-title="midiExportTitle"
+                    title="Download the selected tracks as MIDI">Export MIDI</button>
+          </label>
+          <label class="ctrl">
             <span data-i18n="pitchRange">Range</span>
             <select id="loSelect"></select>
             <span>–</span>

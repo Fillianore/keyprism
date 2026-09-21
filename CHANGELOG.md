@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-21
+
+### Added
+
+- Phase 1 monophonic transcription (bass + lead presets): a preset-driven
+  pipeline (`tracks` registry → loudness-weighted harmonic salience with
+  subharmonic suppression → band-limited adaptive onsets → Viterbi
+  single-pitch decoding → note events → MIDI export) reading the Phase 0
+  cached complex STFT in memmap row chunks — the full complex matrix is
+  never in RAM. Two cold runs are byte-identical (determinism locked by
+  tests); adding an instrument requires only a new `MONO_TRACKS` entry
+- New HTTP endpoints `GET /api/notes?track=bass|lead|both` and
+  `GET /api/midi?track=...` (SMF type 0/1 via `mido`, the only new
+  runtime dependency): per-track results cache under the analysis entry
+  as `notes/<MONO_VERSION>/notes_<track>.json` (hit = file bytes served
+  verbatim; version bump auto-invalidates); `data.json` keeps
+  `"notes": null` by contract — note data is served on demand only
+- Frontend note overlay: Off/Bass/Lead/Both segmented control (EN+zh),
+  detected notes drawn as culled `layout.shapes` rectangles on the
+  existing heatmap (re-culled on relayout through the shared 120 ms
+  throttle, top-1500-by-confidence cap with a hint), and an Export MIDI
+  download button
+- `scripts/eval_trans.py`: manual transcription evaluation against
+  reference MIDI (single pair or dataset directory), optional `mir_eval`
+  via the new `eval` extra (never required by tests or runtime)
+- Phase 0 analysis foundation: the complex-valued STFT now lives in a new
+  `keyprism.transform` module (byte-identical numerics to the previous
+  scipy-based path, locked by round-trip / naive-reference-equivalence /
+  Parseval / byte-determinism tests) together with an ISTFT overlap-add
+  inverse, legacy-semantics dB magnitude helper and a sub-bin parabolic
+  peak refiner; `dsp.py` keeps its full public API as a thin façade
+- Content-addressed analysis cache under
+  `~/.keyprism/cache/analysis/<pcm16>/<params16>/`: repeated analysis of
+  the same track and parameters reuses the stored full-resolution
+  mix-channel complex STFT (`stft.npy`, complex64 memmap artifact
+  chunk-filled in ≤2048-frame slices with per-chunk flush, plus
+  `meta.json`) instead of recomputing it; LRU eviction capped by
+  `KEYPRISM_CACHE_MAX_ENTRIES` (default 8)
+- Staged analysis orchestration shared by CLI static mode and serve mode
+  (decode → stft → aggregate → payload) with stage weights (stft 0.6 /
+  aggregate 0.3 / payload 0.1) surfaced through a progress callback;
+  console progress output is unchanged
+- Payload contract reservations: `notes` and `stems` fields are always
+  present and `null` in this release (reserved for note-level
+  transcription and separated source stems in later phases)
+
 ## [0.3.3] - 2026-09-21
 
 ### Added

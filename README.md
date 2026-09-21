@@ -39,6 +39,14 @@ audio → STFT → semitone aggregation → interactive heatmap + player
 - **BPM detection**: spectral-flux autocorrelation estimates BPM and first-beat
   offset, with a measure grid overlay (BPM / offset / time signature can be
   corrected manually)
+- **Monophonic transcription (bass / lead)**: preset-driven note detection
+  (harmonic salience with subharmonic suppression, band-limited onsets,
+  Viterbi single-pitch decoding) rendered as colored note rectangles over
+  the heatmap with an Off/Bass/Lead/Both selector; results cached per track
+  and served on demand (`/api/notes`, serve mode required)
+- **MIDI export**: one click downloads the transcribed tracks as a Standard
+  MIDI File (type 0 single track / type 1 for both, detected BPM tempo map,
+  velocity scaled by note confidence)
 - **Online track picking**: the "Select music" button in the top bar picks a
   local audio file, uploads it to the backend for analysis and switches the
   whole page (serve mode required)
@@ -143,6 +151,7 @@ supported):
 ~/.keyprism/
 ├── logs/               # backend.log / vite.log (redirected by launch scripts)
 ├── cache/matplotlib/   # matplotlib font and config cache
+├── cache/analysis/     # complex-STFT analysis cache (stft.npy + meta.json)
 ├── uploads/            # staging for audio uploaded via "Select music" (only the latest few are kept)
 └── config.env          # optional persistent config: KEY=VALUE, lines starting with # are comments
 ```
@@ -155,6 +164,7 @@ never overrides already-exported environment variables):
 |------|------|------|
 | `KEYPRISM_HOME` | workspace root | `~/.keyprism` |
 | `KEYPRISM_LOG_DIR` | log directory | `$KEYPRISM_HOME/logs` |
+| `KEYPRISM_CACHE_MAX_ENTRIES` | analysis-cache LRU capacity (per track+params) | `8` |
 | `KEYPRISM_API_HOST` | backend listen address (use `0.0.0.0` for LAN access) | `127.0.0.1` |
 | `KEYPRISM_API_PORT` | backend API port | `9630` |
 | `KEYPRISM_FRONTEND_PORT` | frontend page port | `5270` |
@@ -274,6 +284,12 @@ covering mainstream audio formats.
   clears the resolution cache; the audio URL carries a cache-busting
   parameter so a stale browser-cached file is never read after switching
   tracks
+- **Analysis cache**: the full-resolution mix-channel complex STFT is
+  cached under `~/.keyprism/cache/analysis/` as a memmap-able complex64
+  artifact (content-hash keys over the decoded audio + analysis params;
+  LRU eviction capped by `KEYPRISM_CACHE_MAX_ENTRIES`, default 8).
+  Re-analyzing the same track with the same settings skips the STFT stage
+  entirely; delete the directory to reclaim space or force a recompute
 
 ## License
 

@@ -5,6 +5,9 @@
 The only module coupled to stdlib httpd:
 - GET  /api/ping           health check
 - GET  /api/spec?rate&sub  recompute the spectrum at a given resolution (cached)
+- GET  /api/notes?track=   monophonic transcription notes (bass/lead/both),
+                           cached per track under the analysis entry
+- GET  /api/midi?track=    the same notes exported as a Standard MIDI File
 - POST /api/upload?name=   upload audio bytes, analyze and switch tracks
 
 make_server() returns an unstarted ThreadingHTTPServer so tests can
@@ -18,8 +21,10 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import audio_io
-from .payload import analyze, compute_specs
+from . import audio_io, transcribe
+from .analyze import run_analysis
+from .payload import compute_specs
+from .tracks import TRACK_QUERY_VALUES
 
 
 def make_server(path: Path, port: int, host: str, start: float,
@@ -40,14 +45,16 @@ def make_server(path: Path, port: int, host: str, start: float,
 
     def load_current(src: Path, preload: tuple | None = None,
                      name: str | None = None):
-        """Decode (or reuse preloaded data), emit data.json, return
-        (current track state, payload)"""
-        data2d, sr, dur = preload if preload is not None \
-            else audio_io.load_channels(src, start, end)
-        payload = analyze(src, start, end, window, db_range, rate, sub,
-                          api_base, preloaded=(data2d, sr, dur), name=name)
+        """Run the staged analysis (decode/stft/aggregate/payload, with the
+        complex-STFT disk cache), emit data.json, return (track state,
+        payload)"""
+        payload, (data2d, sr, dur) = run_analysis(
+            src, start=start, end=end, window=window, db_range=db_range,
+            rate=rate, sub=sub, api_base=api_base, name=name,
+            preloaded=preload)
         emit(payload)
-        cur = {"path": src, "data2d": data2d, "sr": sr, "dur": dur,
+        cur = {"path": src, "name": name or src.name, "data2d": data2d,
+               "sr": sr, "dur": dur,
                "rate": payload["defaultRate"], "sub": payload["defaultSub"]}
         return cur, payload
 
@@ -55,7 +62,8 @@ def make_server(path: Path, port: int, host: str, start: float,
         "busy": False,   # an upload/analysis of a new track is running
         "cache": {},     # (rate, sub) -> compute_specs result
         "lock": threading.Lock(),
-        "cur": None,     # current track: {path, data2d, sr, dur, rate, sub}
+        "notes_lock": threading.Lock(),  # serializes note computations
+        "cur": None,     # current track: {path, name, data2d, sr, dur, ...}
     }
     state["cur"], _ = load_current(path)
     print(f"已输出: {(audio_io.PUBLIC_DIR / 'data.json').resolve()} "
@@ -88,6 +96,9 @@ def make_server(path: Path, port: int, host: str, start: float,
             if u.path == "/api/ping":
                 self._json(200, {"ok": True})
                 return
+            if u.path in ("/api/notes", "/api/midi"):
+                self._notes_or_midi(u)
+                return
             if u.path != "/api/spec":
                 self.send_error(404)
                 return
@@ -109,6 +120,46 @@ def make_server(path: Path, port: int, host: str, start: float,
                     state["cache"].clear()
                 state["cache"][key] = res
             self._json(200, res)
+
+        def _notes_entry(self, cur):
+            """Analysis cache entry of the current track (recomputes the
+            STFT stage through the cache if it was evicted)."""
+            return transcribe.locate_entry(
+                cur, window=window, db_range=db_range, rate=cur["rate"],
+                sub=cur["sub"], start=start, end=end)
+
+        def _notes_or_midi(self, u):
+            cur = state["cur"]
+            if cur is None:
+                self._json(409, {"error": "暂无已加载的曲目"})
+                return
+            q = urllib.parse.parse_qs(u.query)
+            track = (q.get("track", ["both"])[0] or "").strip()
+            if track not in TRACK_QUERY_VALUES:
+                self._json(400, {
+                    "error": f"未知音轨: {track} "
+                             f"(可用: {', '.join(TRACK_QUERY_VALUES)})"})
+                return
+            entry = self._notes_entry(cur)
+            try:
+                if u.path == "/api/notes":
+                    body, _ = transcribe.get_notes(
+                        entry, track, lock=state["notes_lock"])
+                    self._json(200, body)
+                    return
+                data, fname = transcribe.compute_midi(
+                    entry, track, cur.get("name") or cur["path"].name,
+                    lock=state["notes_lock"])
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/midi")
+                self._cors()
+                self.send_header(
+                    "Content-Disposition", f'attachment; filename="{fname}"')
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            except Exception as e:  # noqa: BLE001
+                self._json(500, {"error": str(e)})
 
         def do_POST(self):
             u = urllib.parse.urlparse(self.path)

@@ -4,10 +4,12 @@
 for the Vite frontend.
 
 Package layering (see each module's header docstring for details):
-    dsp       pure algorithms: STFT / semitone aggregation / downsampling / BPM
+    dsp       pure algorithms: semitone aggregation / downsampling / BPM
+    transform complex STFT/ISTFT + dB magnitude (Phase 0 foundation)
     audio_io  decode chain: sndfile -> PyAV fallback, browser-safe
               transcoding, path constants
     payload   frontend contract: single source of truth for data.json fields
+    analyze   staged analysis (decode/stft/aggregate/payload) + disk cache
     server    HTTP service: /api/ping /api/spec /api/upload
     cli       this module: command-line entry (python -m keyprism)
 
@@ -27,9 +29,9 @@ import json
 import sys
 from pathlib import Path
 
+from .analyze import run_analysis
 from .audio_io import DEMO_AUDIO, PUBLIC_DIR
 from .dsp import SUB_OPTIONS, TIME_RATES
-from .payload import analyze
 from .server import run_server
 
 
@@ -64,8 +66,9 @@ def main(argv=None):
                    args.window, args.db_range, args.rate, args.sub)
         return
 
-    payload = analyze(src, args.start, args.end, args.window,
-                      args.db_range, args.rate, args.sub)
+    payload, _ = run_analysis(src, start=args.start, end=args.end,
+                              window=args.window, db_range=args.db_range,
+                              rate=args.rate, sub=args.sub)
     out = PUBLIC_DIR / "data.json"
     out.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     audio_mb = (PUBLIC_DIR / payload["audioFile"]).stat().st_size / 1024 / 1024
