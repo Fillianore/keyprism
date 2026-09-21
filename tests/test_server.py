@@ -53,7 +53,13 @@ def post(url, data: bytes):
 
 def test_ping(srv):
     code, body = get(f"{srv['base']}/api/ping")
-    assert code == 200 and body == {"ok": True}
+    assert code == 200 and body["ok"] is True
+    # Phase 3: DL capability flags drive the frontend's graceful
+    # degradation (Demucs options hidden without the [dl] extra)
+    caps = body["capabilities"]
+    assert set(caps) == {"dl", "poly", "dl_methods"}
+    if not caps["dl"]:
+        assert caps["dl_methods"] == []
 
 
 def test_spec(srv):

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "keyprism"
-version = "0.4.1"
+version = "0.5.0"
 description = "KeyPrism — piano-key spectrogram player: resolve audio into a semitone-grid spectrum with synced interactive playback"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -23,6 +23,13 @@ dependencies = [
 # tests or runtime
 eval = [
     "mir_eval>=0.8",
+]
+# Deep-learning separation/transcription (Phase 3): strictly optional —
+# the app degrades to the Phase 2 pipeline (API answers 501) when absent
+dl = [
+    "onnxruntime>=1.17",
+    "basic-pitch>=0.4.0",
+    "huggingface-hub>=0.23",
 ]
 
 [dependency-groups]

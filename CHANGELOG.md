@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-21
+
+### Added
+
+- Phase 3 deep-learning separation behind a strictly optional `[dl]`
+  extra (`uv sync --extra dl`: onnxruntime, basic-pitch, huggingface-hub;
+  no PyTorch in our inference path): `keyprism.dlsep` runs htdemucs
+  (4-stem) / htdemucs_6s (6-stem) ONNX exports chunked (10 s windows,
+  1 s overlap) with a strictly-positive periodic-Hann overlap-add
+  cross-fade normalized by the accumulated window sum — seam-free stems,
+  exact edge reconstruction, RAM bounded by one chunk plus a singleton
+  per-model ONNX session (never re-loaded per request). Results cache
+  under the analysis entry as `stems/<DL_STEMS_VERSION>/<method>/`
+  (atomic tmp-swap; model weights in `~/.keyprism/models/demucs/`,
+  auto-downloaded, env-overridable repo/file)
+- `keyprism.poly_transcribe`: Basic Pitch polyphonic transcription of a
+  DL stem with mandatory same-pitch fragment merging (gaps < 50 ms
+  collapse — frame predictors shred sustained chords into 50 ms bits),
+  cached as `notes/<POLY_VERSION>/notes_poly_<stem>.json`
+- Background-task HTTP API for long DL runs: `POST
+  /api/stems?method=demucs_4|demucs_6` starts a single-worker-executor
+  task and returns `{"task_id", "status_url"}`; `GET /api/task/{id}`
+  polls status/progress/result (done payload matches the classic
+  `/api/stems` JSON); `GET /api/stems?method=demucs_*` serves the cache
+  (404 until computed); `/api/stem` serves DL stems too; `GET /api/notes
+  ?track=piano|guitar|other&method=poly[&source=]` returns merged
+  polyphonic notes; `GET /api/ping` now carries `capabilities`
+  (`dl`/`poly`/`dl_methods`). Without the `[dl]` extra every DL endpoint
+  answers 501 Not Implemented and nothing crashes (graceful degradation,
+  locked by tests running green with AND without the extra)
+- Frontend multi-lane workspace (`lanes.js`): stacked horizontal lanes
+  (Mix + vocals/drums/bass/piano/guitar/other) with per-lane waveform
+  canvases, volume/Mute/Solo GainNodes and PX toggles for polyphonic
+  note overlays. All lanes ride the shared AudioContext transport (one
+  absolute `source.start(when, offset)` timestamp — Phase 2 sync
+  contract), notes are drawn on dedicated overlay canvases (never
+  `layout.shapes`) synced to the main spectrogram's `xaxis.range` on
+  every `plotly_relayout`, with a spatial index (sorted starts + binary
+  search bounded by the longest note) so zoom/pan render only the
+  visible window
+
+### Changed
+
+- `tests/test_server.py::test_ping` asserts the extended ping contract
+  (`capabilities` flags)
+
 ## [0.4.1] - 2026-09-21
 
 ### Added

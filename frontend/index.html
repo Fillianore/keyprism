@@ -54,6 +54,13 @@
             </span>
           </label>
           <label class="ctrl">
+            <span data-i18n="lanes">Lanes</span>
+            <span class="seg-toggle" id="lanesToggle" role="group" data-i18n-aria="lanesAria" aria-label="DL lanes">
+              <button type="button" data-lanes="off" class="active" data-i18n="notesOff">Off</button>
+              <button type="button" data-lanes="on" data-i18n="on">On</button>
+            </span>
+          </label>
+          <label class="ctrl">
             <span data-i18n="pitchRange">Range</span>
             <select id="loSelect"></select>
             <span>–</span>
@@ -106,6 +113,7 @@
         <div id="plot"></div>
       </div>
       <div class="stems-panel" id="stemsPanel" hidden></div>
+      <div class="lanes-panel" id="lanesPanel" hidden></div>
     </div>
     <script type="module">
       import { applyStatic } from './src/i18n.js';

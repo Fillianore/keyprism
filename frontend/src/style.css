@@ -638,6 +638,86 @@ input[type='range']:active::-moz-range-thumb {
   background: rgba(255, 255, 255, 0.06) !important;
 }
 
+/* ---------- Multi-lane DL workspace (Phase 3): stacked horizontal
+ *  lanes (Mix + Demucs stems); each lane is a fixed header (name,
+ *  volume, Mute/Solo, PX notes toggle) plus a canvas scope — a waveform
+ *  canvas with a dedicated notes-overlay canvas absolutely positioned
+ *  on top (notes are NEVER layout.shapes: 6 poly tracks would melt
+ *  SVG). Canvases are redrawn from the main chart's xaxis.range on
+ *  plotly_relayout ---------- */
+.lanes-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 16px 8px;
+  background: linear-gradient(180deg, #101014, #0d0d10);
+  border-top: 1px solid var(--edge-lo);
+  box-shadow: inset 0 1px 0 var(--edge-hi);
+  flex: 0 0 auto;
+  max-height: 42vh;
+  overflow-y: auto;
+  font-size: 12px;
+  color: var(--text);
+  user-select: none;
+}
+
+.lane-row {
+  display: grid;
+  grid-template-columns: 170px 1fr;
+  align-items: center;
+  gap: 10px;
+}
+
+.lane-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.lane-head .stem-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lane-row-mix {
+  padding-bottom: 2px;
+}
+
+.lane-row-mix .stem-name {
+  color: var(--ivory);
+  border-bottom: 1px dotted rgba(152, 145, 127, 0.55);
+}
+
+.lane-scope {
+  position: relative;
+  height: 44px;
+  border: 1px solid #232329;
+  border-radius: 6px;
+  background:
+    repeating-linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0.025) 0 1px,
+      rgba(0, 0, 0, 0) 1px 80px
+    ),
+    linear-gradient(180deg, #0a0a0d, #101015);
+  overflow: hidden;
+}
+
+.lane-wave,
+.lane-notes {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.lane-notes {
+  pointer-events: none; /* clicks fall through to the waveform */
+}
+
 /* ---------- Stem player panel (Phase 2): bottom strip between the plot
  *  and the transport bar; one row per stem with volume + Mute/Solo
  *  hardware keys in the console language ---------- */

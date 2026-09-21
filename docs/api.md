@@ -9,12 +9,16 @@
 
 | Method | Endpoint | Description |
 |------|------|------|
-| GET | `/api/ping` | health check, returns `{"ok": true}` |
+| GET | `/api/ping` | health check, returns `{"ok": true, "capabilities": {"dl": bool, "poly": bool, "dl_methods": [...]}}` |
 | GET | `/api/spec?rate=15&sub=5` | recompute the spectrum at the given resolution (three channels + envelopes), cached |
 | GET | `/api/notes?track=bass\|lead\|both` | monophonic transcription notes of the current track, cached per track under the analysis entry |
 | GET | `/api/midi?track=bass\|lead\|both` | the same notes exported as a Standard MIDI File (attachment download) |
 | GET | `/api/stems?method=hpss\|rpca\|combined` | separated stems of the current track (Phase 2); `&progress=1` polls a running computation |
-| GET | `/api/stem?method=..&name=..` | one computed stem as a PCM16 WAV attachment download |
+| GET | `/api/stems?method=demucs_4\|demucs_6` | computed DL stems from the entry cache (Phase 3, optional); compute is started via POST |
+| POST | `/api/stems?method=demucs_4\|demucs_6` | start DL separation as a background task; returns `{"task_id", "status_url"}` (501 without the `[dl]` extra) |
+| GET | `/api/task/{task_id}` | background-task status/progress/result poll |
+| GET | `/api/notes?track=piano\|guitar\|other&method=poly[&source=demucs_6]` | polyphonic notes of a DL stem (Phase 3, optional) |
+| GET | `/api/stem?method=..&name=..` | one computed stem as a PCM16 WAV attachment download (classic and DL methods) |
 | POST | `/api/upload?name=song.mp3` | upload a local audio file (request body is raw file bytes); the backend analyzes it, switches the current track and refreshes `data.json`; returns the full payload |
 | OPTIONS | any endpoint | CORS preflight, returns 204 |
 
@@ -156,6 +160,87 @@ duration as the analysis segment; amplitude is clipped to [-1, 1].
 | 404 | stem not computed yet (request `/api/stems` first) |
 | 409 | no track loaded |
 | 500 | separation failed (unreadable analysis artifact etc.) |
+
+## DL Workspace Endpoints (Phase 3, optional)
+
+Deep-learning separation (Demucs via ONNX Runtime) and polyphonic
+transcription (Basic Pitch) are OPTIONAL: they require the `[dl]` extra
+(`uv sync --extra dl`) and, for Demucs, the model weights (auto-downloaded
+into `~/.keyprism/models/demucs/` on first use; explicit files via
+`KEYPRISM_DEMUCS4_FILE` / `KEYPRISM_DEMUCS6_FILE`, alternate repos via
+`KEYPRISM_DEMUCS4_REPO` / `KEYPRISM_DEMUCS6_REPO`). Without the extra the
+DL endpoints answer **501 Not Implemented** with a human-readable error and
+`GET /api/ping` reports `"capabilities": {"dl": false, "poly": false,
+"dl_methods": []}` — the app itself keeps working (Phase 2 pipeline).
+
+Demucs runs CHUNKED: the track is separated in 10 s windows with 1 s
+overlap, cross-faded by a strictly-positive periodic Hann window divided
+by the accumulated window sum (perfect edge reconstruction, no seam
+clicks, RAM bounded by one chunk + the singleton ONNX session). Stems
+cache under the analysis entry as
+`<entry>/stems/<DL_STEMS_VERSION>/<method>/<stem>.wav` (+ `status.json`);
+bump `DL_STEMS_VERSION` in `dlsep.py` to invalidate. Polyphonic notes
+cache as `<entry>/notes/<POLY_VERSION>/notes_poly_<stem>.json` (bump
+`POLY_VERSION` in `poly_transcribe.py`).
+
+### POST /api/stems?method=demucs_4|demucs_6
+
+Starts separation of the current track as a BACKGROUND task (single-worker
+executor: one DL job at a time). Response `200`:
+
+```jsonc
+{ "task_id": "9f1c…", "status_url": "/api/task/9f1c…", "status": "started" }
+```
+
+If the method's stems are already cached, the response is the same JSON as
+`GET /api/stems?method=…` with `"cached": true` and no task is started.
+Errors: `400` unknown method, `409` no track loaded, `501` `[dl]` extra
+missing.
+
+### GET /api/task/{task_id}
+
+Non-blocking poll of a background task:
+
+```jsonc
+// running
+{ "id": "9f1c…", "status": "running", "progress": 0.45 }
+// done — same shape as the classic /api/stems response
+{ "id": "9f1c…", "status": "done", "progress": 1.0,
+  "method": "demucs_6", "duration": 89.118, "sample_rate": 44100,
+  "stems": [{"key": "vocals", "url": "http://…/api/stem?method=demucs_6&name=vocals"},
+            … ] }   // demucs_4: drums/bass/other/vocals; demucs_6: + piano/guitar
+// failed
+{ "id": "9f1c…", "status": "error", "progress": 0.2, "error": "…" }
+```
+
+`404` for unknown ids; finished tasks are pruned to the newest 32.
+
+### GET /api/stems?method=demucs_4|demucs_6
+
+Cache-only: serves the stem list when computed (`200`, same JSON shape as
+the classic endpoint), `404` with a hint otherwise — computation is only
+ever started via `POST`. `GET /api/stem?method=demucs_4&name=vocals`
+downloads one DL stem (mono PCM16 WAV at 44.1 kHz).
+
+### GET /api/notes?track=piano|guitar|other&method=poly[&source=demucs_6]
+
+Basic Pitch polyphonic transcription of a DL stem. Same-pitch notes with
+gaps below 50 ms are merged (frame predictors fragment sustained notes —
+the merge runs on every compute path). Response `200`:
+
+```jsonc
+{
+  "track": "piano", "method": "poly", "cached": false,
+  "notes": {
+    "piano": [ {"pitch": 64, "start": 0.55, "end": 2.41, "conf": 0.83}, … ]
+  }
+}
+```
+
+Errors: `400` unknown track/source combination (`track` must be one of the
+`source` variant's stems; piano/guitar exist only in `demucs_6`), `409`
+the stem WAV has not been computed yet (start `POST /api/stems` first),
+`501` `[dl]` extra missing.
 
 ## Error Codes
 
