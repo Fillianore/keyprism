@@ -73,6 +73,10 @@ const LANE_META = {
 const PITCH_LO = 21; // A0 — bottom edge of the lane
 const PITCH_HI = 108; // C8 — top edge of the lane
 
+/** Cached peak-envelope resolution: min/max per column, computed once
+ *  per decoded buffer and drawn at any zoom (D2). */
+const ENVELOPE_COLUMNS = 1024;
+
 export function initLanes({ gd, data, player, apiBase }) {
   const toggle = document.getElementById('lanesToggle');
   const panel = document.getElementById('lanesPanel');
@@ -217,6 +221,15 @@ export function initLanes({ gd, data, player, apiBase }) {
     const mid = h / 2;
     g.fillStyle = 'rgba(255,255,255,0.06)';
     g.fillRect(0, mid, w, 1);
+    if (lane.decodeFailed) {
+      // per-lane decode failure: placeholder inside the lane (D2)
+      g.fillStyle = 'rgba(255,255,255,0.4)';
+      g.font = '11px system-ui, sans-serif';
+      g.textAlign = 'center';
+      g.textBaseline = 'middle';
+      g.fillText(t('laneDecodeFailed'), w / 2, mid);
+      return;
+    }
     if (!lane.peaks) return;
     const [aSec, bSec] = viewSec();
     const span = Math.max(bSec - aSec, 1e-6);
@@ -273,10 +286,13 @@ export function initLanes({ gd, data, player, apiBase }) {
   }
 
   // -------------------------------------------------------------- audio
-  function buildPeaks(buffer) {
+  /** Cached peak envelope: min/max per column (~ENVELOPE_COLUMNS),
+   *  computed once per decoded buffer — the waveform canvas paints from
+   *  this at any zoom without re-scanning the PCM (D2). */
+  function buildEnvelope(buffer) {
     const ch = buffer.getChannelData(0);
-    const bucket = 2048;
-    const n = Math.ceil(ch.length / bucket);
+    const n = ENVELOPE_COLUMNS;
+    const bucket = Math.max(1, Math.floor(ch.length / n));
     const min = new Float32Array(n);
     const max = new Float32Array(n);
     for (let b = 0; b < n; b++) {
@@ -600,10 +616,17 @@ export function initLanes({ gd, data, player, apiBase }) {
           idx: null,
           waveCv: null,
           noteCv: null,
+          decodeFailed: false,
         });
         lanes.push(lane);
-        lane.buffer = await decodeStem(item.url);
-        lane.peaks = buildPeaks(lane.buffer);
+        try {
+          lane.buffer = await decodeStem(item.url);
+          lane.peaks = buildEnvelope(lane.buffer);
+        } catch {
+          // per-lane tolerance: placeholder inside THIS lane, the rest
+          // of the panel still loads (D2)
+          lane.decodeFailed = true;
+        }
       }
       if (state.method !== method) return; // switched away mid-load
       mixer.route(lanes); // wire into the master bus only when complete
@@ -617,6 +640,7 @@ export function initLanes({ gd, data, player, apiBase }) {
       mixer.mix.solo = false;
       renderShell();
       mixer.apply();
+      drawAll(); // waveforms visible immediately, before Play (D2)
       if (player.isPlaying()) {
         // jump in synced at the current position (short 60 ms handover)
         startAll(player.currentTime(), ctx.currentTime + START_LEAD);
