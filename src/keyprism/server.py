@@ -52,8 +52,23 @@ from .tracks import TRACK_QUERY_VALUES
 DL_AVAILABLE = dlsep.ORT_AVAILABLE
 POLY_AVAILABLE = poly_transcribe.BP_AVAILABLE
 
-_DL_NOT_INSTALLED = ("未安装 DL 依赖: 请执行 uv sync --extra dl "
+#: Distinct 501 bodies (Phase 3.7 I4): onnxruntime missing is fixed by
+#: installing the extra; basic-pitch missing on Python >= 3.12 is a
+#: hard upstream limitation that no install can fix — the two must
+#: never share a message. ``code`` lets the frontend match the body
+#: without parsing prose.
+_DL_NOT_INSTALLED = ("DL 依赖未安装: 请执行 uv sync --extra dl "
                      "(需要 onnxruntime / basic-pitch)")
+_POLY_UNAVAILABLE = ("多音转录在 Python ≥3.12 不可用（basic-pitch 限制）；"
+                     "分离功能不受影响")
+
+
+def _poly_reason() -> str:
+    """Why polyphonic transcription is off: the [dl] extra remedy when
+    nothing DL is installed, else the Python >= 3.12 limitation."""
+    if not DL_AVAILABLE:
+        return _DL_NOT_INSTALLED
+    return _POLY_UNAVAILABLE
 
 #: Query alias: "demucs" always means the canonical 4-stem variant (the
 #: frontend only ever sends the explicit names; the alias exists so a
@@ -174,15 +189,17 @@ def make_server(path: Path, port: int, host: str, start: float,
         def do_GET(self):
             u = urllib.parse.urlparse(self.path)
             if u.path == "/api/ping":
-                self._json(200, {
-                    "ok": True,
-                    "capabilities": {
-                        "dl": DL_AVAILABLE,
-                        "poly": POLY_AVAILABLE,
-                        "dl_methods": list(dlsep.DL_METHODS)
-                        if DL_AVAILABLE else [],
-                    },
-                })
+                caps = {
+                    "dl": DL_AVAILABLE,
+                    "poly": POLY_AVAILABLE,
+                    "dl_methods": list(dlsep.DL_METHODS)
+                    if DL_AVAILABLE else [],
+                }
+                if not caps["poly"]:
+                    # precise reason: install remedy vs the Python >= 3.12
+                    # basic-pitch limitation (drives the Notes toast)
+                    caps["poly_reason"] = _poly_reason()
+                self._json(200, {"ok": True, "capabilities": caps})
                 return
             if u.path.startswith("/api/task/"):
                 self._task_status(u)
@@ -231,7 +248,12 @@ def make_server(path: Path, port: int, host: str, start: float,
             Basic Pitch polyphonic transcription of a DL stem, cached
             under the analysis entry (Phase 3)."""
             if not POLY_AVAILABLE:
-                self._json(501, {"error": _DL_NOT_INSTALLED})
+                if DL_AVAILABLE:
+                    self._json(501, {"code": "poly_unavailable",
+                                     "error": _POLY_UNAVAILABLE})
+                else:
+                    self._json(501, {"code": "dl_not_installed",
+                                     "error": _DL_NOT_INSTALLED})
                 return
             track = (q.get("track", ["piano"])[0] or "").strip()
             if track not in poly_transcribe.POLY_TRACKS:
@@ -420,7 +442,8 @@ def make_server(path: Path, port: int, host: str, start: float,
             [dl] dependencies, 200 with the cached list when already
             computed)."""
             if not DL_AVAILABLE:
-                self._json(501, {"error": _DL_NOT_INSTALLED})
+                self._json(501, {"code": "dl_not_installed",
+                                 "error": _DL_NOT_INSTALLED})
                 return
             cur = state["cur"]
             if cur is None:

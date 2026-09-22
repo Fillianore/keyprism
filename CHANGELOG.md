@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-23
+
+### Added
+
+- Mixer transition-table test (`npm run test:mixer`,
+  `frontend/scripts/test-mixer.mjs`): executes the FULL destructive-solo
+  transition table (T1–T5, invariant I1, snapshot restore, solo move,
+  the mix-duck rule, make-up math and limiter wiring) against a fake
+  AudioContext on pure Node; wired into the CI frontend job
+- `/api/ping` capabilities carry `poly_reason` exactly when `poly` is
+  false — the precise reason (install remedy vs the Python ≥ 3.12
+  basic-pitch limitation) that drives the Notes-button tooltip and toast
+
+### Changed
+
+- Per-stem make-up gain and dB faders (Phase 3.7 gain staging): at stem
+  decode each strip computes `makeup_dB = clamp(20*log10(p_mix/p_stem),
+  0, +12)` and its fader defaults to it, so an unmuted stem auditions at
+  mix-comparable loudness (stems were ~11 dB quieter than the mix at
+  fader max); faders are −40…+18 dB with a live dB readout, a 0 dB
+  detent and per-lane waveform envelopes that auto-scale to each lane's
+  own peak (plus a peak-dB label) so quiet stems render visibly
+- A brickwall limiter (`DynamicsCompressorNode`: threshold −1 dB, knee
+  0, ratio 20, attack 1 ms, release 100 ms) now sits between the master
+  bus and the destination — make-up defaults plus open faders can sum N
+  stems past full scale, and the −1 dB threshold leaves headroom for
+  the 1 ms attack-time overshoot on transients
+- Compact mixer grid on both panels: `[label 96px][controls 152px]
+  [lane 1fr]`, 8 px column gap, 80 px rows — 16 px icon + 12 px no-wrap
+  label, fixed 84 px fader, 26 px square M/S keys, and the Notes (扒谱)
+  button as a compact ♫ chip overlaid on its lane scope (was
+  `[label 140px][controls 200px]` with a wide dead gap)
+
+### Fixed
+
+- Mixer mute/solo semantics (Phase 3.7): solo is DESTRUCTIVE — it
+  materializes as real mute states (T1: soloist unmutes, every other
+  row force-mutes from a frozen pre-solo snapshot; T3: unmuting any row
+  releases the solo; T4/T5: self-mute releases, solo-unmute) — so
+  effective audibility is simply NOT muted and buttons render strictly
+  from state: the M and S buttons can never both light up on one row,
+  in any click sequence
+- `/api/notes?method=poly` answered the "uv sync --extra dl" install
+  remedy even when only basic-pitch was missing (unfixable on
+  Python ≥ 3.12); the two 501s now carry distinct codes and prose
+  (`dl_not_installed` vs `poly_unavailable`) matching the new
+  `capabilities.poly_reason`
+
 ## [0.6.0] - 2026-09-22
 
 ### Fixed

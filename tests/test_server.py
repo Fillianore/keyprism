@@ -57,7 +57,13 @@ def test_ping(srv):
     # Phase 3: DL capability flags drive the frontend's graceful
     # degradation (Demucs options hidden without the [dl] extra)
     caps = body["capabilities"]
-    assert set(caps) == {"dl", "poly", "dl_methods"}
+    assert {"dl", "poly", "dl_methods"} <= set(caps)
+    # Phase 3.7: poly off carries a precise reason (install remedy vs
+    # the Python >= 3.12 basic-pitch limitation); poly on carries none
+    if caps["poly"]:
+        assert "poly_reason" not in caps
+    else:
+        assert caps["poly_reason"]
     if not caps["dl"]:
         assert caps["dl_methods"] == []
 

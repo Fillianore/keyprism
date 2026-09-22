@@ -51,5 +51,8 @@ jobs:
       - name: i18n key-completeness check (en + zh)
         run: npm run check:i18n
 
+      - name: Mixer transition-table test (T1-T5, I1)
+        run: npm run test:mixer
+
       - name: Production build
         run: npm run build
