@@ -21,18 +21,23 @@
  *  - volume/mute/solo never touch scheduling: they only ramp GainNodes
  *    (setTargetAtTime, ~12 ms), which is click- and pop-free.
  *
- *  Mixer defaults (DAW standard, anti-clipping):
+ *  Mixer defaults (anti-clipping, destructive solo — Phase 3.7):
  *  - loading stems does NOT change what the user hears: the Mix keeps
  *    playing at its current volume, every separated stem starts MUTED
  *    (gain 0) until explicitly unmuted/soloed;
+ *  - each stem fader defaults to its MAKE-UP gain (mix peak / stem
+ *    peak, clamped to +12 dB), so unmuting a stem auditions it at
+ *    mix-comparable loudness; the brickwall limiter on the master bus
+ *    (mixer.js) holds the sum with every fader wide open;
  *  - unmuting any stem hands the lead to the stems: the Mix is silenced
  *    at gain level (its content is already inside the stems — summing
  *    both would double the waveform and clip) and its row is shown
- *    `.dimmed`; soloing a stem silences everything else instantly.
+ *    `.dimmed`; soloing a stem force-mutes every other row (the M
+ *    buttons render that real state) and unmuting any row releases it.
  */
 
 import { t, onChange } from './i18n.js';
-import { MixerState } from './mixer.js';
+import { MixerState, bufferPeak, makeupDb } from './mixer.js';
 import { trackRow, wireMuteSolo } from './controls.js';
 
 const START_LEAD = 0.06; // keep identical to player.js START_LEAD
@@ -123,11 +128,7 @@ export function initStems({ data, player, apiBase }) {
     } else if (type === 'mixgain' && mixer.mix && !mixer.mix.muted) {
       // user moved the main volume slider: mirror it into the Mix row
       mixer.mix.volume = info.norm;
-      const volEl = state.rows.find((r) => r.model === mixer.mix)?.vol;
-      if (volEl && document.activeElement !== volEl) {
-        volEl.value = String(info.norm);
-        paintFill(volEl);
-      }
+      state.rows.find((r) => r.model === mixer.mix)?.syncFader?.();
     }
   });
 
@@ -190,13 +191,16 @@ export function initStems({ data, player, apiBase }) {
     return model === mixer.mix ? t('mixerMixDuckedTip') : t('mixerMutedTip');
   }
 
-  /** Repaint the matrix on the rows: a strip silenced by OTHERS' solo /
-   *  by the anti-clipping mix rule is shown `.dimmed` WITH a tooltip
-   *  explaining why; the M/S buttons keep reflecting the USER's own
-   *  toggle state only. */
+  /** Repaint the matrix on the rows: M/S buttons render STRICTLY from
+   *  the model (destructive solo writes real mute states, so the gold
+   *  M on suppressed rows is the actual state, never flipped behind
+   *  the user's back); a strip that is inaudible is shown `.dimmed`
+   *  WITH a tooltip explaining why. */
   function paintStates() {
     const anySolo = mixer.anySolo;
-    for (const { model, row } of state.rows) {
+    for (const { model, row, mute, solo } of state.rows) {
+      mute.classList.toggle('active', model.muted);
+      solo.classList.toggle('active', !!model.solo);
       const audible =
         model === mixer.mix ? mixer.mixAudible() : mixer.stripAudible(model);
       row.classList.toggle('dimmed', !audible);
@@ -206,15 +210,23 @@ export function initStems({ data, player, apiBase }) {
   mixer.onRepaint(paintStates);
 
   /** One row via the shared factory (controls.js): <icon><label> cell +
-   *  slider/M/S controls cell — identical construction for the Mix row
-   *  and every stem row (D3). */
+   *  fader/M/S controls cell — identical construction for the Mix row
+   *  and every stem row (D3). Stem rows get the dB fader; the Mix row
+   *  keeps the normalized transport volume. */
   function buildRow(container, key, nameText, color, model) {
-    const parts = trackRow({ key, labelText: nameText, color });
-    wireMuteSolo({
+    const parts = trackRow({
+      key,
+      labelText: nameText,
+      color,
+      fader: model === mixer.mix ? 'norm' : 'db',
+    });
+    const { syncFader } = wireMuteSolo({
+      mixer,
       model,
       vol: parts.vol,
       mute: parts.mute,
       solo: parts.solo,
+      dbEl: parts.db,
       apply: () => mixer.apply(),
       paintFill,
     });
@@ -225,6 +237,7 @@ export function initStems({ data, player, apiBase }) {
       vol: parts.vol,
       mute: parts.mute,
       solo: parts.solo,
+      syncFader,
     };
     state.rows.push(entry);
     return entry;
@@ -260,8 +273,8 @@ export function initStems({ data, player, apiBase }) {
     // Mix row: the transport's own playback, ridden by the master gain
     const mixUi = buildRow(panel, 'mix', t('stemMix'), '#ddd6c8', mixer.mix);
     mixUi.row.classList.add('stem-row-mix');
-    mixUi.vol.value = String(player.mixGainNorm());
-    paintFill(mixUi.vol);
+    mixer.mix.volume = player.mixGainNorm();
+    mixUi.syncFader();
 
     for (const s of mixer.strips) {
       const meta = STEM_META[s.key] || {};
@@ -293,12 +306,19 @@ export function initStems({ data, player, apiBase }) {
           `${t('stemsFailed', { msg: method })}: ${keys.join(', ')}`
         );
       }
+      const pMix = player.mixPeak();
       for (const item of body.stems) {
         // makeStrip defaults: MUTED (gain 0) — loading stems never
         // changes what the user currently hears
         const strip = mixer.makeStrip(item.key, { key: item.key });
         strips.push(strip);
         strip.buffer = await decodeStem(item.url);
+        // gain staging (I2): fader default = make-up gain matching the
+        // stem peak to the mix peak, so an unmuted stem auditions at
+        // mix-comparable loudness
+        strip.peak = bufferPeak(strip.buffer);
+        strip.makeupDb = makeupDb(pMix, strip.peak);
+        strip.dbGain = strip.makeupDb;
       }
       if (state.method !== method) return; // switched away mid-load
       mixer.route(strips); // wire into the master bus only when complete

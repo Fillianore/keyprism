@@ -41,6 +41,7 @@ export function createPlayer(container, gd, opts) {
   gain.gain.value = volSaved;
 
   let buffer = null; // decoded PCM
+  let mixPeakCache = null; // max |sample| over the decoded mix buffer
   let src = null; // current BufferSource
   let startCtx = 0; // ctx.currentTime at play start
   let startOffset = 0; // buffer offset at play start
@@ -287,6 +288,24 @@ export function createPlayer(container, gd, opts) {
     else if (decodeState === 'failed') btn.textContent = t('decodeFailed');
   });
 
+  /** Max |sample| of the decoded mix (cached after the first call) —
+   *  the reference peak the stem make-up gains are staged against. */
+  function mixPeak() {
+    if (!buffer) return 0;
+    if (mixPeakCache === null) {
+      let p = 0;
+      for (let c = 0; c < buffer.numberOfChannels; c++) {
+        const d = buffer.getChannelData(c);
+        for (let i = 0; i < d.length; i++) {
+          const v = Math.abs(d[i]);
+          if (v > p) p = v;
+        }
+      }
+      mixPeakCache = p;
+    }
+    return mixPeakCache;
+  }
+
   // ---- Controls ----
   btn.addEventListener('click', () => {
     if (playing) pause();
@@ -443,6 +462,8 @@ export function createPlayer(container, gd, opts) {
     /** Master gain control for the stems panel Mix row (0..1) */
     setMixGain: (norm, opts) => setGainNorm(norm, opts),
     mixGainNorm: () => gain.gain.value / VOL_MAX,
+    /** Peak amplitude of the decoded mix (make-up gain reference) */
+    mixPeak,
     /** Relative seek in seconds (wheel scrubbing), clamped to the audible
      *  span like every other seek entry point; returns the applied time so
      *  the caller can pan the view by the actually applied delta */

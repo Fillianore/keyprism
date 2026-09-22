@@ -25,12 +25,19 @@
  *  changes what the user hears — the Mix keeps playing, every Demucs
  *  lane starts MUTED until unmuted/soloed; unmuting any lane silences
  *  the Mix (its content is inside the lanes — summing both would clip).
+ *  Solo is DESTRUCTIVE (Phase 3.7 state machine in mixer.js): it
+ *  materializes as real mute states on every other row, and unmuting
+ *  any row releases it. Each lane fader defaults to its make-up gain
+ *  (mix peak / lane peak, clamped to +12 dB); the master bus carries a
+ *  brickwall limiter so all-open lanes cannot clip.
  *
  *  Lane rendering (Phase 3.6 polish):
  *  - each decoded buffer's peak envelope (min/max per column, ~1024
  *    columns) is computed ONCE, cached on the lane, and drawn to the
  *    waveform canvas IMMEDIATELY — content is visible before playback
- *    and redrawn on resize (throttled) and plotly_relayout;
+ *    and redrawn on resize (throttled) and plotly_relayout. The
+ *    envelope auto-scales to THAT lane's own peak (plus a tiny peak-dB
+ *    label) so quiet stems render visible waveforms;
  *  - a per-lane decode failure renders an i18n placeholder inside that
  *    lane instead of failing the whole panel;
  *  - the Notes (扒谱) button is uniform on every poly-eligible lane and
@@ -56,7 +63,7 @@
 
 import { t, onChange } from './i18n.js';
 import { EPOCH_MS, pMs } from './spectrogram.js';
-import { MixerState } from './mixer.js';
+import { MixerState, bufferPeak, makeupDb } from './mixer.js';
 import { trackRow, wireMuteSolo } from './controls.js';
 import { showToast } from './toast.js';
 import { throttled } from './util.js';
@@ -263,6 +270,10 @@ export function initLanes({ gd, data, player, apiBase }) {
     const span = Math.max(bSec - aSec, 1e-6);
     const p = lane.peaks;
     const nB = p.max.length;
+    // auto-scale (I2 visuals): normalize to THIS lane's own peak so
+    // quiet stems render visible waveforms instead of flat lines
+    const k = lane.peak > 1e-6 ? 1 / lane.peak : 0;
+    const clamp = (v) => Math.max(-1, Math.min(1, v * k));
     g.fillStyle = lane.color;
     for (let px = 0; px < w; px++) {
       const ta = aSec + (px / w) * span;
@@ -278,9 +289,23 @@ export function initLanes({ gd, data, player, apiBase }) {
         if (p.max[i] > hi) hi = p.max[i];
       }
       if (hi <= 0 && lo >= 0) continue;
-      const y0 = mid - hi * (mid * 0.92);
-      const y1 = mid - lo * (mid * 0.92);
+      const y0 = mid - clamp(hi) * (mid * 0.92);
+      const y1 = mid - clamp(lo) * (mid * 0.92);
       g.fillRect(px, y0, 1, Math.max(1, y1 - y0));
+    }
+    if (lane.peak > 1e-6) {
+      // tiny peak-dB label: what the auto-scale factor is compensating
+      g.font = '9px system-ui, sans-serif';
+      g.fillStyle = 'rgba(255,255,255,0.4)';
+      g.textAlign = 'left';
+      g.textBaseline = 'top';
+      g.fillText(
+        t('lanePeakDb', {
+          db: (20 * Math.log10(lane.peak)).toFixed(1),
+        }),
+        6,
+        4
+      );
     }
   }
 
@@ -376,11 +401,7 @@ export function initLanes({ gd, data, player, apiBase }) {
       stopAll();
     } else if (type === 'mixgain' && mixer.mix && !mixer.mix.muted) {
       mixer.mix.volume = info.norm;
-      const volEl = state.rows.find((r) => r.model === mixer.mix)?.vol;
-      if (volEl && document.activeElement !== volEl) {
-        volEl.value = String(info.norm);
-        paintFill(volEl);
-      }
+      state.rows.find((r) => r.model === mixer.mix)?.syncFader?.();
     }
   });
 
@@ -441,13 +462,15 @@ export function initLanes({ gd, data, player, apiBase }) {
     return model === mixer.mix ? t('mixerMixDuckedTip') : t('mixerMutedTip');
   }
 
-  /** Repaint the matrix on the rows: a lane silenced by OTHERS' solo or
-   *  by the anti-clipping mix rule is shown `.dimmed` WITH a tooltip
-   *  explaining why; the M/S buttons keep reflecting the USER's own
-   *  toggle state only. */
+  /** Repaint the matrix on the rows: M/S buttons render STRICTLY from
+   *  the model (destructive solo writes real mute states — the gold M
+   *  on suppressed rows is the actual state); a lane that is inaudible
+   *  is shown `.dimmed` WITH a tooltip explaining why. */
   function paintStates() {
     const anySolo = mixer.anySolo;
-    for (const { model, row } of state.rows) {
+    for (const { model, row, mute, solo } of state.rows) {
+      mute.classList.toggle('active', model.muted);
+      solo.classList.toggle('active', !!model.solo);
       const audible =
         model === mixer.mix ? mixer.mixAudible() : mixer.stripAudible(model);
       row.classList.toggle('dimmed', !audible);
@@ -467,7 +490,9 @@ export function initLanes({ gd, data, player, apiBase }) {
       px.title = t('polyNeedsDL');
     } else if (!state.caps.poly) {
       px.disabled = true;
-      px.title = t('polyNeedsBP');
+      // prefer the server's precise reason (uv-sync remedy vs the
+      // Python >=3.12 basic-pitch limitation)
+      px.title = state.caps.poly_reason || t('polyNeedsBP');
     } else {
       px.disabled = false;
       px.title = t('laneNotesTitle');
@@ -505,7 +530,9 @@ export function initLanes({ gd, data, player, apiBase }) {
     } catch (e) {
       if (e instanceof PolyUnavailable) {
         showToast(
-          e.kind === 'dl' ? t('polyNeedsDL') : t('polyNeedsBP')
+          e.kind === 'dl'
+            ? t('polyNeedsDL')
+            : state.caps?.poly_reason || t('polyNeedsBP')
         );
       } else {
         showToast(t('laneNotesFailed', { msg: e.message }));
@@ -524,35 +551,40 @@ export function initLanes({ gd, data, player, apiBase }) {
       labelText: t(lane.labelKey),
       color: lane.color,
       withLane: true,
+      fader: 'db',
     });
-    const { row, controls, scope, vol, mute, solo } = parts;
-    wireMuteSolo({
+    const { row, scope, vol, mute, solo, db } = parts;
+    const { syncFader } = wireMuteSolo({
+      mixer,
       model: lane,
       vol,
       mute,
       solo,
+      dbEl: db,
       apply: () => mixer.apply(),
       paintFill,
     });
-    state.rows.push({ model: lane, row, vol, mute, solo });
-    // Notes (扒谱): uniform on every poly-eligible lane (D4)
-    if (POLY_LANES.has(lane.key)) {
-      const px = document.createElement('button');
-      px.type = 'button';
-      px.className = 'stem-btn lane-notes-btn';
-      px.textContent = t('laneNotes');
-      px.title = t('laneNotesTitle');
-      px.addEventListener('click', () => toggleNotes(lane));
-      lane.notesBtn = px;
-      controls.appendChild(px);
-      applyNotesAvailability(lane);
-    }
+    state.rows.push({ model: lane, row, vol, mute, solo, syncFader });
     const wave = document.createElement('canvas');
     wave.className = 'lane-wave';
     const noteCv = document.createElement('canvas');
     noteCv.className = 'lane-notes';
     noteCv.setAttribute('aria-hidden', 'true');
     scope.append(wave, noteCv);
+    // Notes (扒谱): uniform on every poly-eligible lane (D4); a compact
+    // chip overlaid on the lane's own scope — the controls cell stays
+    // one tidy [fader M S] line at the fixed grid widths
+    if (POLY_LANES.has(lane.key)) {
+      const px = document.createElement('button');
+      px.type = 'button';
+      px.className = 'stem-btn lane-notes-btn';
+      px.textContent = '♫';
+      px.title = t('laneNotesTitle');
+      px.addEventListener('click', () => toggleNotes(lane));
+      lane.notesBtn = px;
+      scope.appendChild(px);
+      applyNotesAvailability(lane);
+    }
     lane.waveCv = wave;
     lane.noteCv = noteCv;
     container.appendChild(row);
@@ -595,19 +627,22 @@ export function initLanes({ gd, data, player, apiBase }) {
       labelText: t('laneMix'),
       color: '#ddd6c8',
       withLane: true,
+      fader: 'norm',
     });
     mix.row.classList.add('lane-row-mix');
     mix.scope.classList.add('lane-scope-empty');
-    wireMuteSolo({
+    const { syncFader: mixSync } = wireMuteSolo({
+      mixer,
       model: mixer.mix,
       vol: mix.vol,
       mute: mix.mute,
       solo: mix.solo,
+      dbEl: mix.db,
       apply: () => mixer.apply(),
       paintFill,
     });
-    mix.vol.value = String(player.mixGainNorm());
-    paintFill(mix.vol);
+    mixer.mix.volume = player.mixGainNorm();
+    mixSync();
     panel.append(mix.row);
     state.rows.push({
       model: mixer.mix,
@@ -615,6 +650,7 @@ export function initLanes({ gd, data, player, apiBase }) {
       vol: mix.vol,
       mute: mix.mute,
       solo: mix.solo,
+      syncFader: mixSync,
     });
 
     for (const lane of state.lanes) buildLaneRow(panel, lane);
@@ -653,6 +689,7 @@ export function initLanes({ gd, data, player, apiBase }) {
           `unexpected stems for ${method}: ${keys.join(', ')}`
         );
       }
+      const pMix = player.mixPeak();
       for (const item of list.stems) {
         const meta = LANE_META[item.key] || {};
         // makeStrip defaults: MUTED (gain 0) — loading lanes never
@@ -672,6 +709,12 @@ export function initLanes({ gd, data, player, apiBase }) {
         try {
           lane.buffer = await decodeStem(item.url);
           lane.peaks = buildEnvelope(lane.buffer);
+          // gain staging (I2): fader default = make-up gain matching
+          // the lane peak to the mix peak; the envelope auto-scale and
+          // peak label use the same per-lane peak
+          lane.peak = bufferPeak(lane.buffer);
+          lane.makeupDb = makeupDb(pMix, lane.peak);
+          lane.dbGain = lane.makeupDb;
         } catch {
           // per-lane tolerance: placeholder inside THIS lane, the rest
           // of the panel still loads (D2)
