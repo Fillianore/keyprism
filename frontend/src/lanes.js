@@ -25,6 +25,9 @@
  *  changes what the user hears — the Mix keeps playing, every Demucs
  *  lane starts MUTED until unmuted/soloed; unmuting any lane silences
  *  the Mix (its content is inside the lanes — summing both would clip).
+ *  Solo is DESTRUCTIVE (Phase 3.7 state machine in mixer.js): it
+ *  materializes as real mute states on every other row, and unmuting
+ *  any row releases it.
  *
  *  Lane rendering (Phase 3.6 polish):
  *  - each decoded buffer's peak envelope (min/max per column, ~1024
@@ -376,11 +379,7 @@ export function initLanes({ gd, data, player, apiBase }) {
       stopAll();
     } else if (type === 'mixgain' && mixer.mix && !mixer.mix.muted) {
       mixer.mix.volume = info.norm;
-      const volEl = state.rows.find((r) => r.model === mixer.mix)?.vol;
-      if (volEl && document.activeElement !== volEl) {
-        volEl.value = String(info.norm);
-        paintFill(volEl);
-      }
+      state.rows.find((r) => r.model === mixer.mix)?.syncFader?.();
     }
   });
 
@@ -441,13 +440,15 @@ export function initLanes({ gd, data, player, apiBase }) {
     return model === mixer.mix ? t('mixerMixDuckedTip') : t('mixerMutedTip');
   }
 
-  /** Repaint the matrix on the rows: a lane silenced by OTHERS' solo or
-   *  by the anti-clipping mix rule is shown `.dimmed` WITH a tooltip
-   *  explaining why; the M/S buttons keep reflecting the USER's own
-   *  toggle state only. */
+  /** Repaint the matrix on the rows: M/S buttons render STRICTLY from
+   *  the model (destructive solo writes real mute states — the gold M
+   *  on suppressed rows is the actual state); a lane that is inaudible
+   *  is shown `.dimmed` WITH a tooltip explaining why. */
   function paintStates() {
     const anySolo = mixer.anySolo;
-    for (const { model, row } of state.rows) {
+    for (const { model, row, mute, solo } of state.rows) {
+      mute.classList.toggle('active', model.muted);
+      solo.classList.toggle('active', !!model.solo);
       const audible =
         model === mixer.mix ? mixer.mixAudible() : mixer.stripAudible(model);
       row.classList.toggle('dimmed', !audible);
@@ -526,7 +527,8 @@ export function initLanes({ gd, data, player, apiBase }) {
       withLane: true,
     });
     const { row, controls, scope, vol, mute, solo } = parts;
-    wireMuteSolo({
+    const { syncFader } = wireMuteSolo({
+      mixer,
       model: lane,
       vol,
       mute,
@@ -534,7 +536,7 @@ export function initLanes({ gd, data, player, apiBase }) {
       apply: () => mixer.apply(),
       paintFill,
     });
-    state.rows.push({ model: lane, row, vol, mute, solo });
+    state.rows.push({ model: lane, row, vol, mute, solo, syncFader });
     // Notes (扒谱): uniform on every poly-eligible lane (D4)
     if (POLY_LANES.has(lane.key)) {
       const px = document.createElement('button');
@@ -598,7 +600,8 @@ export function initLanes({ gd, data, player, apiBase }) {
     });
     mix.row.classList.add('lane-row-mix');
     mix.scope.classList.add('lane-scope-empty');
-    wireMuteSolo({
+    const { syncFader: mixSync } = wireMuteSolo({
+      mixer,
       model: mixer.mix,
       vol: mix.vol,
       mute: mix.mute,
@@ -606,8 +609,8 @@ export function initLanes({ gd, data, player, apiBase }) {
       apply: () => mixer.apply(),
       paintFill,
     });
-    mix.vol.value = String(player.mixGainNorm());
-    paintFill(mix.vol);
+    mixer.mix.volume = player.mixGainNorm();
+    mixSync();
     panel.append(mix.row);
     state.rows.push({
       model: mixer.mix,
@@ -615,6 +618,7 @@ export function initLanes({ gd, data, player, apiBase }) {
       vol: mix.vol,
       mute: mix.mute,
       solo: mix.solo,
+      syncFader: mixSync,
     });
 
     for (const lane of state.lanes) buildLaneRow(panel, lane);

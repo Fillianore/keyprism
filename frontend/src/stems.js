@@ -1,34 +1,35 @@
 /** Stem player (Phase 2 classic source separation).
  *
- *  Fetches /api/stems for the current track, decodes every stem WAV into
- *  the SHARED AudioContext owned by player.js and drives all stem sources
- *  from the main transport events. Gain architecture lives in the shared
- *  MixerState (mixer.js): every strip feeds the MASTER GainNode (−10 dB
- *  ceiling) before the destination — nothing can clip, and the DAW
- *  mute/solo matrix is computed in ONE place.
+ * Fetches /api/stems for the current track, decodes every stem WAV into
+ * the SHARED AudioContext owned by player.js and drives all stem sources
+ * from the main transport events. Gain architecture lives in the shared
+ * MixerState (mixer.js): every strip feeds the MASTER GainNode (−10 dB
+ * ceiling) before the destination — nothing can clip, and the mute/solo
+ * matrix is computed in ONE place.
  *
- *  Sync design (the whole point of this module):
- *  - one shared AudioContext: all stems + the mix live on the same
- *    hardware clock, so there is nothing to drift apart;
- *  - the transport emits ('play', {offset, when}) with ONE absolute
- *    timestamp `when = ctx.currentTime + START_LEAD`; every stem's
- *    AudioBufferSourceNode (and the mix source in player.js) is started
- *    with source.start(when, offset) — never serial awaits, never
- *    setTimeout — so all channels begin on the same audio frame and stay
- *    sample-locked for the whole track;
- *  - stem WAVs are rendered from the same cached complex STFT at the same
- *    sample rate, so identical offsets address identical sample positions;
- *  - volume/mute/solo never touch scheduling: they only ramp GainNodes
- *    (setTargetAtTime, ~12 ms), which is click- and pop-free.
+ * Sync design (the whole point of this module):
+ * - one shared AudioContext: all stems + the mix live on the same
+ *   hardware clock, so there is nothing to drift apart;
+ * - the transport emits ('play', {offset, when}) with ONE absolute
+ *   timestamp `when = ctx.currentTime + START_LEAD`; every stem's
+ *   AudioBufferSourceNode (and the mix source in player.js) is started
+ *   with source.start(when, offset) — never serial awaits, never
+ *   setTimeout — so all channels begin on the same audio frame and stay
+ *   sample-locked for the whole track;
+ * - stem WAVs are rendered from the same cached complex STFT at the same
+ *   sample rate, so identical offsets address identical sample positions;
+ * - volume/mute/solo never touch scheduling: they only ramp GainNodes
+ *   (setTargetAtTime, ~12 ms), which is click- and pop-free.
  *
- *  Mixer defaults (DAW standard, anti-clipping):
- *  - loading stems does NOT change what the user hears: the Mix keeps
- *    playing at its current volume, every separated stem starts MUTED
- *    (gain 0) until explicitly unmuted/soloed;
- *  - unmuting any stem hands the lead to the stems: the Mix is silenced
- *    at gain level (its content is already inside the stems — summing
- *    both would double the waveform and clip) and its row is shown
- *    `.dimmed`; soloing a stem silences everything else instantly.
+ * Mixer defaults (anti-clipping, destructive solo — Phase 3.7):
+ * - loading stems does NOT change what the user hears: the Mix keeps
+ *   playing at its current volume, every separated stem starts MUTED
+ *   (gain 0) until explicitly unmuted/soloed;
+ * - unmuting any stem hands the lead to the stems: the Mix is silenced
+ *   at gain level (its content is already inside the stems — summing
+ *   both would double the waveform and clip) and its row is shown
+ *   `.dimmed`; soloing a stem force-mutes every other row (the M
+ *   buttons render that real state) and unmuting any row releases it.
  */
 
 import { t, onChange } from './i18n.js';
@@ -123,11 +124,7 @@ export function initStems({ data, player, apiBase }) {
     } else if (type === 'mixgain' && mixer.mix && !mixer.mix.muted) {
       // user moved the main volume slider: mirror it into the Mix row
       mixer.mix.volume = info.norm;
-      const volEl = state.rows.find((r) => r.model === mixer.mix)?.vol;
-      if (volEl && document.activeElement !== volEl) {
-        volEl.value = String(info.norm);
-        paintFill(volEl);
-      }
+      state.rows.find((r) => r.model === mixer.mix)?.syncFader?.();
     }
   });
 
@@ -190,13 +187,16 @@ export function initStems({ data, player, apiBase }) {
     return model === mixer.mix ? t('mixerMixDuckedTip') : t('mixerMutedTip');
   }
 
-  /** Repaint the matrix on the rows: a strip silenced by OTHERS' solo /
-   *  by the anti-clipping mix rule is shown `.dimmed` WITH a tooltip
-   *  explaining why; the M/S buttons keep reflecting the USER's own
-   *  toggle state only. */
+  /** Repaint the matrix on the rows: M/S buttons render STRICTLY from
+   *  the model (destructive solo writes real mute states, so the gold
+   *  M on suppressed rows is the actual state, never flipped behind
+   *  the user's back); a strip that is inaudible is shown `.dimmed`
+   *  WITH a tooltip explaining why. */
   function paintStates() {
     const anySolo = mixer.anySolo;
-    for (const { model, row } of state.rows) {
+    for (const { model, row, mute, solo } of state.rows) {
+      mute.classList.toggle('active', model.muted);
+      solo.classList.toggle('active', !!model.solo);
       const audible =
         model === mixer.mix ? mixer.mixAudible() : mixer.stripAudible(model);
       row.classList.toggle('dimmed', !audible);
@@ -210,7 +210,8 @@ export function initStems({ data, player, apiBase }) {
    *  and every stem row (D3). */
   function buildRow(container, key, nameText, color, model) {
     const parts = trackRow({ key, labelText: nameText, color });
-    wireMuteSolo({
+    const { syncFader } = wireMuteSolo({
+      mixer,
       model,
       vol: parts.vol,
       mute: parts.mute,
@@ -225,6 +226,7 @@ export function initStems({ data, player, apiBase }) {
       vol: parts.vol,
       mute: parts.mute,
       solo: parts.solo,
+      syncFader,
     };
     state.rows.push(entry);
     return entry;
@@ -260,8 +262,8 @@ export function initStems({ data, player, apiBase }) {
     // Mix row: the transport's own playback, ridden by the master gain
     const mixUi = buildRow(panel, 'mix', t('stemMix'), '#ddd6c8', mixer.mix);
     mixUi.row.classList.add('stem-row-mix');
-    mixUi.vol.value = String(player.mixGainNorm());
-    paintFill(mixUi.vol);
+    mixer.mix.volume = player.mixGainNorm();
+    mixUi.syncFader();
 
     for (const s of mixer.strips) {
       const meta = STEM_META[s.key] || {};

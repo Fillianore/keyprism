@@ -7,7 +7,12 @@
  *  Pure DOM construction: event wiring and the gain matrix stay with
  *  the callers (stems.js / lanes.js drive mixer.apply() themselves);
  *  the lane scope cell is left EMPTY for the caller to fill with its
- *  canvases (canvas ownership + redraw stays in lanes.js). */
+ *  canvases (canvas ownership + redraw stays in lanes.js).
+ *
+ *  M/S clicks run the mixer STATE MACHINE (mixer.pressMute /
+ *  pressSolo) — buttons never flip model flags themselves, they call
+ *  the mixer and re-render strictly from the model (so the
+ *  M+S-both-gold state is unrepresentable). */
 
 import { trackIcon } from './trackIcons.js';
 import { t } from './i18n.js';
@@ -64,21 +69,26 @@ export function trackRow({ key, labelText, color, withLane = false }) {
   return parts;
 }
 
-/** Shared M/S/slider wiring: buttons flip the model flags and call the
- *  panel's apply() (the mixer matrix); the slider mirrors model.volume.
- *  paintFill is the panel's slider fill painter. */
-export function wireMuteSolo({ model, vol, mute, solo, apply, paintFill }) {
-  mute.classList.toggle('active', model.muted);
-  solo.classList.toggle('active', model.solo);
-  vol.value = String(model.volume);
+/** Shared M/S/slider wiring: M/S clicks run the mixer state machine
+ *  (mixer.pressMute / pressSolo — buttons re-render strictly from the
+ *  model via the panel's apply() repaint); the slider mirrors
+ *  model.volume. Returns syncFader() to (re)paint the slider from the
+ *  model without fighting an in-progress drag. paintFill is the
+ *  panel's slider fill painter. */
+export function wireMuteSolo({ mixer, model, vol, mute, solo, apply,
+                               paintFill }) {
+  const syncFader = () => {
+    if (document.activeElement !== vol) {
+      vol.value = String(model.volume);
+    }
+    paintFill(vol);
+  };
   mute.addEventListener('click', () => {
-    model.muted = !model.muted;
-    mute.classList.toggle('active', model.muted);
+    mixer.pressMute(model);
     apply();
   });
   solo.addEventListener('click', () => {
-    model.solo = !model.solo;
-    solo.classList.toggle('active', model.solo);
+    mixer.pressSolo(model);
     apply();
   });
   vol.addEventListener('input', () => {
@@ -86,4 +96,6 @@ export function wireMuteSolo({ model, vol, mute, solo, apply, paintFill }) {
     paintFill(vol);
     apply();
   });
+  syncFader();
+  return { syncFader };
 }

@@ -506,8 +506,10 @@ def test_lanes_js_is_wired_into_the_app():
 def test_frontend_mixer_contract():
     """stems.js and lanes.js must share the MixerState (mixer.js): one
     master GainNode before the destination, strips default MUTED (the
-    mix keeps playing), the DAW matrix shown via .dimmed rows, and the
-    fixed per-method stem contract validated on both panels."""
+    mix keeps playing), the destructive-solo state machine
+    (pressMute/pressSolo) driven from controls.js with buttons
+    rendering strictly from state, the matrix shown via .dimmed rows,
+    and the fixed per-method stem contract validated on both panels."""
     mixer = strip_js_comments(
         (FRONTEND / "mixer.js").read_text(encoding="utf-8"))
     assert "createGain" in mixer and "connect(ctx.destination)" in mixer
@@ -515,6 +517,12 @@ def test_frontend_mixer_contract():
     assert "muted: true" in mixer   # strip default (makeStrip)
     assert "muted: false" in mixer  # mix strip default
     assert "stripAudible" in mixer and "mixAudible" in mixer
+    # Phase 3.7: destructive-solo transitions, buttons from state only
+    assert "pressSolo" in mixer and "pressMute" in mixer
+    controls = strip_js_comments(
+        (FRONTEND / "controls.js").read_text(encoding="utf-8"))
+    assert "mixer.pressMute(model)" in controls
+    assert "mixer.pressSolo(model)" in controls
     for name in ("stems.js", "lanes.js"):
         src = strip_js_comments(
             (FRONTEND / name).read_text(encoding="utf-8"))
@@ -530,6 +538,25 @@ def test_frontend_mixer_contract():
     lanes_src = strip_js_comments(
         (FRONTEND / "lanes.js").read_text(encoding="utf-8"))
     assert "'drums', 'bass', 'other', 'vocals'" in lanes_src
+
+
+def test_mixer_transition_table_is_wired():
+    """The FULL transition-table test (T1–T5, I1, snapshot restore,
+    mix-duck rule) runs as a Node script wired into npm scripts and
+    CI — mixer.js imports nothing, so it runs on pure Node fakes."""
+    script = FRONTEND.parent / "scripts" / "test-mixer.mjs"
+    assert script.is_file()
+    src = script.read_text(encoding="utf-8")
+    for token in ("T1", "T2", "T3", "T4", "T5", "pressSolo",
+                  "pressMute", "invariantOk", "mixAudible"):
+        assert token in src
+    pkg = json.loads((FRONTEND.parent / "package.json").read_text(
+        encoding="utf-8"))
+    assert pkg["scripts"]["test:mixer"] == "node scripts/test-mixer.mjs"
+    repo = Path(__file__).resolve().parent.parent
+    ci = (repo / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8")
+    assert "npm run test:mixer" in ci
 
 
 def test_frontend_ui_polish_contract():
