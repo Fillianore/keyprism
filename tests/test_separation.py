@@ -347,6 +347,32 @@ def test_api_stems_computes_and_caches(srv):
     assert body2["stems"] == body["stems"]
 
 
+def test_api_stems_fixed_names_per_method(srv):
+    """Contract: the stems list is the FIXED per-method registry, never
+    dependent on file length or chunking — hpss/rpca answer exactly two
+    canonical keys regardless of the input."""
+    base = srv["base"]
+    code, raw, _ = get_raw(f"{base}/api/stems?method=hpss")
+    assert code == 200
+    body = json.loads(raw.decode())
+    assert body["method"] == "hpss"
+    assert [s["key"] for s in body["stems"]] == ["harmonic", "percussive"]
+
+    code, raw, _ = get_raw(f"{base}/api/stems?method=rpca")
+    assert code == 200
+    body = json.loads(raw.decode())
+    assert body["method"] == "rpca"
+    assert [s["key"] for s in body["stems"]] == ["lowrank", "sparse"]
+
+    # the registry answers, not the cache: the versioned on-disk cache
+    # holds exactly the fixed stem WAVs per method
+    for method in ("hpss", "rpca"):
+        cached = list(srv["home"].glob(
+            f"cache/analysis/*/*/stems/{stems.STEMS_VERSION}/{method}/*.wav"))
+        assert len(cached) == len(stems.STEM_SPECS[method])
+        assert {p.stem for p in cached} == set(stems.STEM_SPECS[method])
+
+
 def test_api_stem_download_is_valid_wav(srv):
     base = srv["base"]
     _, _, _ = get_raw(f"{base}/api/stems?method=hpss")  # ensure computed

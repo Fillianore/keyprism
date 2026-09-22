@@ -74,6 +74,7 @@ from . import audio_io
 
 __all__ = [
     "DL_STEMS_VERSION", "DL_METHODS", "STEM_SPECS", "TARGET_SR",
+    "SEGMENT_SEC", "SEGMENT_SAMPLES",
     "DLMissingError", "ORT_AVAILABLE", "HF_AVAILABLE",
     "plan_chunks", "hann_cola", "resample", "ola_separate",
     "DemucsSeparator", "get_separator", "dl_stems_dir", "dl_status_path",
@@ -99,17 +100,34 @@ STEM_SPECS = {
 #: sample rates across mix/stay lanes stay sample-accurate).
 TARGET_SR = 44100
 
+#: The reference ONNX export family fixes the INTERNAL segment length
+#: (7.8 s @ 44.1 kHz = 343980 samples; the STFT/iSTFT lives inside the
+#: graph and its reflect pads are sized for exactly this input length —
+#: any other length fails with a Pad/Reshape error). Session-based
+#: separation therefore runs the generic chunker at exactly this chunk
+#: size with a 50% overlap (the periodic Hann is then COLA-exact:
+#: fade_out + fade_in == 1 at every sample) and zero-pads the single
+#: short chunk a sub-segment track produces (a track tail is genuinely
+#: silent — padding is exact there). Override with KEYPRISM_DL_SEGMENT
+#: (samples) for an export with a different fixed segment.
+SEGMENT_SEC = 7.8
+SEGMENT_SAMPLES = 343980
+
 #: Variant specs: Hugging Face repo + file for the auto-download path.
 #: Both are env-overridable (KEYPRISM_DEMUCS4_REPO/_FILE and the 6-stem
 #: twins) because ONNX exports of htdemucs/htdemucs_6s are community
 #: artifacts; any compatible export can be dropped into the model dir.
+#: Graph contract of the default repo: input ``mix [1, 2, T]`` float32,
+#: single output ``sources [1, n_stems, 2, T]`` (STFT/iSTFT embedded,
+#: opset 17) — exactly what ``_normalize_output`` accepts. The previous
+#: default (Xenova/htdemucs-onnx) no longer exists on the Hub.
 _VARIANTS = {
     "demucs_4": {
-        "repo": "Xenova/htdemucs-onnx",
+        "repo": "smank/htdemucs-onnx",
         "file": "htdemucs.onnx",
     },
     "demucs_6": {
-        "repo": "Xenova/htdemucs_6s-onnx",
+        "repo": "smank/htdemucs-onnx",
         "file": "htdemucs_6s.onnx",
     },
 }
@@ -259,6 +277,9 @@ class DemucsSeparator:
         self._infer = infer
         self._session = None
         self._io = None
+        # Fixed model segment length in samples (0 = unknown/flexible:
+        # injected infer backends accept whatever the chunker produces)
+        self._segment = 0
         if infer is None:
             if not ORT_AVAILABLE:
                 raise DLMissingError(
@@ -266,6 +287,12 @@ class DemucsSeparator:
             path = self._resolve_model_file()
             self._session = _load_session(path, threads)
             self._io = _session_io(self._session)
+            try:
+                self._segment = int(
+                    os.environ.get("KEYPRISM_DL_SEGMENT", ""))
+            except ValueError:
+                self._segment = SEGMENT_SAMPLES
+            self._probe()
 
     # -- model discovery -------------------------------------------------
 
@@ -305,33 +332,107 @@ class DemucsSeparator:
 
     # -- inference ---------------------------------------------------------
 
+    def _probe(self) -> None:
+        """One zero-input probe validating the graph contract up front.
+
+        The two known bad-export failure modes — a segment length the
+        embedded reflect pads reject, and an output stem count that
+        disagrees with the variant registry (e.g. a mislabelled
+        ``htdemucs_6s`` shipping 4 sources) — surface here as immediate,
+        actionable errors instead of a background task failing ~40 s
+        into the separation. Costs one silent inference (~2 s CPU) per
+        model load."""
+        if self._segment <= 0:
+            return
+        try:
+            y = self._run_session(np.zeros(self._segment,
+                                           dtype=np.float32))
+        except Exception as e:  # noqa: BLE001 - surface with context
+            raise ValueError(
+                f"ONNX 模型与固定分段不兼容 "
+                f"({self._segment} 样本): {e}; 可用 KEYPRISM_DL_SEGMENT "
+                f"或 KEYPRISM_DEMUCS{4 if self.variant == 'demucs_4' else 6}"
+                f"_FILE 指定兼容导出") from e
+        if y.shape[0] != len(self.stems):
+            raise ValueError(
+                f"模型输出 {y.shape[0]} 个 stem, 但 {self.variant} 需要 "
+                f"{len(self.stems)} (该 ONNX 导出与 {self.variant} 不匹配; "
+                f"可用 KEYPRISM_DEMUCS"
+                f"{4 if self.variant == 'demucs_4' else 6}_FILE 指定兼容导出)")
+
     def _run_session(self, x: np.ndarray) -> np.ndarray:
-        """One ONNX call: (T,) mono float32 in -> (S, T) float32 out."""
+        """One ONNX call: (T,) mono float32 in -> (S, T) float32 out.
+
+        When the export fixes the segment length (``self._segment``), a
+        shorter input is zero-padded up to the segment (see
+        :func:`_pad_segment`) and the output trimmed back to the valid
+        region."""
         sess, (name, in_ch) = self._session, self._io
-        t = np.asarray(x, dtype=np.float32).reshape(1, -1)
+        x, valid = _pad_segment(x, self._segment)
+        t = x.reshape(1, -1)
         if in_ch == 2:  # model wants stereo; feed mono on both channels
             t = np.concatenate([t, t], axis=0).reshape(1, 2, -1)
         else:
             t = t.reshape(1, 1, -1)
         outs = sess.run(None, {name: t})
-        return _normalize_output(outs, t.shape[-1])
+        y = _normalize_output(outs, t.shape[-1])
+        return y[..., :valid] if valid else y
 
-    def separate(self, pcm: np.ndarray, sr: int, chunk_sec: float = 10.0,
-                 overlap_sec: float = 1.0, *, progress=None) -> dict:
+    def separate(self, pcm: np.ndarray, sr: int, chunk_sec: float | None = None,
+                 overlap_sec: float | None = None, *, progress=None) -> dict:
         """Mono PCM in, ``{stem: ndarray}`` out at :data:`TARGET_SR`.
 
         Resamples to 44.1 kHz (model rate) when needed, then streams
         chunk -> session -> Hann overlap-add (see :func:`ola_separate`
-        for the blend math and the memory discipline)."""
+        for the blend math and the memory discipline).
+
+        Chunking defaults depend on the backend: when the model fixes a
+        segment length (:data:`SEGMENT_SAMPLES`, set for session-based
+        separators), chunks are EXACTLY that segment with a 50% overlap
+        (COLA-exact cross-fade) because the reference exports embed the
+        STFT and only accept that input length; generic backends
+        (injected ``infer``, flexible exports) keep the 10 s / 1 s
+        defaults. Explicit arguments always win."""
         x = np.asarray(pcm, dtype=np.float32).reshape(-1)
         if x.shape[0] == 0:
             return {k: np.zeros(0) for k in self.stems}
+        if self._segment > 0:
+            d_chunk = self._segment / float(TARGET_SR)  # exact segment
+            d_overlap = d_chunk / 2.0                   # 50%: COLA-exact
+        else:
+            d_chunk, d_overlap = 10.0, 1.0
+        if chunk_sec is None:
+            chunk_sec = d_chunk
+        if overlap_sec is None:
+            overlap_sec = d_overlap
         x = resample(x, sr, TARGET_SR)
         infer = self._infer if self._infer is not None else self._run_session
         out = ola_separate(
             x, infer, chunk_sec=chunk_sec, overlap_sec=overlap_sec,
             sr=TARGET_SR, progress=progress)
+        missing = [i for i in range(len(self.stems))
+                   if f"stem{i}" not in out]
+        if missing:
+            raise ValueError(
+                f"模型输出缺少 stem {missing} "
+                f"(该 ONNX 导出与 {self.variant} 不匹配)")
         return {k: out[f"stem{i}"] for i, k in enumerate(self.stems)}
+
+
+def _pad_segment(x: np.ndarray, seg: int) -> tuple:
+    """Zero-pad a short chunk up to the fixed model segment.
+
+    Returns ``(padded, valid)``: ``padded`` is the input to feed the
+    model, ``valid`` the number of leading samples that carry real
+    content (== ``len(x)`` when padding happened, 0 when none was
+    needed). A sub-segment track tail is genuinely silent, so the
+    padding is exact — the output is trimmed back to ``valid``."""
+    x = np.asarray(x, dtype=np.float32).reshape(-1)
+    if seg <= 0 or x.shape[0] >= seg:
+        return x, 0
+    valid = x.shape[0]
+    return np.concatenate(
+        [x, np.zeros(seg - valid, dtype=np.float32)]), valid
 
 
 def _normalize_output(outs, n_samples: int) -> np.ndarray:

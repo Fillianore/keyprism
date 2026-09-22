@@ -318,6 +318,48 @@ Decisions that are easy to "simplify" into regressions:
   inference at a time = the RAM ceiling) and report progress into the
   in-memory task registry polled via `/api/task/{id}` — long runs never
   hold an HTTP request open. Finished tasks prune to the newest 32.
+- **The reference Demucs ONNX exports fix the segment length.** Their
+  STFT/iSTFT lives INSIDE the graph with reflect pads sized for exactly
+  `SEGMENT_SAMPLES` (343980 = 7.8 s @ 44.1 kHz) — any other input
+  length fails with a Pad/Reshape error. `DemucsSeparator.separate`
+  therefore defaults its chunks from `self._segment` (exact segment,
+  50% overlap = COLA-exact Hann) and zero-pads the sub-segment tail
+  chunk (`_pad_segment`); injected-infer backends and
+  `KEYPRISM_DL_SEGMENT` overrides flow through the same seam. Do not
+  "simplify" back to arbitrary chunk sizes.
+- **Model discovery defaults live in `dlsep._VARIANTS`** — currently
+  `smank/htdemucs-onnx` (graph contract: input `mix [1,2,T]`, single
+  output `sources [1,S,2,T]`, STFT embedded). The previous default
+  repo (Xenova/htdemucs-onnx) vanished from the Hub, which silently
+  broke auto-download. huggingface.co is unreachable from the dev
+  network: set `HF_ENDPOINT=https://hf-mirror.com` for the download,
+  or drop any compatible ONNX into `~/.keyprism/models/demucs/` (the
+  glob fallback picks it up). Caveat: as of Phase 3.5 the Hub has NO
+  usable auto-downloadable 6-stem export (smank's `htdemucs_6s.onnx`
+  actually ships 4 sources; the Kani95/timcsy exports expose the
+  internal STFT as a required second input) — `demucs_6` therefore
+  fails FAST at model load (session zero-probe validating segment +
+  stem count) until a compatible export is provided via
+  `KEYPRISM_DEMUCS6_FILE`; `demucs_4` auto-downloads and works.
+- **Frontend gain architecture is `frontend/src/mixer.js`.**
+  `MixerState` is the single source of truth: strips feed a MASTER
+  GainNode capped at `MASTER_CEILING` (mirrors `player.js` `VOL_MAX`,
+  change both together), strips are born MUTED (loading stems/lanes
+  never changes what the user hears), solo anywhere force-silences
+  every non-soloed strip, and any open stem silences the Mix (its
+  content is inside the stems — summing both clips). Suppressed rows
+  are shown `.dimmed`; their own M/S buttons keep the user's state.
+  Both `stems.js` and `lanes.js` validate the `/api/stems` response
+  against the fixed per-method stem list before rendering.
+- **Panel row DOM comes from ONE factory** (`frontend/src/controls.js`,
+  used by BOTH `stems.js` and `lanes.js`) — never fork per-panel row
+  markup, or the slider/label inconsistency class of bugs returns.
+  Notes (扒谱) availability is STRICTLY lazy: checked on click against
+  `/api/ping` capabilities and surfaced as a dismissible toast
+  (`toast.js`) with the precise reason — never auto-fetched on panel
+  load. i18n key usage is CI-enforced by `npm run check:i18n`
+  (`frontend/scripts/check-i18n.mjs`): a `t()` key must exist in BOTH
+  dicts.
 - **DL stem cache invalidation** mirrors Phase 2: files under
   `<entry>/stems/<DL_STEMS_VERSION>/<method>/` (+ `status.json`,
   atomic tmp-swap) and `<entry>/notes/<POLY_VERSION>/notes_poly_<stem>.json`;
