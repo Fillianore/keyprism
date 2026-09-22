@@ -33,6 +33,7 @@
 
 import { t, onChange } from './i18n.js';
 import { MixerState } from './mixer.js';
+import { trackRow, wireMuteSolo } from './controls.js';
 
 const START_LEAD = 0.06; // keep identical to player.js START_LEAD
 const METHODS = ['combined', 'hpss', 'rpca'];
@@ -195,53 +196,27 @@ export function initStems({ data, player, apiBase }) {
   }
   mixer.onRepaint(paintStates);
 
-  function buildRow(container, nameText, color, model) {
-    const row = document.createElement('div');
-    row.className = 'stem-row';
-    const name = document.createElement('span');
-    name.className = 'stem-name';
-    name.textContent = nameText;
-    if (color) name.style.setProperty('--stem-color', color);
-    const vol = document.createElement('input');
-    vol.type = 'range';
-    vol.className = 'stem-vol';
-    vol.min = '0';
-    vol.max = '1';
-    vol.step = '0.01';
-    vol.value = String(model.volume);
-    const mute = document.createElement('button');
-    mute.type = 'button';
-    mute.className = 'stem-btn';
-    mute.textContent = 'M';
-    mute.title = t('mute');
-    mute.setAttribute('aria-label', t('mute'));
-    const solo = document.createElement('button');
-    solo.type = 'button';
-    solo.className = 'stem-btn';
-    solo.textContent = 'S';
-    solo.title = t('solo');
-    solo.setAttribute('aria-label', t('solo'));
-    mute.classList.toggle('active', model.muted);
-    solo.classList.toggle('active', model.solo);
-    mute.addEventListener('click', () => {
-      model.muted = !model.muted;
-      mute.classList.toggle('active', model.muted);
-      mixer.apply();
+  /** One row via the shared factory (controls.js): <icon><label> cell +
+   *  slider/M/S controls cell — identical construction for the Mix row
+   *  and every stem row (D3). */
+  function buildRow(container, key, nameText, color, model) {
+    const parts = trackRow({ key, labelText: nameText, color });
+    wireMuteSolo({
+      model,
+      vol: parts.vol,
+      mute: parts.mute,
+      solo: parts.solo,
+      apply: () => mixer.apply(),
+      paintFill,
     });
-    solo.addEventListener('click', () => {
-      model.solo = !model.solo;
-      solo.classList.toggle('active', model.solo);
-      mixer.apply();
-    });
-    vol.addEventListener('input', () => {
-      model.volume = parseFloat(vol.value);
-      paintFill(vol);
-      mixer.apply();
-    });
-    row.append(name, vol, mute, solo);
-    container.appendChild(row);
-    paintFill(vol);
-    const entry = { model, row, vol, mute, solo };
+    container.appendChild(parts.row);
+    const entry = {
+      model,
+      row: parts.row,
+      vol: parts.vol,
+      mute: parts.mute,
+      solo: parts.solo,
+    };
     state.rows.push(entry);
     return entry;
   }
@@ -274,14 +249,14 @@ export function initStems({ data, player, apiBase }) {
     if (!state.ready) return;
 
     // Mix row: the transport's own playback, ridden by the master gain
-    const mixUi = buildRow(panel, t('stemMix'), '#ddd6c8', mixer.mix);
+    const mixUi = buildRow(panel, 'mix', t('stemMix'), '#ddd6c8', mixer.mix);
     mixUi.row.classList.add('stem-row-mix');
     mixUi.vol.value = String(player.mixGainNorm());
     paintFill(mixUi.vol);
 
     for (const s of mixer.strips) {
       const meta = STEM_META[s.key] || {};
-      buildRow(panel, t(meta.labelKey || s.key), meta.color, s);
+      buildRow(panel, s.key, t(meta.labelKey || s.key), meta.color, s);
     }
     paintStates();
   }

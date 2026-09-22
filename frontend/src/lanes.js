@@ -42,6 +42,7 @@
 import { t, onChange } from './i18n.js';
 import { EPOCH_MS, pMs } from './spectrogram.js';
 import { MixerState } from './mixer.js';
+import { trackRow, wireMuteSolo } from './controls.js';
 
 const START_LEAD = 0.06; // keep identical to player.js START_LEAD
 const POLL_MS = 700;
@@ -419,67 +420,33 @@ export function initLanes({ gd, data, player, apiBase }) {
   }
   mixer.onRepaint(paintStates);
 
-  function buildControls(container, model, rowEl) {
-    const vol = document.createElement('input');
-    vol.type = 'range';
-    vol.className = 'stem-vol';
-    vol.min = '0';
-    vol.max = '1';
-    vol.step = '0.01';
-    vol.value = String(model.volume);
-    const mute = document.createElement('button');
-    mute.type = 'button';
-    mute.className = 'stem-btn';
-    mute.textContent = 'M';
-    mute.title = t('mute');
-    mute.setAttribute('aria-label', t('mute'));
-    const solo = document.createElement('button');
-    solo.type = 'button';
-    solo.className = 'stem-btn';
-    solo.textContent = 'S';
-    solo.title = t('solo');
-    solo.setAttribute('aria-label', t('solo'));
-    mute.classList.toggle('active', model.muted);
-    solo.classList.toggle('active', model.solo);
-    mute.addEventListener('click', () => {
-      model.muted = !model.muted;
-      mute.classList.toggle('active', model.muted);
-      mixer.apply();
-    });
-    solo.addEventListener('click', () => {
-      model.solo = !model.solo;
-      solo.classList.toggle('active', model.solo);
-      mixer.apply();
-    });
-    vol.addEventListener('input', () => {
-      model.volume = parseFloat(vol.value);
-      paintFill(vol);
-      mixer.apply();
-    });
-    container.append(vol, mute, solo);
-    paintFill(vol);
-    const entry = { model, row: rowEl, vol, mute, solo };
-    state.rows.push(entry);
-    return entry;
-  }
-
   function buildLaneRow(container, lane) {
-    const row = document.createElement('div');
-    row.className = 'lane-row';
-    const head = document.createElement('div');
-    head.className = 'lane-head';
-    const name = document.createElement('span');
-    name.className = 'stem-name';
-    name.textContent = t(lane.labelKey);
-    name.style.setProperty('--stem-color', lane.color);
-    head.appendChild(name);
-    buildControls(head, lane, row);
-    // polyphonic notes overlay toggle (Basic Pitch, demucs_6 stems)
+    // shared row factory (controls.js): <icon><label> | slider M S |
+    // scope — identical construction for the Mix lane and every stem
+    // lane (D3); the scope cell stays empty for the canvases below
+    const parts = trackRow({
+      key: lane.key,
+      labelText: t(lane.labelKey),
+      color: lane.color,
+      withLane: true,
+    });
+    const { row, controls, scope, vol, mute, solo } = parts;
+    wireMuteSolo({
+      model: lane,
+      vol,
+      mute,
+      solo,
+      apply: () => mixer.apply(),
+      paintFill,
+    });
+    state.rows.push({ model: lane, row, vol, mute, solo });
+    // polyphonic notes toggle (扒谱): uniform on every poly-eligible
+    // lane (Basic Pitch, demucs_6 stems) — no stray per-row extras (D4)
     if (POLY_LANES.has(lane.key)) {
       const px = document.createElement('button');
       px.type = 'button';
       px.className = 'stem-btn lane-notes-btn';
-      px.textContent = 'PX';
+      px.textContent = t('laneNotes');
       px.title = t('laneNotesTitle');
       px.addEventListener('click', async () => {
         if (lane.idx) {
@@ -507,17 +474,14 @@ export function initLanes({ gd, data, player, apiBase }) {
           px.disabled = false;
         }
       });
-      head.appendChild(px);
+      controls.appendChild(px);
     }
-    const scope = document.createElement('div');
-    scope.className = 'lane-scope';
     const wave = document.createElement('canvas');
     wave.className = 'lane-wave';
     const notes = document.createElement('canvas');
     notes.className = 'lane-notes';
     notes.setAttribute('aria-hidden', 'true');
     scope.append(wave, notes);
-    row.append(head, scope);
     container.appendChild(row);
     lane.waveCv = wave;
     lane.noteCv = notes;
@@ -553,20 +517,34 @@ export function initLanes({ gd, data, player, apiBase }) {
     panel.append(title, methodSel, status);
 
     if (!state.ready) return;
-    // Mix lane: the player's own playback, ridden by the master gain
-    const mixUi = document.createElement('div');
-    mixUi.className = 'lane-row lane-row-mix';
-    const mixHead = document.createElement('div');
-    mixHead.className = 'lane-head';
-    const mixName = document.createElement('span');
-    mixName.className = 'stem-name stem-row-mix';
-    mixName.textContent = t('laneMix');
-    mixHead.appendChild(mixName);
-    const mixEntry = buildControls(mixHead, mixer.mix, mixUi);
-    mixUi.appendChild(mixHead);
-    panel.appendChild(mixUi);
-    mixEntry.vol.value = String(player.mixGainNorm());
-    paintFill(mixEntry.vol);
+    // Mix lane: the player's own playback, ridden by the master gain.
+    // The scope cell stays empty (no canvas) and keeps the grid aligned.
+    const mix = trackRow({
+      key: 'mix',
+      labelText: t('laneMix'),
+      color: '#ddd6c8',
+      withLane: true,
+    });
+    mix.row.classList.add('lane-row-mix');
+    mix.scope.classList.add('lane-scope-empty');
+    wireMuteSolo({
+      model: mixer.mix,
+      vol: mix.vol,
+      mute: mix.mute,
+      solo: mix.solo,
+      apply: () => mixer.apply(),
+      paintFill,
+    });
+    mix.vol.value = String(player.mixGainNorm());
+    paintFill(mix.vol);
+    panel.append(mix.row);
+    state.rows.push({
+      model: mixer.mix,
+      row: mix.row,
+      vol: mix.vol,
+      mute: mix.mute,
+      solo: mix.solo,
+    });
 
     for (const lane of state.lanes) buildLaneRow(panel, lane);
     paintStates();
