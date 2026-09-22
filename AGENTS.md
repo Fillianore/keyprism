@@ -351,6 +351,15 @@ Decisions that are easy to "simplify" into regressions:
   are shown `.dimmed`; their own M/S buttons keep the user's state.
   Both `stems.js` and `lanes.js` validate the `/api/stems` response
   against the fixed per-method stem list before rendering.
+- **Panel row DOM comes from ONE factory** (`frontend/src/controls.js`,
+  used by BOTH `stems.js` and `lanes.js`) — never fork per-panel row
+  markup, or the slider/label inconsistency class of bugs returns.
+  Notes (扒谱) availability is STRICTLY lazy: checked on click against
+  `/api/ping` capabilities and surfaced as a dismissible toast
+  (`toast.js`) with the precise reason — never auto-fetched on panel
+  load. i18n key usage is CI-enforced by `npm run check:i18n`
+  (`frontend/scripts/check-i18n.mjs`): a `t()` key must exist in BOTH
+  dicts.
 - **DL stem cache invalidation** mirrors Phase 2: files under
   `<entry>/stems/<DL_STEMS_VERSION>/<method>/` (+ `status.json`,
   atomic tmp-swap) and `<entry>/notes/<POLY_VERSION>/notes_poly_<stem>.json`;

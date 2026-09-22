@@ -823,6 +823,11 @@ input[type='range']:active::-moz-range-thumb {
   flex: 0 0 auto;
 }
 
+.lane-notes-btn:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
 .stem-vol::-webkit-slider-runnable-track {
   background:
     linear-gradient(
@@ -891,6 +896,52 @@ input[type='range']:active::-moz-range-thumb {
 
 .lane-row.dimmed .lane-scope {
   opacity: 0.45;
+}
+
+/* ---------- Toast (Phase 3.6): precise, dismissible availability and
+ *  error messages — raised only from a user action, never on load ---- */
+.toast-stack {
+  position: fixed;
+  right: 18px;
+  bottom: 72px;
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 380px;
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  background: linear-gradient(180deg, #17171c, #101014);
+  border: 1px solid var(--gold-line);
+  border-radius: 8px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.55);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.toast-msg {
+  flex: 1 1 auto;
+}
+
+.toast-x {
+  background: none;
+  border: 0;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+  font-family: inherit;
+}
+
+.toast-x:hover {
+  color: var(--gold-hi);
 }
 
 /* ---------- Player: bottom lacquered beam ---------- */

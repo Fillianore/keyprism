@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Stem/lane panel UI polish (Phase 3.6 visual QA): every mixer row now
+  renders an `<icon><text>` label from the fixed stem registries (per
+  track inline SVG glyphs, EN/中文 live-switchable, with the zh labels
+  混音/人声/鼓/贝斯/其他/谐波/打击乐/低秩伴奏/稀疏主音); lane waveforms
+  draw from a cached ~1024-column peak envelope computed once at decode
+  — visible immediately after separation, before any playback — and a
+  per-lane decode failure renders an in-lane placeholder instead of
+  failing the panel; both panels build every row (mix included) from
+  ONE shared factory (`controls.js`), so the volume slider, M/S keys
+  and layout can no longer drift between rows; the stray cryptic "PX"
+  button becomes a uniform Notes (扒谱) button on the poly-eligible
+  lanes with strictly LAZY availability: capabilities are checked on
+  click and unavailability surfaces as a dismissible toast with the
+  precise reason (`需要 uv sync --extra dl` when onnxruntime is
+  missing; `多音转录在 Python ≥3.12 不可用；分离功能不受影响` when
+  basic-pitch is unavailable on Python ≥ 3.12) — never auto-triggered
+  on panel load; born-muted stems and the ducked mix row are `.dimmed`
+  WITH explanatory tooltips; lanes use a
+  `[label 140px][controls 200px][lane 1fr]` grid with 88 px rows
+- New i18n key-completeness guard (`npm run check:i18n`,
+  `frontend/scripts/check-i18n.mjs`): scans every `t('…')` /
+  `` t(`prefix${…}`) `` usage and every `data-i18n*` attribute and
+  fails when a key is missing from either the EN or the ZH dict (and
+  when the two dicts drift apart); enforced in the CI frontend job
+
 - `/api/stems` now derives its `stems` list from the FIXED per-method
   registry (`stems.STEM_SPECS` / `dlsep.STEM_SPECS`) instead of the
   cached `status.json`, so the answer can never depend on file length or

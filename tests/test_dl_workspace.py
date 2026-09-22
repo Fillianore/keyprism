@@ -530,3 +530,39 @@ def test_frontend_mixer_contract():
     lanes_src = strip_js_comments(
         (FRONTEND / "lanes.js").read_text(encoding="utf-8"))
     assert "'drums', 'bass', 'other', 'vocals'" in lanes_src
+
+
+def test_frontend_ui_polish_contract():
+    """Phase 3.6 UI polish contracts: shared row factory + track icons,
+    cached peak envelopes drawn at load, per-lane decode placeholders,
+    lazy precise DL-availability toasts (never auto-triggered), mixer
+    tooltips, and the i18n key-completeness guard wired into npm
+    scripts and CI."""
+    assert (FRONTEND / "trackIcons.js").is_file()
+    assert (FRONTEND / "controls.js").is_file()
+    assert (FRONTEND / "toast.js").is_file()
+    assert (FRONTEND.parent / "scripts" / "check-i18n.mjs").is_file()
+
+    lanes = strip_js_comments(
+        (FRONTEND / "lanes.js").read_text(encoding="utf-8"))
+    stems = strip_js_comments(
+        (FRONTEND / "stems.js").read_text(encoding="utf-8"))
+    for src in (lanes, stems):
+        assert "trackRow" in src and "controls.js" in src
+        assert "suppressionTip" in src      # D6: dimmed rows get tooltips
+    assert "buildEnvelope" in lanes         # D2: cached peak envelope
+    assert "decodeFailed" in lanes          # D2: per-lane placeholder
+    assert "drawAll()" in lanes             # D2: immediate first paint
+    assert "showToast" in lanes             # D5: dismissible toast
+    assert "polyNeedsDL" in lanes and "polyNeedsBP" in lanes
+    assert "await state.capsReady" in lanes  # D5: availability is lazy
+    # the Notes button is only ever added to poly-eligible lanes (D4)
+    assert "POLY_LANES.has(lane.key)" in lanes
+
+    pkg = json.loads((FRONTEND.parent / "package.json").read_text(
+        encoding="utf-8"))
+    assert pkg["scripts"]["check:i18n"] == "node scripts/check-i18n.mjs"
+    repo = Path(__file__).resolve().parent.parent
+    ci = (repo / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8")
+    assert "npm run check:i18n" in ci

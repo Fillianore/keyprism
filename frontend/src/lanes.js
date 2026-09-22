@@ -6,7 +6,9 @@
  *  owned by player.js and renders one stacked lane per stem. Gain
  *  architecture lives in the shared MixerState (mixer.js): every lane
  *  feeds the MASTER GainNode (−10 dB ceiling) before the destination and
- *  the DAW mute/solo matrix is computed in ONE place.
+ *  the DAW mute/solo matrix is computed in ONE place. Row DOM (label +
+ *  icon, slider, M/S, scope cell) comes from the shared factory in
+ *  controls.js so the two panels can never drift apart visually.
  *
  *  Sync design (inherited from the Phase 2 contract):
  *  - one shared AudioContext: all stems + the mix live on the same
@@ -23,6 +25,19 @@
  *  changes what the user hears — the Mix keeps playing, every Demucs
  *  lane starts MUTED until unmuted/soloed; unmuting any lane silences
  *  the Mix (its content is inside the lanes — summing both would clip).
+ *
+ *  Lane rendering (Phase 3.6 polish):
+ *  - each decoded buffer's peak envelope (min/max per column, ~1024
+ *    columns) is computed ONCE, cached on the lane, and drawn to the
+ *    waveform canvas IMMEDIATELY — content is visible before playback
+ *    and redrawn on resize (throttled) and plotly_relayout;
+ *  - a per-lane decode failure renders an i18n placeholder inside that
+ *    lane instead of failing the whole panel;
+ *  - the Notes (扒谱) button is uniform on every poly-eligible lane and
+ *    is strictly LAZY: availability is checked on click (awaiting the
+ *    /api/ping capabilities) and reported as a dismissible toast with
+ *    the precise reason (onnxruntime missing vs basic-pitch unavailable
+ *    on Python ≥ 3.12) — never auto-triggered on panel load.
  *
  *  Rendering design (why canvas, never layout.shapes):
  *  - six lanes of polyphonic notes would mean tens of thousands of SVG
@@ -43,6 +58,8 @@ import { t, onChange } from './i18n.js';
 import { EPOCH_MS, pMs } from './spectrogram.js';
 import { MixerState } from './mixer.js';
 import { trackRow, wireMuteSolo } from './controls.js';
+import { showToast } from './toast.js';
+import { throttled } from './util.js';
 
 const START_LEAD = 0.06; // keep identical to player.js START_LEAD
 const POLL_MS = 700;
@@ -78,6 +95,15 @@ const PITCH_HI = 108; // C8 — top edge of the lane
  *  per decoded buffer and drawn at any zoom (D2). */
 const ENVELOPE_COLUMNS = 1024;
 
+/** Raised when the lazy (click-time) capabilities check reports the
+ *  Notes feature unavailable; `kind` selects the precise toast. */
+class PolyUnavailable extends Error {
+  constructor(kind) {
+    super(kind);
+    this.kind = kind;
+  }
+}
+
 export function initLanes({ gd, data, player, apiBase }) {
   const toggle = document.getElementById('lanesToggle');
   const panel = document.getElementById('lanesPanel');
@@ -95,7 +121,8 @@ export function initLanes({ gd, data, player, apiBase }) {
 
   const state = {
     enabled: false,
-    caps: null, // /api/ping capabilities (dl availability)
+    caps: null, // /api/ping capabilities (dl/poly availability)
+    capsReady: null, // promise resolving once caps are known
     loading: false,
     ready: false,
     method: 'demucs_4',
@@ -408,22 +435,90 @@ export function initLanes({ gd, data, player, apiBase }) {
     el.style.setProperty('--fill', `${Math.min(Math.max(p, 0), 100)}%`);
   }
 
+  /** Why a row is currently inaudible (tooltip copy for D6) */
+  function suppressionTip(model, anySolo) {
+    if (anySolo && !model.solo) return t('soloSuppressedTip');
+    return model === mixer.mix ? t('mixerMixDuckedTip') : t('mixerMutedTip');
+  }
+
   /** Repaint the matrix on the rows: a lane silenced by OTHERS' solo or
-   *  by the anti-clipping mix rule is shown `.dimmed`; the M/S buttons
-   *  keep reflecting the USER's own toggle state only. */
+   *  by the anti-clipping mix rule is shown `.dimmed` WITH a tooltip
+   *  explaining why; the M/S buttons keep reflecting the USER's own
+   *  toggle state only. */
   function paintStates() {
+    const anySolo = mixer.anySolo;
     for (const { model, row } of state.rows) {
       const audible =
         model === mixer.mix ? mixer.mixAudible() : mixer.stripAudible(model);
       row.classList.toggle('dimmed', !audible);
+      row.title = audible ? '' : suppressionTip(model, anySolo);
     }
   }
   mixer.onRepaint(paintStates);
 
+  /** Notes-button availability (D4/D5): once capabilities are known the
+   *  button is disabled with the precise reason as its tooltip; while
+   *  unknown it stays clickable and the click-time check toasts. */
+  function applyNotesAvailability(lane) {
+    const px = lane.notesBtn;
+    if (!px || !state.caps) return;
+    if (!state.caps.dl) {
+      px.disabled = true;
+      px.title = t('polyNeedsDL');
+    } else if (!state.caps.poly) {
+      px.disabled = true;
+      px.title = t('polyNeedsBP');
+    } else {
+      px.disabled = false;
+      px.title = t('laneNotesTitle');
+    }
+  }
+
+  /** Notes (扒谱) toggle: STRICTLY lazy — the capabilities check runs on
+   *  click, never on panel load; unavailability surfaces as a
+   *  dismissible toast with the precise reason, then the button is
+   *  disabled with the same tooltip. */
+  async function toggleNotes(lane) {
+    const px = lane.notesBtn;
+    if (lane.idx) {
+      lane.idx = null;
+      px.classList.remove('active');
+      drawNotes(lane);
+      return;
+    }
+    px.disabled = true;
+    try {
+      await state.capsReady;
+      if (!state.caps || !state.caps.dl) throw new PolyUnavailable('dl');
+      if (!state.caps.poly) throw new PolyUnavailable('bp');
+      const r = await fetch(
+        `${apiBase}/api/notes?track=${lane.key}&method=poly` +
+          `&source=${state.method}`
+      );
+      const body = await r.json();
+      if (!r.ok || body.error) {
+        throw new Error(body.error || `HTTP ${r.status}`);
+      }
+      lane.idx = buildNoteIndex(body.notes[lane.key] || []);
+      px.classList.add('active');
+      drawNotes(lane);
+    } catch (e) {
+      if (e instanceof PolyUnavailable) {
+        showToast(
+          e.kind === 'dl' ? t('polyNeedsDL') : t('polyNeedsBP')
+        );
+      } else {
+        showToast(t('laneNotesFailed', { msg: e.message }));
+      }
+    } finally {
+      applyNotesAvailability(lane);
+      if (state.caps && state.caps.dl && state.caps.poly) {
+        px.disabled = false;
+      }
+    }
+  }
+
   function buildLaneRow(container, lane) {
-    // shared row factory (controls.js): <icon><label> | slider M S |
-    // scope — identical construction for the Mix lane and every stem
-    // lane (D3); the scope cell stays empty for the canvases below
     const parts = trackRow({
       key: lane.key,
       labelText: t(lane.labelKey),
@@ -440,51 +535,27 @@ export function initLanes({ gd, data, player, apiBase }) {
       paintFill,
     });
     state.rows.push({ model: lane, row, vol, mute, solo });
-    // polyphonic notes toggle (扒谱): uniform on every poly-eligible
-    // lane (Basic Pitch, demucs_6 stems) — no stray per-row extras (D4)
+    // Notes (扒谱): uniform on every poly-eligible lane (D4)
     if (POLY_LANES.has(lane.key)) {
       const px = document.createElement('button');
       px.type = 'button';
       px.className = 'stem-btn lane-notes-btn';
       px.textContent = t('laneNotes');
       px.title = t('laneNotesTitle');
-      px.addEventListener('click', async () => {
-        if (lane.idx) {
-          lane.idx = null;
-          px.classList.remove('active');
-          drawNotes(lane);
-          return;
-        }
-        px.disabled = true;
-        try {
-          const r = await fetch(
-            `${apiBase}/api/notes?track=${lane.key}&method=poly` +
-              `&source=${state.method}`
-          );
-          const body = await r.json();
-          if (!r.ok || body.error) {
-            throw new Error(body.error || `HTTP ${r.status}`);
-          }
-          lane.idx = buildNoteIndex(body.notes[lane.key] || []);
-          px.classList.add('active');
-          drawNotes(lane);
-        } catch (e) {
-          setStatus(t('laneNotesFailed', { msg: e.message }));
-        } finally {
-          px.disabled = false;
-        }
-      });
+      px.addEventListener('click', () => toggleNotes(lane));
+      lane.notesBtn = px;
       controls.appendChild(px);
+      applyNotesAvailability(lane);
     }
     const wave = document.createElement('canvas');
     wave.className = 'lane-wave';
-    const notes = document.createElement('canvas');
-    notes.className = 'lane-notes';
-    notes.setAttribute('aria-hidden', 'true');
-    scope.append(wave, notes);
-    container.appendChild(row);
+    const noteCv = document.createElement('canvas');
+    noteCv.className = 'lane-notes';
+    noteCv.setAttribute('aria-hidden', 'true');
+    scope.append(wave, noteCv);
     lane.waveCv = wave;
-    lane.noteCv = notes;
+    lane.noteCv = noteCv;
+    container.appendChild(row);
   }
 
   function renderShell() {
@@ -594,6 +665,7 @@ export function initLanes({ gd, data, player, apiBase }) {
           idx: null,
           waveCv: null,
           noteCv: null,
+          notesBtn: null,
           decodeFailed: false,
         });
         lanes.push(lane);
@@ -680,10 +752,11 @@ export function initLanes({ gd, data, player, apiBase }) {
     else disable();
   });
 
-  // ---- capabilities: hide the Demucs options when the [dl] extra is
-  // not installed (graceful degradation contract) and surface the
-  // remedy as a tooltip on the toggle itself
-  (async () => {
+  // ---- capabilities: resolved ONCE and exposed as a promise so the
+  // Notes click can await it lazily (never auto-triggering transcription
+  // on panel load); the toggle gets the remedy tooltip when DL is
+  // missing and existing Notes buttons get their precise state.
+  state.capsReady = (async () => {
     try {
       const r = await fetch(`${apiBase}/api/ping`);
       const body = await r.json();
@@ -695,12 +768,13 @@ export function initLanes({ gd, data, player, apiBase }) {
       const onBtn = toggle.querySelector('button[data-lanes="on"]');
       if (onBtn) onBtn.title = t('lanesNeedDL');
     }
+    for (const lane of state.lanes) applyNotesAvailability(lane);
     if (state.enabled) renderShell();
   })();
 
   // ---- keep the lanes glued to the main spectrogram's time axis ----
   gd.on('plotly_relayout', syncFromPlot);
-  new ResizeObserver(scheduleDraw).observe(panel);
+  new ResizeObserver(throttled(() => scheduleDraw())).observe(panel);
 
   // Live language switch: rebuild the panel (state is kept in models)
   onChange(() => {

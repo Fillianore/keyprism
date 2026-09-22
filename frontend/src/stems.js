@@ -184,14 +184,23 @@ export function initStems({ data, player, apiBase }) {
     el.style.setProperty('--fill', `${Math.min(Math.max(p, 0), 100)}%`);
   }
 
+  /** Why a row is currently inaudible (tooltip copy for D6) */
+  function suppressionTip(model, anySolo) {
+    if (anySolo && !model.solo) return t('soloSuppressedTip');
+    return model === mixer.mix ? t('mixerMixDuckedTip') : t('mixerMutedTip');
+  }
+
   /** Repaint the matrix on the rows: a strip silenced by OTHERS' solo /
-   *  by the anti-clipping mix rule is shown `.dimmed`; the M/S buttons
-   *  keep reflecting the USER's own toggle state only. */
+   *  by the anti-clipping mix rule is shown `.dimmed` WITH a tooltip
+   *  explaining why; the M/S buttons keep reflecting the USER's own
+   *  toggle state only. */
   function paintStates() {
+    const anySolo = mixer.anySolo;
     for (const { model, row } of state.rows) {
       const audible =
         model === mixer.mix ? mixer.mixAudible() : mixer.stripAudible(model);
       row.classList.toggle('dimmed', !audible);
+      row.title = audible ? '' : suppressionTip(model, anySolo);
     }
   }
   mixer.onRepaint(paintStates);
