@@ -841,6 +841,24 @@ input[type='range']:active::-moz-range-thumb {
     0 0 8px rgba(214, 171, 102, 0.25);
 }
 
+/* DAW mixer matrix feedback: a row silenced by OTHERS' solo or by the
+ * anti-clipping mix rule is dimmed at the content level — its own M/S
+ * buttons keep the user's toggle state (never flipped behind their
+ * back) */
+.stem-row.dimmed .stem-name,
+.lane-row.dimmed .stem-name {
+  opacity: 0.45;
+}
+
+.stem-row.dimmed .stem-vol,
+.lane-row.dimmed .stem-vol {
+  opacity: 0.4;
+}
+
+.lane-row.dimmed .lane-scope {
+  opacity: 0.45;
+}
+
 /* ---------- Player: bottom lacquered beam ---------- */
 .player-bar {
   display: flex;
