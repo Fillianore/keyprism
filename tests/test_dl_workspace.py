@@ -71,18 +71,50 @@ def test_demucs_501_when_dl_missing(srv, monkeypatch):
     """Without onnxruntime the DL endpoints answer 501 Not Implemented —
     never a 500 and never a crash."""
     monkeypatch.setattr(server_mod, "DL_AVAILABLE", False)
+    monkeypatch.setattr(server_mod, "POLY_AVAILABLE", False)
     code, body = post(f"{srv['base']}/api/stems?method=demucs_4")
-    assert code == 501 and "dl" in body["error"].lower()
+    assert code == 501
+    assert body["code"] == "dl_not_installed"
+    assert "uv sync --extra dl" in body["error"]
     code, body = get(f"{srv['base']}/api/notes?track=piano&method=poly")
-    assert code == 501 and "dl" in body["error"].lower()
+    assert code == 501 and body["code"] == "dl_not_installed"
+    # the capability reason matches the 501 body verbatim
+    _, ping = get(f"{srv['base']}/api/ping")
+    caps = ping["capabilities"]
+    assert caps["dl"] is False and caps["poly"] is False
+    assert caps["poly_reason"] == body["error"]
 
 
 def test_poly_501_when_basic_pitch_missing(srv, monkeypatch):
-    """basic-pitch can be missing independently of onnxruntime."""
+    """basic-pitch can be missing independently of onnxruntime: the poly
+    501 then names the Python >= 3.12 limitation — a DIFFERENT code and
+    message than the install-remedy body (Phase 3.7 I4)."""
     monkeypatch.setattr(server_mod, "DL_AVAILABLE", True)
     monkeypatch.setattr(server_mod, "POLY_AVAILABLE", False)
     code, body = get(f"{srv['base']}/api/notes?track=piano&method=poly")
     assert code == 501
+    assert body["code"] == "poly_unavailable"
+    assert "3.12" in body["error"]
+    assert "uv sync" not in body["error"]
+
+    # the two 501 bodies differ (codes AND prose) and ping agrees
+    monkeypatch.setattr(server_mod, "DL_AVAILABLE", False)
+    code, dl_body = get(f"{srv['base']}/api/notes?track=piano&method=poly")
+    assert code == 501 and dl_body["code"] == "dl_not_installed"
+    assert dl_body["error"] != body["error"]
+    _, ping = get(f"{srv['base']}/api/ping")
+    caps = ping["capabilities"]
+    assert caps["poly"] is False
+    assert caps["poly_reason"] == dl_body["error"]
+
+
+def test_poly_reason_absent_when_available(srv, monkeypatch):
+    """poly_reason only exists when poly is off (the frontend keys on
+    presence, not truthiness)."""
+    monkeypatch.setattr(server_mod, "DL_AVAILABLE", True)
+    monkeypatch.setattr(server_mod, "POLY_AVAILABLE", True)
+    _, ping = get(f"{srv['base']}/api/ping")
+    assert "poly_reason" not in ping["capabilities"]
 
 
 def test_demucs_validation(srv, monkeypatch):
@@ -505,11 +537,12 @@ def test_lanes_js_is_wired_into_the_app():
 
 def test_frontend_mixer_contract():
     """stems.js and lanes.js must share the MixerState (mixer.js): one
-    master GainNode before the destination, strips default MUTED (the
-    mix keeps playing), the destructive-solo state machine
-    (pressMute/pressSolo) driven from controls.js with buttons
-    rendering strictly from state, the matrix shown via .dimmed rows,
-    and the fixed per-method stem contract validated on both panels."""
+    master GainNode into a brickwall limiter before the destination,
+    strips default MUTED (the mix keeps playing), the destructive-solo
+    state machine (pressMute/pressSolo) driven from controls.js with
+    buttons rendering strictly from state, make-up gain staging, the
+    matrix shown via .dimmed rows, and the fixed per-method stem
+    contract validated on both panels."""
     mixer = strip_js_comments(
         (FRONTEND / "mixer.js").read_text(encoding="utf-8"))
     assert "createGain" in mixer and "connect(ctx.destination)" in mixer
@@ -517,8 +550,7 @@ def test_frontend_mixer_contract():
     assert "muted: true" in mixer   # strip default (makeStrip)
     assert "muted: false" in mixer  # mix strip default
     assert "stripAudible" in mixer and "mixAudible" in mixer
-    # Phase 3.7: destructive-solo transitions, buttons from state only,
-    # gain staging (make-up + brickwall limiter) on the master bus
+    # Phase 3.7: destructive-solo transitions + gain staging + limiter
     assert "pressSolo" in mixer and "pressMute" in mixer
     assert "createDynamicsCompressor" in mixer
     assert "makeupDb" in mixer and "bufferPeak" in mixer
