@@ -37,7 +37,8 @@
  *    waveform canvas IMMEDIATELY — content is visible before playback
  *    and redrawn on resize (throttled) and plotly_relayout. The
  *    envelope auto-scales to THAT lane's own peak (plus a tiny peak-dB
- *    label) so quiet stems render visible waveforms;
+ *    label) so quiet stems render visible waveforms; muting only DIMS
+ *    the envelope (35% alpha) — silence is never invisible (3.8 D1);
  *  - a per-lane decode failure renders an i18n placeholder inside that
  *    lane instead of failing the whole panel;
  *  - the Notes (扒谱) button is uniform on every poly-eligible lane and
@@ -274,12 +275,20 @@ export function initLanes({ gd, data, player, apiBase }) {
     // quiet stems render visible waveforms instead of flat lines
     const k = lane.peak > 1e-6 ? 1 / lane.peak : 0;
     const clamp = (v) => Math.max(-1, Math.min(1, v * k));
-    g.fillStyle = lane.color;
+    // Silence is NEVER invisible (3.8 D1): a muted lane renders its
+    // envelope dimmed (35% alpha), an audible one at full color
+    g.fillStyle = hexToRgba(
+      lane.color,
+      mixer.stripAudible(lane) ? 1 : 0.35
+    );
     for (let px = 0; px < w; px++) {
       const ta = aSec + (px / w) * span;
       const tb = aSec + ((px + 1) / w) * span;
-      let i0 = Math.floor(ta / lane.bucketSec);
-      let i1 = Math.max(i0 + 1, Math.ceil(tb / lane.bucketSec));
+      // bucketSec lives on the envelope (lane.peaks), not the lane —
+      // reading lane.bucketSec yielded undefined -> NaN indexes -> the
+      // loop skipped every column and lanes rendered black (3.8 D1)
+      let i0 = Math.floor(ta / p.bucketSec);
+      let i1 = Math.max(i0 + 1, Math.ceil(tb / p.bucketSec));
       i0 = Math.max(0, Math.min(nB, i0));
       i1 = Math.max(0, Math.min(nB, i1));
       let lo = 0;
@@ -476,6 +485,9 @@ export function initLanes({ gd, data, player, apiBase }) {
       row.classList.toggle('dimmed', !audible);
       row.title = audible ? '' : suppressionTip(model, anySolo);
     }
+    // mute/solo also re-tints the envelopes (dimmed while inaudible —
+    // silence must never hide the waveform)
+    scheduleDraw();
   }
   mixer.onRepaint(paintStates);
 

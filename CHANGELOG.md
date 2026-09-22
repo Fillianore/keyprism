@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Lane envelopes were invisible (black lanes, only the peak-dB label
+  rendered): `drawWave` indexed the cached envelope with
+  `lane.bucketSec`, but the field lives on the envelope itself
+  (`lane.peaks.bucketSec`) — the column index was `NaN`, every column
+  was treated as silence and skipped, ever since the lane canvases were
+  introduced. Muting now also dims the envelope (35 % alpha) instead of
+  ever hiding it: silence ≠ invisible; unmuted lanes draw at full stem
+  color and the redraw follows mute/solo changes.
+
 ## [0.6.1] - 2026-09-23
 
 ### Added
