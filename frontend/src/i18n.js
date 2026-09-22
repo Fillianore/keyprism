@@ -54,9 +54,10 @@ export const dict = {
     lanesMethod_demucs_4: 'Demucs 4-stem',
     lanesMethod_demucs_6: 'Demucs 6-stem',
     lanesSeparating: 'DL separating… {pct}%',
+    lanesDownloading:
+      'Downloading model {done} / {total} MB ({speed} MB/s)',
     lanesFailed: 'Lanes failed: {msg}',
-    lanesNeedDL:
-      'Demucs needs the optional DL extra: uv sync --extra dl',
+    dlNeedsExtra: 'Requires uv sync --extra dl (onnxruntime)',
     laneMix: 'Mix',
     laneVocals: 'Vocals',
     laneDrums: 'Drums',
@@ -162,8 +163,9 @@ export const dict = {
     lanesMethod_demucs_4: 'Demucs 4 轨',
     lanesMethod_demucs_6: 'Demucs 6 轨',
     lanesSeparating: 'DL 分离中… {pct}%',
+    lanesDownloading: '下载模型 {done} / {total} MB ({speed} MB/s)',
     lanesFailed: '多轨失败: {msg}',
-    lanesNeedDL: 'Demucs 需要可选 DL 依赖: uv sync --extra dl',
+    dlNeedsExtra: '需要 uv sync --extra dl (onnxruntime)',
     laneMix: '混音',
     laneVocals: '人声',
     laneDrums: '鼓',

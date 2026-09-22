@@ -428,7 +428,9 @@ export function initLanes({ gd, data, player, apiBase }) {
   }
 
   /** POST starts the separation task, then poll /api/task/{id} until
-   *  done — a cached method short-circuits to its stem list at once */
+   *  done — a cached method short-circuits to its stem list at once.
+   *  Two-phase progress (3.8 D3): `downloading` reports model-download
+   *  bytes/speed, `running` reports inference progress. */
   async function requestStems(method) {
     const r = await fetch(`${apiBase}/api/stems?method=${method}`, {
       method: 'POST',
@@ -445,10 +447,22 @@ export function initLanes({ gd, data, player, apiBase }) {
       const tb = await res.json();
       if (tb.status === 'done') return tb;
       if (tb.status === 'error') throw new Error(tb.error || 'task failed');
-      setStatus(
-        t('lanesSeparating', { pct: Math.round((tb.progress || 0) * 100) }),
-        true
-      );
+      if (tb.status === 'downloading') {
+        const mb = (n) => (n / 1e6).toFixed(1);
+        setStatus(
+          t('lanesDownloading', {
+            done: mb(tb.bytes_done || 0),
+            total: tb.bytes_total ? mb(tb.bytes_total) : '?',
+            speed: Number(tb.speed_mbps || 0).toFixed(1),
+          }),
+          true
+        );
+      } else {
+        setStatus(
+          t('lanesSeparating', { pct: Math.round((tb.progress || 0) * 100) }),
+          true
+        );
+      }
       await new Promise((ok) => setTimeout(ok, POLL_MS));
     }
   }
@@ -620,7 +634,7 @@ export function initLanes({ gd, data, player, apiBase }) {
     }
     methodSel.disabled = state.loading || !dlOk;
     if (!dlOk) {
-      methodSel.title = t('lanesNeedDL');
+      methodSel.title = t('dlNeedsExtra');
     }
     methodSel.addEventListener('change', () => {
       if (!methodSel.disabled && methodSel.value !== state.method) {
@@ -681,6 +695,11 @@ export function initLanes({ gd, data, player, apiBase }) {
     state.loading = true;
     state.method = method;
     state.ready = false;
+    // spinner on the On button immediately (3.8 D2): a click is never
+    // visually dead while the task starts up
+    toggle
+      .querySelector('button[data-lanes="on"]')
+      ?.classList.add('loading');
     teardownLanes();
     renderShell();
     setStatus(t('lanesSeparating', { pct: 0 }), true);
@@ -762,6 +781,9 @@ export function initLanes({ gd, data, player, apiBase }) {
     } finally {
       // a failed/partial load leaves no gain nodes wired anywhere
       lanes.forEach((l) => l.gain.disconnect());
+      toggle
+        .querySelector('button[data-lanes="on"]')
+        ?.classList.remove('loading');
       state.loading = false;
     }
   }
@@ -778,6 +800,9 @@ export function initLanes({ gd, data, player, apiBase }) {
     teardownLanes();
     state.ready = false;
     state.loading = false;
+    toggle
+      .querySelector('button[data-lanes="on"]')
+      ?.classList.remove('loading');
     panel.hidden = true;
     mixer.mix.solo = false;
     // hand the output back to the mix at the pre-enable volume
@@ -788,17 +813,28 @@ export function initLanes({ gd, data, player, apiBase }) {
     mixer.mix.muted = false;
   }
 
-  toggle.addEventListener('click', (ev) => {
+  toggle.addEventListener('click', async (ev) => {
     const btn = ev.target.closest('button[data-lanes]');
     if (!btn || btn.disabled) return;
     const want = btn.dataset.lanes === 'on';
     const turning = (want && !state.enabled) || (!want && state.enabled);
     if (!turning) return;
-    if (want && state.caps && !state.caps.dl) {
-      // DL extra missing: do NOT flip the toggle — a visually "On"
-      // button over an empty panel read as an unresponsive switch
-      setStatus(t('lanesNeedDL'));
-      return;
+    if (want) {
+      // 3.8 D2: the click ALWAYS answers — capabilities are awaited
+      // here (cached after the first check), and a missing [dl] extra
+      // toasts the precise remedy, disables the button with the same
+      // text as its tooltip, and never starts a task
+      await state.capsReady;
+      if (!state.caps || !state.caps.dl) {
+        showToast(t('dlNeedsExtra'));
+        const onBtn = toggle.querySelector('button[data-lanes="on"]');
+        if (onBtn) {
+          onBtn.disabled = true;
+          onBtn.title = t('dlNeedsExtra');
+        }
+        setStatus('');
+        return;
+      }
     }
     toggle
       .querySelectorAll('button')
@@ -809,8 +845,9 @@ export function initLanes({ gd, data, player, apiBase }) {
 
   // ---- capabilities: resolved ONCE and exposed as a promise so the
   // Notes click can await it lazily (never auto-triggering transcription
-  // on panel load); the toggle gets the remedy tooltip when DL is
-  // missing and existing Notes buttons get their precise state.
+  // on panel load); the toggle gets the remedy tooltip + disabled state
+  // when DL is missing and existing Notes buttons get their precise
+  // state.
   state.capsReady = (async () => {
     try {
       const r = await fetch(`${apiBase}/api/ping`);
@@ -821,7 +858,10 @@ export function initLanes({ gd, data, player, apiBase }) {
     }
     if (state.caps && !state.caps.dl) {
       const onBtn = toggle.querySelector('button[data-lanes="on"]');
-      if (onBtn) onBtn.title = t('lanesNeedDL');
+      if (onBtn) {
+        onBtn.disabled = true;
+        onBtn.title = t('dlNeedsExtra');
+      }
     }
     for (const lane of state.lanes) applyNotesAvailability(lane);
     if (state.enabled) renderShell();
