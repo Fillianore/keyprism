@@ -35,7 +35,9 @@
  *  - each decoded buffer's peak envelope (min/max per column, ~1024
  *    columns) is computed ONCE, cached on the lane, and drawn to the
  *    waveform canvas IMMEDIATELY — content is visible before playback
- *    and redrawn on resize (throttled) and plotly_relayout;
+ *    and redrawn on resize (throttled) and plotly_relayout. The
+ *    envelope auto-scales to THAT lane's own peak (plus a tiny peak-dB
+ *    label) so quiet stems render visible waveforms;
  *  - a per-lane decode failure renders an i18n placeholder inside that
  *    lane instead of failing the whole panel;
  *  - the Notes (扒谱) button is uniform on every poly-eligible lane and
@@ -268,6 +270,10 @@ export function initLanes({ gd, data, player, apiBase }) {
     const span = Math.max(bSec - aSec, 1e-6);
     const p = lane.peaks;
     const nB = p.max.length;
+    // auto-scale (I2 visuals): normalize to THIS lane's own peak so
+    // quiet stems render visible waveforms instead of flat lines
+    const k = lane.peak > 1e-6 ? 1 / lane.peak : 0;
+    const clamp = (v) => Math.max(-1, Math.min(1, v * k));
     g.fillStyle = lane.color;
     for (let px = 0; px < w; px++) {
       const ta = aSec + (px / w) * span;
@@ -283,9 +289,23 @@ export function initLanes({ gd, data, player, apiBase }) {
         if (p.max[i] > hi) hi = p.max[i];
       }
       if (hi <= 0 && lo >= 0) continue;
-      const y0 = mid - hi * (mid * 0.92);
-      const y1 = mid - lo * (mid * 0.92);
+      const y0 = mid - clamp(hi) * (mid * 0.92);
+      const y1 = mid - clamp(lo) * (mid * 0.92);
       g.fillRect(px, y0, 1, Math.max(1, y1 - y0));
+    }
+    if (lane.peak > 1e-6) {
+      // tiny peak-dB label: what the auto-scale factor is compensating
+      g.font = '9px system-ui, sans-serif';
+      g.fillStyle = 'rgba(255,255,255,0.4)';
+      g.textAlign = 'left';
+      g.textBaseline = 'top';
+      g.fillText(
+        t('lanePeakDb', {
+          db: (20 * Math.log10(lane.peak)).toFixed(1),
+        }),
+        6,
+        4
+      );
     }
   }
 
@@ -470,7 +490,9 @@ export function initLanes({ gd, data, player, apiBase }) {
       px.title = t('polyNeedsDL');
     } else if (!state.caps.poly) {
       px.disabled = true;
-      px.title = t('polyNeedsBP');
+      // prefer the server's precise reason (uv-sync remedy vs the
+      // Python >=3.12 basic-pitch limitation)
+      px.title = state.caps.poly_reason || t('polyNeedsBP');
     } else {
       px.disabled = false;
       px.title = t('laneNotesTitle');
@@ -508,7 +530,9 @@ export function initLanes({ gd, data, player, apiBase }) {
     } catch (e) {
       if (e instanceof PolyUnavailable) {
         showToast(
-          e.kind === 'dl' ? t('polyNeedsDL') : t('polyNeedsBP')
+          e.kind === 'dl'
+            ? t('polyNeedsDL')
+            : state.caps?.poly_reason || t('polyNeedsBP')
         );
       } else {
         showToast(t('laneNotesFailed', { msg: e.message }));
@@ -529,7 +553,7 @@ export function initLanes({ gd, data, player, apiBase }) {
       withLane: true,
       fader: 'db',
     });
-    const { row, controls, scope, vol, mute, solo, db } = parts;
+    const { row, scope, vol, mute, solo, db } = parts;
     const { syncFader } = wireMuteSolo({
       mixer,
       model: lane,
@@ -541,24 +565,26 @@ export function initLanes({ gd, data, player, apiBase }) {
       paintFill,
     });
     state.rows.push({ model: lane, row, vol, mute, solo, syncFader });
-    // Notes (扒谱): uniform on every poly-eligible lane (D4)
-    if (POLY_LANES.has(lane.key)) {
-      const px = document.createElement('button');
-      px.type = 'button';
-      px.className = 'stem-btn lane-notes-btn';
-      px.textContent = t('laneNotes');
-      px.title = t('laneNotesTitle');
-      px.addEventListener('click', () => toggleNotes(lane));
-      lane.notesBtn = px;
-      controls.appendChild(px);
-      applyNotesAvailability(lane);
-    }
     const wave = document.createElement('canvas');
     wave.className = 'lane-wave';
     const noteCv = document.createElement('canvas');
     noteCv.className = 'lane-notes';
     noteCv.setAttribute('aria-hidden', 'true');
     scope.append(wave, noteCv);
+    // Notes (扒谱): uniform on every poly-eligible lane (D4); a compact
+    // chip overlaid on the lane's own scope — the controls cell stays
+    // one tidy [fader M S] line at the fixed grid widths
+    if (POLY_LANES.has(lane.key)) {
+      const px = document.createElement('button');
+      px.type = 'button';
+      px.className = 'stem-btn lane-notes-btn';
+      px.textContent = '♫';
+      px.title = t('laneNotesTitle');
+      px.addEventListener('click', () => toggleNotes(lane));
+      lane.notesBtn = px;
+      scope.appendChild(px);
+      applyNotesAvailability(lane);
+    }
     lane.waveCv = wave;
     lane.noteCv = noteCv;
     container.appendChild(row);
