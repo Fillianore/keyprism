@@ -271,6 +271,124 @@ def test_pad_segment_short_tail():
     assert valid3 == 0 and z.shape == (1000,)
 
 
+# ------------------------------------------------- model download (3.8)
+
+class _FakeResp:
+    """Minimal urlopen() response: Content-Length + chunked reads."""
+
+    def __init__(self, chunks, total):
+        self._chunks = list(chunks)
+        self.headers = {"Content-Length": str(total)}
+
+    def read(self, n=-1):
+        return self._chunks.pop(0) if self._chunks else b""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _BrokenResp:
+    """A response that dies mid-stream (network drop)."""
+
+    headers = {"Content-Length": "100"}
+
+    def read(self, n=-1):
+        raise OSError("connection reset")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_download_to_streams_and_renames_atomically(tmp_path):
+    """_download_to: bytes land in <dest>.part, progress reports
+    (bytes_done, bytes_total, speed_mbps) with the final call at
+    100%, and the .part file is atomically renamed into place — the
+    model cache never holds a partial file."""
+    dest = tmp_path / "models" / "demucs" / "htdemucs.onnx"
+    payload = [b"A" * 50, b"B" * 50]
+    seen = []
+
+    dlsep._download_to(
+        "https://example.test/x.onnx", dest,
+        progress=lambda d, t, s: seen.append((d, t, s)),
+        urlopen=lambda req, timeout: _FakeResp(payload, 100))
+
+    assert dest.read_bytes() == b"A" * 50 + b"B" * 50
+    assert not dest.with_name(dest.name + ".part").exists()
+    assert seen and seen[-1][:2] == (100, 100)   # final call: 100%
+    assert seen[-1][2] >= 0.0                    # speed in MB/s
+    assert all(t == 100 for _, t, _ in seen)
+    dones = [d for d, _, _ in seen]
+    assert dones == sorted(dones)                # monotonic bytes
+
+
+def test_download_to_failure_leaves_no_partial(tmp_path):
+    """An interrupted download removes the .part file and never
+    creates the destination — retrying cannot serve a corrupt ONNX."""
+    dest = tmp_path / "m.onnx"
+    with pytest.raises(OSError):
+        dlsep._download_to(
+            "https://example.test/x.onnx", dest, progress=None,
+            urlopen=lambda req, timeout: _BrokenResp())
+    assert not dest.exists()
+    assert not dest.with_name(dest.name + ".part").exists()
+
+
+def test_task_reports_downloading_phase(srv, monkeypatch):
+    """3.8 D3 contract: while the model weights download the task
+    answers status:"downloading" with bytes_done / bytes_total /
+    speed_mbps via /api/task/{id}, then flips to running/done for the
+    inference phase — no extra clicks, same poll endpoint."""
+    release = threading.Event()
+
+    class DownloadingSeparator:
+        def __init__(self, variant, download_progress=None):
+            self.stems = dlsep.STEM_SPECS[variant]
+            self._dl = download_progress
+
+        def separate(self, pcm, sr, chunk_sec=10.0, overlap_sec=1.0,
+                     progress=None):
+            if self._dl is not None:
+                self._dl(1_000_000, 4_000_000, 2.5)
+                release.wait(timeout=5.0)
+            out = {k: np.zeros(10) for k in self.stems}
+            if progress is not None:
+                progress(1, 1)
+            return out
+
+    monkeypatch.setattr(server_mod, "DL_AVAILABLE", True)
+    monkeypatch.setattr(server_mod, "POLY_AVAILABLE", True)
+    monkeypatch.setattr(dlsep, "get_separator", DownloadingSeparator)
+
+    code, body = post(f"{srv['base']}/api/stems?method=demucs_4")
+    assert code == 200 and body["status"] == "started"
+
+    deadline = time.time() + 5.0
+    phase = None
+    while time.time() < deadline:
+        code, tb = get(f"{srv['base']}/api/task/{body['task_id']}")
+        assert code == 200
+        if tb["status"] == "downloading":
+            phase = tb
+            break
+        time.sleep(0.02)
+    assert phase is not None, "task never reported the downloading phase"
+    assert phase["bytes_done"] == 1_000_000
+    assert phase["bytes_total"] == 4_000_000
+    assert phase["speed_mbps"] == 2.5
+
+    release.set()
+    done = wait_task(srv["base"], body["task_id"])
+    assert done["status"] == "done"
+    assert "bytes_done" not in done  # download fields leave with the phase
+
+
 # --------------------------------------------------------- note merging
 
 def test_merge_fragmented_notes():
@@ -345,7 +463,7 @@ def test_convert_raw_accepts_library_shapes():
 class FakeSeparator:
     """Stands in for the ONNX DemucsSeparator (no weights needed)."""
 
-    def __init__(self, variant):
+    def __init__(self, variant, download_progress=None):
         self.variant = variant
         self.stems = dlsep.STEM_SPECS[variant]
 
@@ -629,3 +747,33 @@ def test_frontend_ui_polish_contract():
     ci = (repo / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8")
     assert "npm run check:i18n" in ci
+
+
+def test_frontend_first_contact_contract():
+    """3.8 first-contact UX contracts: envelopes draw from the envelope's
+    OWN bucket timing in every mute state (the D1 root-cause fix: the
+    old code read lane.bucketSec -> undefined -> NaN indexes -> black
+    lanes), the AI-Separation On button answers a click even when the
+    [dl] extra is missing (toast + disabled + tooltip, never a silent
+    no-op) and spins while working, and the task poll renders the
+    two-phase download/inference progress."""
+    lanes = strip_js_comments(
+        (FRONTEND / "lanes.js").read_text(encoding="utf-8"))
+    # D1: the column index reads the envelope's own bucketSec (the lane
+    # object never carries it) and muting dims instead of hiding
+    assert "p.bucketSec" in lanes and "lane.bucketSec" not in lanes
+    assert "stripAudible(lane) ? 1 : 0.35" in lanes
+    assert "scheduleDraw()" in lanes  # repaint on mute/solo changes
+    # D2: click-time capability gate -> toast + disabled + tooltip
+    assert "await state.capsReady" in lanes
+    assert "showToast(t('dlNeedsExtra'))" in lanes
+    assert "classList.add('loading')" in lanes  # spinner, never dead
+    # D3: two-phase progress UI in the poll loop
+    assert "lanesDownloading" in lanes
+    assert "'downloading'" in lanes
+    assert "bytes_done" in lanes and "speed_mbps" in lanes
+    # both language dicts carry the new keys (check-i18n enforces parity)
+    i18n = strip_js_comments(
+        (FRONTEND / "i18n.js").read_text(encoding="utf-8"))
+    for key in ("dlNeedsExtra", "lanesDownloading"):
+        assert i18n.count(f"{key}:") >= 2

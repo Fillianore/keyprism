@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-09-23
+
+### Added
+
+- Two-phase DL progress (first-run UX): when the Demucs ONNX weights
+  are absent, the separation task now enters a `downloading` phase —
+  `/api/task/{id}` reports `{status: "downloading", bytes_done,
+  bytes_total, speed_mbps}` alongside the classic `{status: "running",
+  progress}` inference phase — and the lanes panel shows 下载模型
+  x.x / y.y MB (z MB/s) → 分离中 p% in one continuous run (download
+  auto-continues into inference, no extra clicks). Downloads stream to
+  `<model>.part` with an atomic rename, so an interrupted download can
+  never leave a corrupt cache entry; the downloader is dependency-free
+  (stdlib urllib) and honors `HF_ENDPOINT` for mirror networks
+- NOTICE v1: hand-maintained third-party license inventory of the
+  current runtime/optional/frontend dependencies, with the LGPL
+  (libsndfile, FFmpeg-in-PyAV) and research-only weights provenance
+  flagged as TODOs for 3.10
+
+### Changed
+
+- AI-Separation click is never dead (capability gating): the On button
+  awaits the (cached) `/api/ping` capabilities on click; a missing
+  `[dl]` extra toasts 需要 uv sync --extra dl (onnxruntime), disables
+  the button and uses the same text as its tooltip — no task is ever
+  started — while a poly-only unavailability keeps the distinct
+  basic-pitch message; with DL present the button spins immediately
+  while the separation task spins up
+
+### Fixed
+
+- Lane envelopes were invisible (black lanes, only the peak-dB label
+  rendered): `drawWave` indexed the cached envelope with
+  `lane.bucketSec`, but the field lives on the envelope itself
+  (`lane.peaks.bucketSec`) — the column index was `NaN`, every column
+  was treated as silence and skipped, ever since the lane canvases were
+  introduced. Muting now also dims the envelope (35 % alpha) instead of
+  ever hiding it: silence ≠ invisible; unmuted lanes draw at full stem
+  color and the redraw follows mute/solo changes.
+
 ## [0.6.1] - 2026-09-23
 
 ### Added

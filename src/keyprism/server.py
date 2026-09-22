@@ -290,7 +290,12 @@ def make_server(path: Path, port: int, host: str, start: float,
             self._json(200, {**body, "cached": cached})
 
         def _task_status(self, u):
-            """GET /api/task/{id}: background-task poll (non-blocking)."""
+            """GET /api/task/{id}: background-task poll (non-blocking).
+
+            A DL task in its model-download phase (3.8 D3) reports
+            ``status:"downloading"`` plus ``bytes_done`` / ``bytes_total``
+            / ``speed_mbps``; inference keeps the classic ``running`` +
+            fractional ``progress`` shape."""
             task_id = u.path.rsplit("/", 1)[-1]
             with state["tasks_lock"]:
                 task = state["tasks"].get(task_id)
@@ -299,7 +304,12 @@ def make_server(path: Path, port: int, host: str, start: float,
                     return
                 body = {"id": task_id, "status": task["status"],
                         "progress": round(float(task["progress"]), 4)}
-                if task["status"] == "done":
+                if task["status"] == "downloading":
+                    body["bytes_done"] = int(task.get("bytes_done") or 0)
+                    body["bytes_total"] = int(task.get("bytes_total") or 0)
+                    body["speed_mbps"] = round(
+                        float(task.get("speed_mbps") or 0.0), 2)
+                elif task["status"] == "done":
                     body.update(task["result"] or {})
                 elif task["status"] == "error":
                     body["error"] = task["error"]
@@ -471,12 +481,25 @@ def make_server(path: Path, port: int, host: str, start: float,
                 # resamples to the model rate internally, per-chunk
                 mono = cur["data2d"].mean(axis=1).astype("float32")
 
+                def download_progress(done, total, speed_mbps):
+                    # 3.8 D3: first-run model weights download — the
+                    # task enters the "downloading" phase until the
+                    # bytes are in place (.part -> atomic rename inside
+                    # dlsep), then inference flips it back to "running"
+                    task["status"] = "downloading"
+                    task["bytes_done"] = int(done)
+                    task["bytes_total"] = int(total)
+                    task["speed_mbps"] = round(float(speed_mbps), 2)
+
                 def progress(done, total):
+                    task["status"] = "running"
                     task["progress"] = done / float(total)
 
                 started = time.time()
-                out = dlsep.get_separator(method).separate(
-                    mono, cur["sr"], progress=progress)
+                sep = dlsep.get_separator(
+                    method, download_progress=download_progress)
+                task["status"] = "running"
+                out = sep.separate(mono, cur["sr"], progress=progress)
                 status = dlsep.write_stems(
                     entry, method, out, dlsep.TARGET_SR, cur["dur"],
                     time.time() - started)
