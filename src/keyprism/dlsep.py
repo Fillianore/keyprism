@@ -38,15 +38,23 @@ Model discovery (``~/.keyprism/models/demucs/``, relocatable via
 ``KEYPRISM_DEMUCS6_FILE`` path wins, then the spec'd file name, then any
 ``*.onnx`` already in the model dir, and only then is the model
 auto-downloaded from the (env-overridable) Hugging Face repo of the
-variant spec. Any Demucs ONNX export with a ``(1, C, T)`` float input
-and stems output is accepted; the I/O adapter normalizes 3D/4D, batched
-or listed outputs to ``(n_stems, T)`` mono.
+variant spec. The download streams to ``<file>.part`` with a byte
+progress callback ``(bytes_done, bytes_total, speed_mbps)`` — the
+server pipes it into the background-task registry so the UI can show
+"downloading x.x / y.y MB" — and only ``os.replace``s the ``.part``
+file into place when complete, so an interrupted download can never
+leave a corrupt cache entry. ``HF_ENDPOINT`` relocates the endpoint
+(mirror networks); any Demucs ONNX export with a ``(1, C, T)`` float
+input and stems output is accepted; the I/O adapter normalizes 3D/4D,
+batched or listed outputs to ``(n_stems, T)`` mono.
 """
 
 import json
 import os
 import shutil
 import threading
+import time
+import urllib.request
 from datetime import datetime, timezone
 from math import gcd
 from pathlib import Path
@@ -62,12 +70,11 @@ except ImportError:  # pragma: no cover - exercised via the flag in tests
     ort = None
     ORT_AVAILABLE = False
 
-try:  # optional: model auto-download
-    from huggingface_hub import hf_hub_download
+try:  # optional [dl] extra: its presence gates the auto-download path
+    import huggingface_hub  # noqa: F401  (availability flag only)
 
     HF_AVAILABLE = True
 except ImportError:  # pragma: no cover - exercised via the flag in tests
-    hf_hub_download = None
     HF_AVAILABLE = False
 
 from . import audio_io
@@ -141,6 +148,62 @@ class DLMissingError(RuntimeError):
 def model_dir() -> Path:
     """DL model directory under the (runtime) workspace."""
     return audio_io.KEYPRISM_HOME / "models" / "demucs"
+
+
+def _hf_endpoint() -> str:
+    """Hugging Face base URL (``HF_ENDPOINT`` relocates it; mirror
+    networks are the documented workaround for an unreachable Hub)."""
+    return os.environ.get("HF_ENDPOINT", "").rstrip("/") or \
+        "https://huggingface.co"
+
+
+def _download_to(url: str, dest: Path, progress=None,
+                 urlopen=None) -> Path:
+    """Stream ``url`` to ``dest`` via a ``<dest>.part`` temp file.
+
+    Byte progress is reported as ``progress(bytes_done, bytes_total,
+    speed_mbps)`` at most every ~200 ms (speed is an EWMA of the
+    per-interval rate, so the display stays readable through bursts).
+    The bytes land in ``.part`` and are ``os.replace``d into place only
+    on success — an interrupted download (crash, Ctrl+C, network drop)
+    removes the partial file and can never poison the model cache with
+    a truncated ONNX. ``urlopen`` is the injection seam for tests (same
+    pattern as ``infer=``); the real path uses stdlib urllib, keeping
+    the downloader dependency-free."""
+    opener = urlopen or urllib.request.urlopen
+    part = dest.with_name(dest.name + ".part")
+    part.parent.mkdir(parents=True, exist_ok=True)
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "keyprism_dlsep"})
+    speed = 0.0
+    last_done = 0
+    last_t = time.time()
+    try:
+        with opener(req, timeout=30) as resp, open(part, "wb") as f:
+            total = int(resp.headers.get("Content-Length") or 0)
+            done = 0
+            while True:
+                chunk = resp.read(1 << 20)
+                if not chunk:
+                    break
+                f.write(chunk)
+                done += len(chunk)
+                now = time.time()
+                dt = now - last_t
+                if progress is not None and dt >= 0.2:
+                    inst = ((done - last_done) / 1e6 / dt
+                            if dt > 0 and done > last_done else 0.0)
+                    speed = inst if speed <= 0 else \
+                        0.7 * speed + 0.3 * inst
+                    last_t, last_done = now, done
+                    progress(done, total, speed)
+        os.replace(part, dest)  # atomic: dest is never partial
+        if progress is not None:  # final 100% sample
+            progress(done, total, speed)
+    except BaseException:
+        part.unlink(missing_ok=True)
+        raise
+    return dest
 
 
 # ----------------------------------------------------------- chunk math
@@ -268,7 +331,8 @@ class DemucsSeparator:
     """
 
     def __init__(self, variant: str = "demucs_4", infer=None,
-                 threads: int | None = None):
+                 threads: int | None = None,
+                 download_progress=None):
         if variant not in STEM_SPECS:
             raise ValueError(
                 f"未知 DL 分离方法: {variant} (可用: {', '.join(DL_METHODS)})")
@@ -284,7 +348,8 @@ class DemucsSeparator:
             if not ORT_AVAILABLE:
                 raise DLMissingError(
                     "onnxruntime 未安装: 请安装 DL 依赖 (uv sync --extra dl)")
-            path = self._resolve_model_file()
+            path = self._resolve_model_file(
+                download_progress=download_progress)
             self._session = _load_session(path, threads)
             self._io = _session_io(self._session)
             try:
@@ -300,7 +365,7 @@ class DemucsSeparator:
         suffix = "4" if self.variant == "demucs_4" else "6"
         return os.environ.get(f"KEYPRISM_DEMUCS{suffix}_{key}", "").strip()
 
-    def _resolve_model_file(self) -> Path:
+    def _resolve_model_file(self, download_progress=None) -> Path:
         d = model_dir()
         explicit = self._env("FILE")
         if explicit:
@@ -315,16 +380,17 @@ class DemucsSeparator:
             onnx = sorted(d.glob("*.onnx"))
             if onnx:
                 return onnx[0]
-        # last resort: auto-download from the variant's HF repo
+        # last resort: auto-download from the variant's HF repo (streamed
+        # with byte progress into the task registry, 3.8 D3)
         if not HF_AVAILABLE:
             raise DLMissingError(
                 f"未找到 Demucs 模型且 huggingface_hub 未安装: 请将 ONNX 模型放到 "
                 f"{d} 或安装 DL 依赖 (uv sync --extra dl)")
         repo = self._env("REPO") or spec["repo"]
+        url = f"{_hf_endpoint()}/{repo}/resolve/main/{spec['file']}"
         try:
-            d.mkdir(parents=True, exist_ok=True)
-            return Path(hf_hub_download(
-                repo_id=repo, filename=spec["file"], local_dir=str(d)))
+            return _download_to(url, d / spec["file"],
+                                progress=download_progress)
         except Exception as e:  # noqa: BLE001 - network/404/... all degrade
             raise DLMissingError(
                 f"Demucs 模型下载失败 ({repo}/{spec['file']}): {e}; "
@@ -491,9 +557,16 @@ def _session_io(sess):
 
 
 def get_separator(variant: str = "demucs_4", *, infer=None,
-                  threads: int | None = None) -> DemucsSeparator:
-    """Separator factory (session singleton lives inside the class)."""
-    return DemucsSeparator(variant, infer=infer, threads=threads)
+                  threads: int | None = None,
+                  download_progress=None) -> DemucsSeparator:
+    """Separator factory (session singleton lives inside the class).
+
+    ``download_progress(bytes_done, bytes_total, speed_mbps)`` is only
+    consulted on the real (session-based) path when the model weights
+    still need downloading — the server forwards it into the task
+    registry's ``downloading`` phase (3.8 D3)."""
+    return DemucsSeparator(variant, infer=infer, threads=threads,
+                           download_progress=download_progress)
 
 
 # ----------------------------------------------------------- stem cache

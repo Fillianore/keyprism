@@ -567,6 +567,31 @@ input[type='range']:active::-moz-range-thumb {
   opacity: 0.7;
 }
 
+/* 3.8 D2: immediate spinner on the AI-Separation On button while the
+ * separation task starts up / runs — a click is never visually dead.
+ * Reuses the notes-spin keyframes. */
+.seg-toggle button.loading {
+  cursor: wait;
+}
+
+.seg-toggle button.loading::after {
+  content: '';
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-left: 6px;
+  border: 2px solid rgba(36, 28, 14, 0.3);
+  border-top-color: #241c0e;
+  border-radius: 50%;
+  vertical-align: -1px;
+  animation: notes-spin 0.8s linear infinite;
+}
+
+.seg-toggle button.loading:not(.active)::after {
+  border-color: rgba(216, 178, 106, 0.25);
+  border-top-color: var(--gold);
+}
+
 /* Spinner shown while /api/notes is computing */
 .notes-spin {
   width: 12px;

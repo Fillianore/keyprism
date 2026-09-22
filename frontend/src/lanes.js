@@ -37,7 +37,8 @@
  *    waveform canvas IMMEDIATELY — content is visible before playback
  *    and redrawn on resize (throttled) and plotly_relayout. The
  *    envelope auto-scales to THAT lane's own peak (plus a tiny peak-dB
- *    label) so quiet stems render visible waveforms;
+ *    label) so quiet stems render visible waveforms; muting only DIMS
+ *    the envelope (35% alpha) — silence is never invisible (3.8 D1);
  *  - a per-lane decode failure renders an i18n placeholder inside that
  *    lane instead of failing the whole panel;
  *  - the Notes (扒谱) button is uniform on every poly-eligible lane and
@@ -274,12 +275,20 @@ export function initLanes({ gd, data, player, apiBase }) {
     // quiet stems render visible waveforms instead of flat lines
     const k = lane.peak > 1e-6 ? 1 / lane.peak : 0;
     const clamp = (v) => Math.max(-1, Math.min(1, v * k));
-    g.fillStyle = lane.color;
+    // Silence is NEVER invisible (3.8 D1): a muted lane renders its
+    // envelope dimmed (35% alpha), an audible one at full color
+    g.fillStyle = hexToRgba(
+      lane.color,
+      mixer.stripAudible(lane) ? 1 : 0.35
+    );
     for (let px = 0; px < w; px++) {
       const ta = aSec + (px / w) * span;
       const tb = aSec + ((px + 1) / w) * span;
-      let i0 = Math.floor(ta / lane.bucketSec);
-      let i1 = Math.max(i0 + 1, Math.ceil(tb / lane.bucketSec));
+      // bucketSec lives on the envelope (lane.peaks), not the lane —
+      // reading lane.bucketSec yielded undefined -> NaN indexes -> the
+      // loop skipped every column and lanes rendered black (3.8 D1)
+      let i0 = Math.floor(ta / p.bucketSec);
+      let i1 = Math.max(i0 + 1, Math.ceil(tb / p.bucketSec));
       i0 = Math.max(0, Math.min(nB, i0));
       i1 = Math.max(0, Math.min(nB, i1));
       let lo = 0;
@@ -419,7 +428,9 @@ export function initLanes({ gd, data, player, apiBase }) {
   }
 
   /** POST starts the separation task, then poll /api/task/{id} until
-   *  done — a cached method short-circuits to its stem list at once */
+   *  done — a cached method short-circuits to its stem list at once.
+   *  Two-phase progress (3.8 D3): `downloading` reports model-download
+   *  bytes/speed, `running` reports inference progress. */
   async function requestStems(method) {
     const r = await fetch(`${apiBase}/api/stems?method=${method}`, {
       method: 'POST',
@@ -436,10 +447,22 @@ export function initLanes({ gd, data, player, apiBase }) {
       const tb = await res.json();
       if (tb.status === 'done') return tb;
       if (tb.status === 'error') throw new Error(tb.error || 'task failed');
-      setStatus(
-        t('lanesSeparating', { pct: Math.round((tb.progress || 0) * 100) }),
-        true
-      );
+      if (tb.status === 'downloading') {
+        const mb = (n) => (n / 1e6).toFixed(1);
+        setStatus(
+          t('lanesDownloading', {
+            done: mb(tb.bytes_done || 0),
+            total: tb.bytes_total ? mb(tb.bytes_total) : '?',
+            speed: Number(tb.speed_mbps || 0).toFixed(1),
+          }),
+          true
+        );
+      } else {
+        setStatus(
+          t('lanesSeparating', { pct: Math.round((tb.progress || 0) * 100) }),
+          true
+        );
+      }
       await new Promise((ok) => setTimeout(ok, POLL_MS));
     }
   }
@@ -476,6 +499,9 @@ export function initLanes({ gd, data, player, apiBase }) {
       row.classList.toggle('dimmed', !audible);
       row.title = audible ? '' : suppressionTip(model, anySolo);
     }
+    // mute/solo also re-tints the envelopes (dimmed while inaudible —
+    // silence must never hide the waveform)
+    scheduleDraw();
   }
   mixer.onRepaint(paintStates);
 
@@ -608,7 +634,7 @@ export function initLanes({ gd, data, player, apiBase }) {
     }
     methodSel.disabled = state.loading || !dlOk;
     if (!dlOk) {
-      methodSel.title = t('lanesNeedDL');
+      methodSel.title = t('dlNeedsExtra');
     }
     methodSel.addEventListener('change', () => {
       if (!methodSel.disabled && methodSel.value !== state.method) {
@@ -669,6 +695,11 @@ export function initLanes({ gd, data, player, apiBase }) {
     state.loading = true;
     state.method = method;
     state.ready = false;
+    // spinner on the On button immediately (3.8 D2): a click is never
+    // visually dead while the task starts up
+    toggle
+      .querySelector('button[data-lanes="on"]')
+      ?.classList.add('loading');
     teardownLanes();
     renderShell();
     setStatus(t('lanesSeparating', { pct: 0 }), true);
@@ -750,6 +781,9 @@ export function initLanes({ gd, data, player, apiBase }) {
     } finally {
       // a failed/partial load leaves no gain nodes wired anywhere
       lanes.forEach((l) => l.gain.disconnect());
+      toggle
+        .querySelector('button[data-lanes="on"]')
+        ?.classList.remove('loading');
       state.loading = false;
     }
   }
@@ -766,6 +800,9 @@ export function initLanes({ gd, data, player, apiBase }) {
     teardownLanes();
     state.ready = false;
     state.loading = false;
+    toggle
+      .querySelector('button[data-lanes="on"]')
+      ?.classList.remove('loading');
     panel.hidden = true;
     mixer.mix.solo = false;
     // hand the output back to the mix at the pre-enable volume
@@ -776,17 +813,28 @@ export function initLanes({ gd, data, player, apiBase }) {
     mixer.mix.muted = false;
   }
 
-  toggle.addEventListener('click', (ev) => {
+  toggle.addEventListener('click', async (ev) => {
     const btn = ev.target.closest('button[data-lanes]');
     if (!btn || btn.disabled) return;
     const want = btn.dataset.lanes === 'on';
     const turning = (want && !state.enabled) || (!want && state.enabled);
     if (!turning) return;
-    if (want && state.caps && !state.caps.dl) {
-      // DL extra missing: do NOT flip the toggle — a visually "On"
-      // button over an empty panel read as an unresponsive switch
-      setStatus(t('lanesNeedDL'));
-      return;
+    if (want) {
+      // 3.8 D2: the click ALWAYS answers — capabilities are awaited
+      // here (cached after the first check), and a missing [dl] extra
+      // toasts the precise remedy, disables the button with the same
+      // text as its tooltip, and never starts a task
+      await state.capsReady;
+      if (!state.caps || !state.caps.dl) {
+        showToast(t('dlNeedsExtra'));
+        const onBtn = toggle.querySelector('button[data-lanes="on"]');
+        if (onBtn) {
+          onBtn.disabled = true;
+          onBtn.title = t('dlNeedsExtra');
+        }
+        setStatus('');
+        return;
+      }
     }
     toggle
       .querySelectorAll('button')
@@ -797,8 +845,9 @@ export function initLanes({ gd, data, player, apiBase }) {
 
   // ---- capabilities: resolved ONCE and exposed as a promise so the
   // Notes click can await it lazily (never auto-triggering transcription
-  // on panel load); the toggle gets the remedy tooltip when DL is
-  // missing and existing Notes buttons get their precise state.
+  // on panel load); the toggle gets the remedy tooltip + disabled state
+  // when DL is missing and existing Notes buttons get their precise
+  // state.
   state.capsReady = (async () => {
     try {
       const r = await fetch(`${apiBase}/api/ping`);
@@ -809,7 +858,10 @@ export function initLanes({ gd, data, player, apiBase }) {
     }
     if (state.caps && !state.caps.dl) {
       const onBtn = toggle.querySelector('button[data-lanes="on"]');
-      if (onBtn) onBtn.title = t('lanesNeedDL');
+      if (onBtn) {
+        onBtn.disabled = true;
+        onBtn.title = t('dlNeedsExtra');
+      }
     }
     for (const lane of state.lanes) applyNotesAvailability(lane);
     if (state.enabled) renderShell();

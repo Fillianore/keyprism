@@ -1,0 +1,82 @@
+KeyPrism — third-party license inventory (NOTICE v1, Phase 3.8)
+================================================================
+
+KeyPrism is MIT-licensed. This file inventories the licenses of the
+third-party dependencies actually shipped/used at this release, so the
+obligations stay visible as the dependency set grows. It is generated
+by hand against pyproject.toml / frontend/package.json — update it when
+a dependency is added or removed (TODO(3.10): automate with a license
+report in CI).
+
+Python runtime dependencies (pyproject [project].dependencies)
+--------------------------------------------------------------
+numpy         BSD-3-Clause
+scipy         BSD-3-Clause
+matplotlib    BSD-3-Clause (bundled fonts carry their own licenses:
+              STIX/BaKoMa/AMSMaMa etc. — redistribution of wheels is
+              covered by the matplotlib distribution terms)
+mido          MIT
+soundfile     BSD-3-Clause (Python package); the libsndfile binary it
+              bundles is LGPL-2.1-or-later.
+              TODO(3.10): confirm our redistribution story (LGPL
+              dynamic-link notice in the distribution docs) — LGPL is
+              not MIT-incompatible but carries notice obligations we
+              do not yet document.
+av (PyAV)     BSD-3-Clause (Python package); the FFmpeg shared
+              libraries bundled in its wheels are LGPL-2.1-or-later
+              (default builds).
+              TODO(3.10): same LGPL notice obligation as soundfile.
+
+Optional [dl] extra (pyproject [project.optional-dependencies].dl)
+------------------------------------------------------------------
+onnxruntime   MIT
+huggingface-hub  Apache-2.0
+basic-pitch   Apache-2.0 (installs on Python 3.10/3.11 only; on 3.12
+              polyphonic transcription degrades to 501 by design)
+tensorflow    Apache-2.0 (pulled in by basic-pitch; not invoked
+              directly by KeyPrism)
+
+Optional [eval] extra (scripts/eval_trans.py only; never runtime)
+------------------------------------------------------------------
+mir_eval      ISC (evaluation-only; not distributed with the app)
+
+Frontend runtime dependencies
+-----------------------------
+plotly.js     MIT (plotly.js-dist-min; bundled into the build output)
+vite          MIT (build-time only, not distributed)
+Web MIDI/other browser APIs: none used.
+
+Models / pretrained weights (not distributed with KeyPrism; downloaded
+at first run to ~/.keyprism/models/demucs/)
+------------------------------------------------------------------
+Demucs code (facebookresearch/demucs)  MIT
+htdemucs ONNX exports (e.g. smank/htdemucs-onnx, the default
+auto-download source) — third-party conversions of the MIT Demucs
+model; conversion repos do not always restate a license.
+              NOTE: the htdemucs weights were trained with MUSDB18-HQ
+              and similar sources; MUSDB18(-HQ) is released for
+              ACADEMIC / RESEARCH USE ONLY. KeyPrism does not
+              redistribute the weights and makes no claim about their
+              fitness for production/commercial use.
+              TODO(3.10): verify the provenance/license of every
+              auto-downloadable ONNX export in dlsep._VARIANTS and
+              surface it in the model-download UI; reconsider the
+              default repo if any export lacks clear terms.
+              NOTE: Slakh2100 / MUSDB18 datasets are NOT referenced
+              anywhere in KeyPrism code or docs (verified at NOTICE
+              v1); if a future phase adds dataset-backed training or
+              evaluation, they must be listed here as research-only.
+
+License compatibility with KeyPrism (MIT)
+-----------------------------------------
+All runtime dependencies above are permissive (MIT / BSD / Apache-2.0 /
+ISC). Known obligations to track (none blocking internal use):
+  - LGPL-2.1 (libsndfile via soundfile, FFmpeg libs via PyAV wheels):
+    keep them unmodified as separately-linked libraries and carry the
+    LGPL notices in any binary distribution. TODO(3.10).
+  - Apache-2.0 (basic-pitch, huggingface-hub, tensorflow): requires
+    retaining NOTICE files and stating changes if modified. Compatible
+    with MIT distribution; no action beyond this inventory.
+  - Research-only datasets/weights (MUSDB18-HQ lineage of htdemucs):
+    usage restriction travels with the weights, not with KeyPrism
+    code; documented above. TODO(3.10) as noted.
