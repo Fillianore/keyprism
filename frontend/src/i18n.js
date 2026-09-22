@@ -9,7 +9,9 @@
 
 const LANG_KEY = 'keyprism-lang';
 
-const dict = {
+// Exported for the key-completeness guard (scripts/check-i18n.mjs):
+// every t('key') usage must exist in BOTH dicts.
+export const dict = {
   en: {
     pickMusic: '♪ Select Music',
     pickMusicTitle: 'Pick a local music file and upload it for analysis',
@@ -62,8 +64,18 @@ const dict = {
     lanePiano: 'Piano',
     laneGuitar: 'Guitar',
     laneOther: 'Other',
+    laneNotes: 'Notes',
     laneNotesTitle: 'Polyphonic notes (Basic Pitch) overlay on/off',
     laneNotesFailed: 'Poly notes failed: {msg}',
+    laneDecodeFailed: 'Waveform decode failed',
+    polyNeedsDL: 'Polyphonic notes need the optional DL extra: uv sync --extra dl',
+    polyNeedsBP:
+      'Polyphonic transcription is unavailable on Python ≥ 3.12; separation is unaffected',
+    mixerMutedTip: 'Muted by default; unmuting automatically ducks the mix',
+    mixerMixDuckedTip:
+      'Stems are playing: the mix is ducked to avoid summing into clipping',
+    soloSuppressedTip: "Silenced by another track's solo",
+    toastDismiss: 'Dismiss',
     bpmResetTitle: 'Reset to detected value',
     offsetMs: 'Offset ms',
     beatsPerBar: 'Beats/bar',
@@ -149,15 +161,23 @@ const dict = {
     lanesSeparating: 'DL 分离中… {pct}%',
     lanesFailed: '多轨失败: {msg}',
     lanesNeedDL: 'Demucs 需要可选 DL 依赖: uv sync --extra dl',
-    laneMix: '原曲',
+    laneMix: '混音',
     laneVocals: '人声',
     laneDrums: '鼓',
     laneBass: '贝斯',
     lanePiano: '钢琴',
     laneGuitar: '吉他',
     laneOther: '其他',
-    laneNotesTitle: '多音音符 (Basic Pitch) 覆盖层开关',
-    laneNotesFailed: '多音音符失败: {msg}',
+    laneNotes: '扒谱',
+    laneNotesTitle: '多音扒谱 (Basic Pitch) 覆盖层开关',
+    laneNotesFailed: '多音扒谱失败: {msg}',
+    laneDecodeFailed: '波形解码失败',
+    polyNeedsDL: '需要 uv sync --extra dl',
+    polyNeedsBP: '多音转录在 Python ≥3.12 不可用；分离功能不受影响',
+    mixerMutedTip: '默认静音；取消静音将自动压低原曲',
+    mixerMixDuckedTip: '分离轨播放中：为避免叠加削波，原曲已自动压低',
+    soloSuppressedTip: '因其他轨道独奏而被静音',
+    toastDismiss: '关闭',
     bpmResetTitle: '还原检测值',
     offsetMs: '偏移ms',
     beatsPerBar: '拍/小节',
