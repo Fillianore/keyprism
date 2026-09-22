@@ -185,6 +185,60 @@ def test_separator_separate_contract():
             dlsep.DemucsSeparator("demucs_4")  # no onnxruntime in this env
 
 
+def test_separator_fixed_segment_defaults():
+    """Session-based separation runs the chunker at the export's fixed
+    segment (the reference ONNX graphs embed the STFT and only accept
+    SEGMENT_SAMPLES inputs) with a 50% COLA-exact overlap; an injected
+    infer keeps the generic 10 s / 1 s defaults; explicit args win."""
+    sr = dlsep.TARGET_SR
+    seen = []
+
+    def sep_with_recording_infer():
+        s = dlsep.DemucsSeparator(
+            "demucs_4",
+            infer=lambda ch: (seen.append(ch.shape[0]),
+                              np.stack([ch] * 4))[1])
+        # pretend the model has the fixed segment (as the real session
+        # does) WITHOUT constructing an InferenceSession
+        s._segment = dlsep.SEGMENT_SAMPLES
+        return s
+
+    x = np.zeros(int(20 * sr), dtype=np.float32)
+    out = sep_with_recording_infer().separate(x, sr)
+    assert all(c == dlsep.SEGMENT_SAMPLES for c in seen)  # 7.8 s chunks
+    assert len(seen) >= 3                                 # 50% overlap
+    for row in out.values():
+        assert row.shape[0] == x.shape[0]
+
+    seen.clear()
+    dlsep.DemucsSeparator(
+        "demucs_4", infer=lambda ch: (seen.append(ch.shape[0]),
+                                      np.stack([ch] * 4))[1]
+    ).separate(x, sr)
+    assert all(c == int(10.0 * sr) for c in seen)  # generic default
+
+    seen.clear()
+    dlsep.DemucsSeparator(
+        "demucs_4", infer=lambda ch: (seen.append(ch.shape[0]),
+                                      np.stack([ch] * 4))[1]
+    ).separate(x, sr, chunk_sec=2.0, overlap_sec=0.5)
+    assert all(c == int(2.0 * sr) for c in seen)  # explicit args win
+
+
+def test_pad_segment_short_tail():
+    """A sub-segment tail is zero-padded to the fixed model segment and
+    the valid length reported back; longer inputs pass through."""
+    x = np.ones(1000, dtype=np.float32)
+    padded, valid = dlsep._pad_segment(x, 343980)
+    assert valid == 1000 and padded.shape == (343980,)
+    assert padded[:1000].sum() == 1000 and padded[1000:].sum() == 0
+    y, valid2 = dlsep._pad_segment(np.ones(343980, dtype=np.float32),
+                                   343980)
+    assert valid2 == 0 and y.shape == (343980,)
+    z, valid3 = dlsep._pad_segment(x, 0)  # flexible backend: no padding
+    assert valid3 == 0 and z.shape == (1000,)
+
+
 # --------------------------------------------------------- note merging
 
 def test_merge_fragmented_notes():
@@ -386,6 +440,33 @@ def test_poly_notes_end_to_end_with_stub_predict(srv, monkeypatch):
     assert cached  # cached under the analysis entry, version-tagged
 
 
+def test_demucs_method_alias(srv, monkeypatch):
+    """``method=demucs`` is the documented alias of the canonical
+    ``demucs_4`` and answers exactly the fixed 4-stem registry on the
+    task result, the cache GET and the per-stem download."""
+    monkeypatch.setattr(server_mod, "DL_AVAILABLE", True)
+    monkeypatch.setattr(server_mod, "POLY_AVAILABLE", True)
+    monkeypatch.setattr(dlsep, "get_separator", FakeSeparator)
+
+    code, body = post(f"{srv['base']}/api/stems?method=demucs")
+    assert code == 200 and body["status"] == "started"
+    done = wait_task(srv["base"], body["task_id"])
+    assert done["status"] == "done"
+    assert done["method"] == "demucs_4"
+    assert [s["key"] for s in done["stems"]] == \
+        list(dlsep.STEM_SPECS["demucs_4"])
+
+    code, got = get(f"{srv['base']}/api/stems?method=demucs")
+    assert code == 200
+    assert got["method"] == "demucs_4" and got["cached"] is True
+    assert [s["key"] for s in got["stems"]] == \
+        ["drums", "bass", "other", "vocals"]
+
+    url = got["stems"][0]["url"].split(srv["base"])[-1]
+    with urllib.request.urlopen(f"{srv['base']}{url}", timeout=10) as r:
+        assert r.status == 200 and r.read(4) == b"RIFF"
+
+
 # ----------------------------------------- frontend canvas sync (source)
 
 FRONTEND = Path(__file__).resolve().parent.parent / "frontend" / "src"
@@ -420,3 +501,32 @@ def test_lanes_js_is_wired_into_the_app():
     assert "initLanes" in main
     html = (FRONTEND.parent / "index.html").read_text(encoding="utf-8")
     assert 'id="lanesPanel"' in html and "lanesToggle" in html
+
+
+def test_frontend_mixer_contract():
+    """stems.js and lanes.js must share the MixerState (mixer.js): one
+    master GainNode before the destination, strips default MUTED (the
+    mix keeps playing), the DAW matrix shown via .dimmed rows, and the
+    fixed per-method stem contract validated on both panels."""
+    mixer = strip_js_comments(
+        (FRONTEND / "mixer.js").read_text(encoding="utf-8"))
+    assert "createGain" in mixer and "connect(ctx.destination)" in mixer
+    assert "MASTER_CEILING" in mixer
+    assert "muted: true" in mixer   # strip default (makeStrip)
+    assert "muted: false" in mixer  # mix strip default
+    assert "stripAudible" in mixer and "mixAudible" in mixer
+    for name in ("stems.js", "lanes.js"):
+        src = strip_js_comments(
+            (FRONTEND / name).read_text(encoding="utf-8"))
+        assert "MixerState" in src and "mixer.js" in src
+        assert "dimmed" in src          # matrix feedback on the rows
+        assert "makeStrip" in src       # strips born muted
+        assert "mixer.route" in src     # master-bus wiring after load
+        assert "mixer.apply" in src     # one matrix application point
+    # both panels enforce the fixed stem lists client-side too
+    stems_src = strip_js_comments(
+        (FRONTEND / "stems.js").read_text(encoding="utf-8"))
+    assert "EXPECTED_STEMS" in stems_src
+    lanes_src = strip_js_comments(
+        (FRONTEND / "lanes.js").read_text(encoding="utf-8"))
+    assert "'drums', 'bass', 'other', 'vocals'" in lanes_src

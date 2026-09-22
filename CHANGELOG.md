@@ -7,6 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `/api/stems` now derives its `stems` list from the FIXED per-method
+  registry (`stems.STEM_SPECS` / `dlsep.STEM_SPECS`) instead of the
+  cached `status.json`, so the answer can never depend on file length or
+  chunking: hpss → exactly `['harmonic', 'percussive']`,
+  rpca → `['lowrank', 'sparse']`, combined → `['harmonic', 'percussive']`,
+  demucs_4 → exactly `['drums', 'bass', 'other', 'vocals']`,
+  demucs_6 → the 6-stem registry. `method=demucs` is accepted as an
+  alias of the canonical `demucs_4` everywhere (`/api/stems` GET/POST,
+  `/api/stem`)
+- Demucs model auto-download was silently broken twice over: the
+  pinned Hub repo (`Xenova/htdemucs-onnx`) no longer exists, and the
+  network cannot reach huggingface.co anyway. `_VARIANTS` now points at
+  `smank/htdemucs-onnx` (verified graph contract: `mix [1,2,T]` →
+  `sources [1,S,2,T]`, STFT embedded), and the documented remedy for
+  the offline network is `HF_ENDPOINT=https://hf-mirror.com` (or
+  dropping any compatible ONNX into `~/.keyprism/models/demucs/`)
+- Demucs separation crashed on every real model: the reference ONNX
+  exports embed the STFT/iSTFT and only accept their fixed segment
+  (343980 samples = 7.8 s @ 44.1 kHz), while the separator chunked at
+  generic 10 s windows (and a pulled-back short tail). Chunking now
+  defaults to the model's fixed segment with a 50% COLA-exact overlap
+  and zero-pads the sub-segment tail chunk (`_pad_segment`); verified
+  end-to-end on an 89 s track (~40 s CPU, 4 stems, no clipping)
+- A session zero-probe now validates the ONNX graph contract at model
+  load (fixed segment accepted, output stem count matches the variant
+  registry), so a bad export fails immediately with an actionable
+  message instead of a cryptic `'stem4'` KeyError ~40 s into a
+  separation. Known caveat: no usable auto-downloadable 6-stem export
+  exists on the Hub right now (mislabelled or STFT-input-requiring
+  files) — `demucs_6` needs a compatible ONNX via
+  `KEYPRISM_DEMUCS6_FILE`; `demucs_4` works out of the box
+- Frontend mixing architecture: separated stems/lanes no longer connect
+  straight to `ctx.destination` at unity gain (louder than the −10 dB
+  mix ceiling; mix + stems summed into clipping). A shared `MixerState`
+  (new `frontend/src/mixer.js`) feeds every strip through a MASTER
+  GainNode capped at the same −10 dB ceiling and computes the DAW
+  mute/solo matrix in one place: solo anywhere silences every
+  non-soloed strip at gain level; a strip silenced by others' solo or
+  by the anti-clipping rule is shown `.dimmed` while its own M/S buttons
+  keep the user's state
+- Stem/lane defaults are DAW-standard and anti-clipping: loading stems
+  no longer mutes the Mix and blasts every stem at unity — the Mix keeps
+  playing at its current volume and every separated strip starts MUTED
+  (gain 0) until unmuted/soloed; unmuting any stem silences the Mix
+  (its content is inside the stems — summing both would double the
+  waveform)
+- Multi-track (AI Separation) toggle unresponsiveness: the Demucs
+  toggle flipped to "On" even when the `[dl]` extra was missing and
+  then silently did nothing; it now refuses to flip, shows the reason
+  in the panel status, and the remedy (`uv sync --extra dl`) is set as
+  a tooltip on the On button when capabilities report DL missing
+- A failed/partial stem decode no longer leaves half-wired GainNodes
+  connected to the output bus (gain nodes route into the master bus
+  only after a fully successful load; failures disconnect everything)
+- The frontend validates the `/api/stems` response against the fixed
+  per-method stem contract and fails loudly instead of rendering
+  chunk-count-dependent mystery rows
+
+### Changed
+
+- `[dl]` extra: `basic-pitch` is now marked `python_version < '3.12'`
+  (it pins `tensorflow<2.15`, which ships no CPython 3.12 wheels, so
+  `uv sync --extra dl` failed outright on 3.12). On 3.12 the Demucs
+  stack (onnxruntime + huggingface-hub) still installs and Basic Pitch
+  poly transcription degrades to 501 — the designed graceful
+  degradation; Python 3.10/3.11 keep full DL functionality
+- The top-bar multi-track control is now visibly branded
+  "AI Separation (Demucs)" (i18n EN/ZH) instead of the opaque "Lanes"
+
 ## [0.5.0] - 2026-09-21
 
 ### Added
