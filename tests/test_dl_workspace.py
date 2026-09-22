@@ -517,8 +517,11 @@ def test_frontend_mixer_contract():
     assert "muted: true" in mixer   # strip default (makeStrip)
     assert "muted: false" in mixer  # mix strip default
     assert "stripAudible" in mixer and "mixAudible" in mixer
-    # Phase 3.7: destructive-solo transitions, buttons from state only
+    # Phase 3.7: destructive-solo transitions, buttons from state only,
+    # gain staging (make-up + brickwall limiter) on the master bus
     assert "pressSolo" in mixer and "pressMute" in mixer
+    assert "createDynamicsCompressor" in mixer
+    assert "makeupDb" in mixer and "bufferPeak" in mixer
     controls = strip_js_comments(
         (FRONTEND / "controls.js").read_text(encoding="utf-8"))
     assert "mixer.pressMute(model)" in controls
@@ -531,6 +534,7 @@ def test_frontend_mixer_contract():
         assert "makeStrip" in src       # strips born muted
         assert "mixer.route" in src     # master-bus wiring after load
         assert "mixer.apply" in src     # one matrix application point
+        assert "makeupDb" in src        # fader default = make-up gain
     # both panels enforce the fixed stem lists client-side too
     stems_src = strip_js_comments(
         (FRONTEND / "stems.js").read_text(encoding="utf-8"))

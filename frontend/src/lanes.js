@@ -27,7 +27,9 @@
  *  the Mix (its content is inside the lanes — summing both would clip).
  *  Solo is DESTRUCTIVE (Phase 3.7 state machine in mixer.js): it
  *  materializes as real mute states on every other row, and unmuting
- *  any row releases it.
+ *  any row releases it. Each lane fader defaults to its make-up gain
+ *  (mix peak / lane peak, clamped to +12 dB); the master bus carries a
+ *  brickwall limiter so all-open lanes cannot clip.
  *
  *  Lane rendering (Phase 3.6 polish):
  *  - each decoded buffer's peak envelope (min/max per column, ~1024
@@ -59,7 +61,7 @@
 
 import { t, onChange } from './i18n.js';
 import { EPOCH_MS, pMs } from './spectrogram.js';
-import { MixerState } from './mixer.js';
+import { MixerState, bufferPeak, makeupDb } from './mixer.js';
 import { trackRow, wireMuteSolo } from './controls.js';
 import { showToast } from './toast.js';
 import { throttled } from './util.js';
@@ -525,14 +527,16 @@ export function initLanes({ gd, data, player, apiBase }) {
       labelText: t(lane.labelKey),
       color: lane.color,
       withLane: true,
+      fader: 'db',
     });
-    const { row, controls, scope, vol, mute, solo } = parts;
+    const { row, controls, scope, vol, mute, solo, db } = parts;
     const { syncFader } = wireMuteSolo({
       mixer,
       model: lane,
       vol,
       mute,
       solo,
+      dbEl: db,
       apply: () => mixer.apply(),
       paintFill,
     });
@@ -597,6 +601,7 @@ export function initLanes({ gd, data, player, apiBase }) {
       labelText: t('laneMix'),
       color: '#ddd6c8',
       withLane: true,
+      fader: 'norm',
     });
     mix.row.classList.add('lane-row-mix');
     mix.scope.classList.add('lane-scope-empty');
@@ -606,6 +611,7 @@ export function initLanes({ gd, data, player, apiBase }) {
       vol: mix.vol,
       mute: mix.mute,
       solo: mix.solo,
+      dbEl: mix.db,
       apply: () => mixer.apply(),
       paintFill,
     });
@@ -657,6 +663,7 @@ export function initLanes({ gd, data, player, apiBase }) {
           `unexpected stems for ${method}: ${keys.join(', ')}`
         );
       }
+      const pMix = player.mixPeak();
       for (const item of list.stems) {
         const meta = LANE_META[item.key] || {};
         // makeStrip defaults: MUTED (gain 0) — loading lanes never
@@ -676,6 +683,12 @@ export function initLanes({ gd, data, player, apiBase }) {
         try {
           lane.buffer = await decodeStem(item.url);
           lane.peaks = buildEnvelope(lane.buffer);
+          // gain staging (I2): fader default = make-up gain matching
+          // the lane peak to the mix peak; the envelope auto-scale and
+          // peak label use the same per-lane peak
+          lane.peak = bufferPeak(lane.buffer);
+          lane.makeupDb = makeupDb(pMix, lane.peak);
+          lane.dbGain = lane.makeupDb;
         } catch {
           // per-lane tolerance: placeholder inside THIS lane, the rest
           // of the panel still loads (D2)

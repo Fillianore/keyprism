@@ -2,7 +2,8 @@
 /** Mixer state-machine test (Phase 3.7): the FULL transition table of
  *  the destructive-solo mixer (mixer.js) executed against a fake
  *  AudioContext — T1–T5, invariant I1 (never muted AND solo), snapshot
- *  restore, solo move, and the mix-duck rule.
+ *  restore, solo move, and the mix-duck rule — plus the gain-staging
+ *  math (make-up clamp, dB→linear) and the brickwall limiter wiring.
  *
  *  Wired as `npm run test:mixer` and enforced in the CI frontend job.
  *  Pure Node: mixer.js imports nothing, so no DOM/WebAudio shims are
@@ -10,9 +11,19 @@
  */
 
 import assert from 'node:assert/strict';
-import { MixerState } from '../src/mixer.js';
+import {
+  MixerState,
+  MASTER_CEILING,
+  dbToLin,
+  bufferPeak,
+  makeupDb,
+} from '../src/mixer.js';
 
 // ------------------------------------------------------------ fakes
+function fakeParam(initial) {
+  return { value: initial };
+}
+
 function fakeGainNode(sink) {
   const gain = {
     value: 1,
@@ -21,18 +32,32 @@ function fakeGainNode(sink) {
       this.target = v;
     },
   };
-  return { gain, type: 'gain', connected: [],
+  return { gain, type: 'gain', connected: [], gainObj: gain,
            connect(p) { this.connected.push(p); sink.edges.push(this); },
            disconnect() {} };
 }
 
 function fakeCtx() {
-  return {
+  const ctx = {
     currentTime: 0,
     destination: { name: 'destination' },
     edges: [],
     createGain() { return fakeGainNode(this); },
+    createDynamicsCompressor() {
+      return {
+        type: 'compressor',
+        threshold: fakeParam(0),
+        knee: fakeParam(0),
+        ratio: fakeParam(1),
+        attack: fakeParam(0),
+        release: fakeParam(0.1),
+        connected: [],
+        connect(p) { this.connected.push(p); },
+        disconnect() {},
+      };
+    },
   };
+  return ctx;
 }
 
 /** Build a mixer with 3 stem strips (A/B/C, default-muted like the
@@ -77,7 +102,7 @@ test('T1: S on A engages destructive solo', () => {
   }
   assert.ok(invariantOk(m));
   m.apply();
-  assert.equal(A.gain.gain.target, 1);
+  assert.equal(A.gain.gain.target, dbToLin(0));
   assert.equal(B.gain.gain.target, 0);
 });
 
@@ -114,7 +139,7 @@ test('T3: unmuting a row while X soloed releases the solo first', () => {
   assert.equal(mix.muted, false, 'mix restored');
   assert.ok(invariantOk(m));
   m.apply();
-  assert.equal(B.gain.gain.target, 1);
+  assert.equal(B.gain.gain.target, dbToLin(0));
   assert.ok(A.gain.gain.target > 0, 'A still audible after the release');
 });
 
@@ -207,6 +232,56 @@ test('mix solo: the Mix can solo itself above every stem', () => {
   S(m, mix);
   assert.equal(A.muted, false, 'stem mutes restored after mix solo');
   assert.ok(invariantOk(m));
+});
+
+console.log('gain staging & chain');
+
+test('make-up gain math: clamp to [0, +12] dB around the mix peak', () => {
+  assert.ok(Math.abs(makeupDb(1.0, 0.285) - 10.9) < 0.1); // QA2 numbers
+  assert.equal(makeupDb(1.0, 2.0), 0); // louder stem: no attenuation
+  assert.equal(makeupDb(1.0, 1.0), 0);
+  assert.equal(makeupDb(0.5, 1e-9), 12); // silent stem: capped
+  assert.ok(Math.abs(makeupDb(0.9, 0.3) - 20 * Math.log10(3)) < 1e-9);
+  assert.equal(dbToLin(0), 1);
+  assert.ok(Math.abs(dbToLin(18) - 7.943) < 0.01);
+});
+
+test('bufferPeak: max |sample| over every channel', () => {
+  const buf = {
+    numberOfChannels: 2,
+    getChannelData: (c) =>
+      c === 0 ? [0.25, -0.5, 0.1] : [0.9, -0.2, 0.05],
+  };
+  assert.equal(bufferPeak(buf), 0.9);
+  assert.equal(bufferPeak({ numberOfChannels: 0, getChannelData: () => [] }), 0);
+});
+
+test('chain: master (-10 dB ceiling) into a brickwall limiter', () => {
+  const ctx = fakeCtx();
+  const m = new MixerState(ctx, () => {});
+  assert.equal(m.master.gain.value, MASTER_CEILING);
+  const lim = m.limiter;
+  assert.equal(lim.threshold.value, -1);
+  assert.equal(lim.knee.value, 0);
+  assert.equal(lim.ratio.value, 20);
+  assert.equal(lim.attack.value, 0.001);
+  assert.equal(lim.release.value, 0.1);
+  assert.ok(lim.connected.includes(ctx.destination),
+    'limiter is the last node before the destination');
+  assert.ok(m.master.connected.includes(lim),
+    'master bus feeds the limiter');
+});
+
+test('apply(): strip gain = fader dB unless muted; makeup default used', () => {
+  const { m, A, B } = rig();
+  A.dbGain = 11; // e.g. make-up gain from a quiet stem
+  M(m, A); // unmute
+  m.apply();
+  assert.ok(Math.abs(A.gain.gain.target - dbToLin(11)) < 1e-9);
+  assert.equal(B.gain.gain.target, 0);
+  M(m, A); // mute again
+  m.apply();
+  assert.equal(A.gain.gain.target, 0);
 });
 
 console.log(`test:mixer OK: ${passed} cases green`);

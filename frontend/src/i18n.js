@@ -71,6 +71,8 @@ export const dict = {
     polyNeedsDL: 'Polyphonic notes need the optional DL extra: uv sync --extra dl',
     polyNeedsBP:
       'Polyphonic transcription is unavailable on Python ≥ 3.12; separation is unaffected',
+    faderDbTitle:
+      'Stem fader (dB); default = make-up gain matching the mix loudness',
     mixerMutedTip: 'Muted by default; unmuting automatically ducks the mix',
     mixerMixDuckedTip:
       'Stems are playing: the mix is ducked to avoid summing into clipping',
@@ -174,6 +176,7 @@ export const dict = {
     laneDecodeFailed: '波形解码失败',
     polyNeedsDL: '需要 uv sync --extra dl',
     polyNeedsBP: '多音转录在 Python ≥3.12 不可用；分离功能不受影响',
+    faderDbTitle: '分轨推子 (dB)；默认为匹配原曲响度的补偿增益',
     mixerMutedTip: '默认静音；取消静音将自动压低原曲',
     mixerMixDuckedTip: '分离轨播放中：为避免叠加削波，原曲已自动压低',
     soloSuppressedTip: '因其他轨道独奏而被静音',

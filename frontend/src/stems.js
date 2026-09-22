@@ -1,39 +1,43 @@
 /** Stem player (Phase 2 classic source separation).
  *
- * Fetches /api/stems for the current track, decodes every stem WAV into
- * the SHARED AudioContext owned by player.js and drives all stem sources
- * from the main transport events. Gain architecture lives in the shared
- * MixerState (mixer.js): every strip feeds the MASTER GainNode (−10 dB
- * ceiling) before the destination — nothing can clip, and the mute/solo
- * matrix is computed in ONE place.
+ *  Fetches /api/stems for the current track, decodes every stem WAV into
+ *  the SHARED AudioContext owned by player.js and drives all stem sources
+ *  from the main transport events. Gain architecture lives in the shared
+ *  MixerState (mixer.js): every strip feeds the MASTER GainNode (−10 dB
+ *  ceiling) before the destination — nothing can clip, and the DAW
+ *  mute/solo matrix is computed in ONE place.
  *
- * Sync design (the whole point of this module):
- * - one shared AudioContext: all stems + the mix live on the same
- *   hardware clock, so there is nothing to drift apart;
- * - the transport emits ('play', {offset, when}) with ONE absolute
- *   timestamp `when = ctx.currentTime + START_LEAD`; every stem's
- *   AudioBufferSourceNode (and the mix source in player.js) is started
- *   with source.start(when, offset) — never serial awaits, never
- *   setTimeout — so all channels begin on the same audio frame and stay
- *   sample-locked for the whole track;
- * - stem WAVs are rendered from the same cached complex STFT at the same
- *   sample rate, so identical offsets address identical sample positions;
- * - volume/mute/solo never touch scheduling: they only ramp GainNodes
- *   (setTargetAtTime, ~12 ms), which is click- and pop-free.
+ *  Sync design (the whole point of this module):
+ *  - one shared AudioContext: all stems + the mix live on the same
+ *    hardware clock, so there is nothing to drift apart;
+ *  - the transport emits ('play', {offset, when}) with ONE absolute
+ *    timestamp `when = ctx.currentTime + START_LEAD`; every stem's
+ *    AudioBufferSourceNode (and the mix source in player.js) is started
+ *    with source.start(when, offset) — never serial awaits, never
+ *    setTimeout — so all channels begin on the same audio frame and stay
+ *    sample-locked for the whole track;
+ *  - stem WAVs are rendered from the same cached complex STFT at the same
+ *    sample rate, so identical offsets address identical sample positions;
+ *  - volume/mute/solo never touch scheduling: they only ramp GainNodes
+ *    (setTargetAtTime, ~12 ms), which is click- and pop-free.
  *
- * Mixer defaults (anti-clipping, destructive solo — Phase 3.7):
- * - loading stems does NOT change what the user hears: the Mix keeps
- *   playing at its current volume, every separated stem starts MUTED
- *   (gain 0) until explicitly unmuted/soloed;
- * - unmuting any stem hands the lead to the stems: the Mix is silenced
- *   at gain level (its content is already inside the stems — summing
- *   both would double the waveform and clip) and its row is shown
- *   `.dimmed`; soloing a stem force-mutes every other row (the M
- *   buttons render that real state) and unmuting any row releases it.
+ *  Mixer defaults (anti-clipping, destructive solo — Phase 3.7):
+ *  - loading stems does NOT change what the user hears: the Mix keeps
+ *    playing at its current volume, every separated stem starts MUTED
+ *    (gain 0) until explicitly unmuted/soloed;
+ *  - each stem fader defaults to its MAKE-UP gain (mix peak / stem
+ *    peak, clamped to +12 dB), so unmuting a stem auditions it at
+ *    mix-comparable loudness; the brickwall limiter on the master bus
+ *    (mixer.js) holds the sum with every fader wide open;
+ *  - unmuting any stem hands the lead to the stems: the Mix is silenced
+ *    at gain level (its content is already inside the stems — summing
+ *    both would double the waveform and clip) and its row is shown
+ *    `.dimmed`; soloing a stem force-mutes every other row (the M
+ *    buttons render that real state) and unmuting any row releases it.
  */
 
 import { t, onChange } from './i18n.js';
-import { MixerState } from './mixer.js';
+import { MixerState, bufferPeak, makeupDb } from './mixer.js';
 import { trackRow, wireMuteSolo } from './controls.js';
 
 const START_LEAD = 0.06; // keep identical to player.js START_LEAD
@@ -206,16 +210,23 @@ export function initStems({ data, player, apiBase }) {
   mixer.onRepaint(paintStates);
 
   /** One row via the shared factory (controls.js): <icon><label> cell +
-   *  slider/M/S controls cell — identical construction for the Mix row
-   *  and every stem row (D3). */
+   *  fader/M/S controls cell — identical construction for the Mix row
+   *  and every stem row (D3). Stem rows get the dB fader; the Mix row
+   *  keeps the normalized transport volume. */
   function buildRow(container, key, nameText, color, model) {
-    const parts = trackRow({ key, labelText: nameText, color });
+    const parts = trackRow({
+      key,
+      labelText: nameText,
+      color,
+      fader: model === mixer.mix ? 'norm' : 'db',
+    });
     const { syncFader } = wireMuteSolo({
       mixer,
       model,
       vol: parts.vol,
       mute: parts.mute,
       solo: parts.solo,
+      dbEl: parts.db,
       apply: () => mixer.apply(),
       paintFill,
     });
@@ -295,12 +306,19 @@ export function initStems({ data, player, apiBase }) {
           `${t('stemsFailed', { msg: method })}: ${keys.join(', ')}`
         );
       }
+      const pMix = player.mixPeak();
       for (const item of body.stems) {
         // makeStrip defaults: MUTED (gain 0) — loading stems never
         // changes what the user currently hears
         const strip = mixer.makeStrip(item.key, { key: item.key });
         strips.push(strip);
         strip.buffer = await decodeStem(item.url);
+        // gain staging (I2): fader default = make-up gain matching the
+        // stem peak to the mix peak, so an unmuted stem auditions at
+        // mix-comparable loudness
+        strip.peak = bufferPeak(strip.buffer);
+        strip.makeupDb = makeupDb(pMix, strip.peak);
+        strip.dbGain = strip.makeupDb;
       }
       if (state.method !== method) return; // switched away mid-load
       mixer.route(strips); // wire into the master bus only when complete
