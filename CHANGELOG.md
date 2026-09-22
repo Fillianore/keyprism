@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `<model>.part` with an atomic rename, so an interrupted download can
   never leave a corrupt cache entry; the downloader is dependency-free
   (stdlib urllib) and honors `HF_ENDPOINT` for mirror networks
+- NOTICE v1: hand-maintained third-party license inventory of the
+  current runtime/optional/frontend dependencies, with the LGPL
+  (libsndfile, FFmpeg-in-PyAV) and research-only weights provenance
+  flagged as TODOs for 3.10
 
 ### Changed
 
