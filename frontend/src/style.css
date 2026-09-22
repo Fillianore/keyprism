@@ -639,8 +639,8 @@ input[type='range']:active::-moz-range-thumb {
 }
 
 /* ---------- Multi-lane DL workspace (Phase 3): stacked horizontal
- *  lanes (Mix + Demucs stems); each lane is a fixed header (name,
- *  volume, Mute/Solo, PX notes toggle) plus a canvas scope — a waveform
+ *  lanes (Mix + Demucs stems). Phase 3.6 grid: [label 140px]
+ *  [controls 200px][lane 1fr], 88 px rows; each lane is a waveform
  *  canvas with a dedicated notes-overlay canvas absolutely positioned
  *  on top (notes are NEVER layout.shapes: 6 poly tracks would melt
  *  SVG). Canvases are redrawn from the main chart's xaxis.range on
@@ -654,7 +654,7 @@ input[type='range']:active::-moz-range-thumb {
   border-top: 1px solid var(--edge-lo);
   box-shadow: inset 0 1px 0 var(--edge-hi);
   flex: 0 0 auto;
-  max-height: 42vh;
+  max-height: 48vh;
   overflow-y: auto;
   font-size: 12px;
   color: var(--text);
@@ -663,26 +663,19 @@ input[type='range']:active::-moz-range-thumb {
 
 .lane-row {
   display: grid;
-  grid-template-columns: 170px 1fr;
+  grid-template-columns: 140px 200px 1fr;
   align-items: center;
   gap: 10px;
+  height: 88px;
 }
 
-.lane-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.lane-head .stem-name {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.lane-row-mix .lane-scope-empty {
+  border-style: dotted;
+  background: none;
 }
 
 .lane-row-mix {
-  padding-bottom: 2px;
+  height: 44px;
 }
 
 .lane-row-mix .stem-name {
@@ -692,7 +685,8 @@ input[type='range']:active::-moz-range-thumb {
 
 .lane-scope {
   position: relative;
-  height: 44px;
+  height: 100%;
+  min-height: 64px;
   border: 1px solid #232329;
   border-radius: 6px;
   background:
@@ -769,15 +763,48 @@ input[type='range']:active::-moz-range-thumb {
 }
 
 .stem-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: 140px 200px;
   align-items: center;
-  gap: 7px;
+  gap: 10px;
 }
 
+/* label cell: <icon><text> — the icon inherits the row's stem color */
 .stem-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
   color: var(--stem-color, var(--text));
-  min-width: 68px;
   white-space: nowrap;
+}
+
+.stem-ico {
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  opacity: 0.92;
+}
+
+.stem-ico svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.stem-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* controls cell: one shared slider + the M/S hardware keys (identical
+   construction for the Mix row and every stem row) */
+.stem-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
 }
 
 .stem-row-mix .stem-name {
@@ -786,7 +813,19 @@ input[type='range']:active::-moz-range-thumb {
 }
 
 .stem-vol {
+  flex: 1 1 auto;
   width: 96px;
+  max-width: 132px;
+  min-width: 64px;
+}
+
+.lane-notes-btn {
+  flex: 0 0 auto;
+}
+
+.lane-notes-btn:disabled {
+  cursor: default;
+  opacity: 0.55;
 }
 
 .stem-vol::-webkit-slider-runnable-track {
@@ -839,6 +878,70 @@ input[type='range']:active::-moz-range-thumb {
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.5),
     0 0 8px rgba(214, 171, 102, 0.25);
+}
+
+/* DAW mixer matrix feedback: a row silenced by OTHERS' solo or by the
+ * anti-clipping mix rule is dimmed at the content level — its own M/S
+ * buttons keep the user's toggle state (never flipped behind their
+ * back) */
+.stem-row.dimmed .stem-name,
+.lane-row.dimmed .stem-name {
+  opacity: 0.45;
+}
+
+.stem-row.dimmed .stem-vol,
+.lane-row.dimmed .stem-vol {
+  opacity: 0.4;
+}
+
+.lane-row.dimmed .lane-scope {
+  opacity: 0.45;
+}
+
+/* ---------- Toast (Phase 3.6): precise, dismissible availability and
+ *  error messages — raised only from a user action, never on load ---- */
+.toast-stack {
+  position: fixed;
+  right: 18px;
+  bottom: 72px;
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 380px;
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  background: linear-gradient(180deg, #17171c, #101014);
+  border: 1px solid var(--gold-line);
+  border-radius: 8px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.55);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.toast-msg {
+  flex: 1 1 auto;
+}
+
+.toast-x {
+  background: none;
+  border: 0;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+  font-family: inherit;
+}
+
+.toast-x:hover {
+  color: var(--gold-hi);
 }
 
 /* ---------- Player: bottom lacquered beam ---------- */

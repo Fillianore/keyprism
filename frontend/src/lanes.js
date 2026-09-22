@@ -3,7 +3,12 @@
  *  Fetches /api/stems?method=demucs_4|demucs_6 (background task: POST,
  *  then polls /api/task/{id} — long separations never hold an HTTP
  *  request open), decodes every stem WAV into the SHARED AudioContext
- *  owned by player.js and renders one stacked lane per stem.
+ *  owned by player.js and renders one stacked lane per stem. Gain
+ *  architecture lives in the shared MixerState (mixer.js): every lane
+ *  feeds the MASTER GainNode (−10 dB ceiling) before the destination and
+ *  the DAW mute/solo matrix is computed in ONE place. Row DOM (label +
+ *  icon, slider, M/S, scope cell) comes from the shared factory in
+ *  controls.js so the two panels can never drift apart visually.
  *
  *  Sync design (inherited from the Phase 2 contract):
  *  - one shared AudioContext: all stems + the mix live on the same
@@ -15,6 +20,24 @@
  *    same audio frame and stay sample-locked;
  *  - volume/mute/solo only ramp GainNodes (setTargetAtTime, ~12 ms),
  *    which is click- and pop-free; scheduling is never touched.
+ *
+ *  Mixer defaults (same as the Phase 2 stem player): loading lanes never
+ *  changes what the user hears — the Mix keeps playing, every Demucs
+ *  lane starts MUTED until unmuted/soloed; unmuting any lane silences
+ *  the Mix (its content is inside the lanes — summing both would clip).
+ *
+ *  Lane rendering (Phase 3.6 polish):
+ *  - each decoded buffer's peak envelope (min/max per column, ~1024
+ *    columns) is computed ONCE, cached on the lane, and drawn to the
+ *    waveform canvas IMMEDIATELY — content is visible before playback
+ *    and redrawn on resize (throttled) and plotly_relayout;
+ *  - a per-lane decode failure renders an i18n placeholder inside that
+ *    lane instead of failing the whole panel;
+ *  - the Notes (扒谱) button is uniform on every poly-eligible lane and
+ *    is strictly LAZY: availability is checked on click (awaiting the
+ *    /api/ping capabilities) and reported as a dismissible toast with
+ *    the precise reason (onnxruntime missing vs basic-pitch unavailable
+ *    on Python ≥ 3.12) — never auto-triggered on panel load.
  *
  *  Rendering design (why canvas, never layout.shapes):
  *  - six lanes of polyphonic notes would mean tens of thousands of SVG
@@ -33,10 +56,18 @@
 
 import { t, onChange } from './i18n.js';
 import { EPOCH_MS, pMs } from './spectrogram.js';
+import { MixerState } from './mixer.js';
+import { trackRow, wireMuteSolo } from './controls.js';
+import { showToast } from './toast.js';
+import { throttled } from './util.js';
 
 const START_LEAD = 0.06; // keep identical to player.js START_LEAD
 const POLL_MS = 700;
 
+/** Fixed DL stem contract per method (mirrors
+ *  keyprism.dlsep.STEM_SPECS — the frontend never reads Python data).
+ *  The /api/stems response MUST match EXACTLY this list, in this order,
+ *  for every file length. */
 const DL_METHODS = {
   demucs_4: ['drums', 'bass', 'other', 'vocals'],
   demucs_6: ['drums', 'bass', 'other', 'vocals', 'piano', 'guitar'],
@@ -60,6 +91,19 @@ const LANE_META = {
 const PITCH_LO = 21; // A0 — bottom edge of the lane
 const PITCH_HI = 108; // C8 — top edge of the lane
 
+/** Cached peak-envelope resolution: min/max per column, computed once
+ *  per decoded buffer and drawn at any zoom (D2). */
+const ENVELOPE_COLUMNS = 1024;
+
+/** Raised when the lazy (click-time) capabilities check reports the
+ *  Notes feature unavailable; `kind` selects the precise toast. */
+class PolyUnavailable extends Error {
+  constructor(kind) {
+    super(kind);
+    this.kind = kind;
+  }
+}
+
 export function initLanes({ gd, data, player, apiBase }) {
   const toggle = document.getElementById('lanesToggle');
   const panel = document.getElementById('lanesPanel');
@@ -71,21 +115,25 @@ export function initLanes({ gd, data, player, apiBase }) {
   }
 
   const ctx = player.getContext(); // ONE shared AudioContext, one clock
+  const mixer = new MixerState(ctx, (norm, opts) =>
+    player.setMixGain(norm, opts)
+  );
 
   const state = {
     enabled: false,
-    caps: null, // /api/ping capabilities (dl availability)
+    caps: null, // /api/ping capabilities (dl/poly availability)
+    capsReady: null, // promise resolving once caps are known
     loading: false,
     ready: false,
     method: 'demucs_4',
     savedMix: null,
-    lanes: [], // {key, buffer, gain, src, volume, muted, solo, peaks, idx, waveCv, noteCv}
+    rows: [], // {model, row, vol, mute, solo} mirrors for repaint
+    lanes: [], // mixer strips + canvas fields (peaks, idx, waveCv, noteCv)
     view: {
       aMs: EPOCH_MS,
       bMs: EPOCH_MS + Math.round(data.durationSec * 1000),
     },
   };
-  const mixRow = { volume: 1, muted: true, solo: false, slider: null };
 
   // ------------------------------------------------- spatial note index
   function buildNoteIndex(notes) {
@@ -201,6 +249,15 @@ export function initLanes({ gd, data, player, apiBase }) {
     const mid = h / 2;
     g.fillStyle = 'rgba(255,255,255,0.06)';
     g.fillRect(0, mid, w, 1);
+    if (lane.decodeFailed) {
+      // per-lane decode failure: placeholder inside the lane (D2)
+      g.fillStyle = 'rgba(255,255,255,0.4)';
+      g.font = '11px system-ui, sans-serif';
+      g.textAlign = 'center';
+      g.textBaseline = 'middle';
+      g.fillText(t('laneDecodeFailed'), w / 2, mid);
+      return;
+    }
     if (!lane.peaks) return;
     const [aSec, bSec] = viewSec();
     const span = Math.max(bSec - aSec, 1e-6);
@@ -257,10 +314,13 @@ export function initLanes({ gd, data, player, apiBase }) {
   }
 
   // -------------------------------------------------------------- audio
-  function buildPeaks(buffer) {
+  /** Cached peak envelope: min/max per column (~ENVELOPE_COLUMNS),
+   *  computed once per decoded buffer — the waveform canvas paints from
+   *  this at any zoom without re-scanning the PCM (D2). */
+  function buildEnvelope(buffer) {
     const ch = buffer.getChannelData(0);
-    const bucket = 2048;
-    const n = Math.ceil(ch.length / bucket);
+    const n = ENVELOPE_COLUMNS;
+    const bucket = Math.max(1, Math.floor(ch.length / n));
     const min = new Float32Array(n);
     const max = new Float32Array(n);
     for (let b = 0; b < n; b++) {
@@ -279,24 +339,9 @@ export function initLanes({ gd, data, player, apiBase }) {
     return { min, max, bucketSec: bucket / buffer.sampleRate };
   }
 
-  function applyGains() {
-    const anySolo = state.lanes.some((s) => s.solo);
-    for (const s of state.lanes) {
-      const audible = anySolo ? s.solo : !s.muted;
-      s.gain.gain.setTargetAtTime(
-        audible ? s.volume : 0,
-        ctx.currentTime,
-        0.012
-      );
-    }
-    // the Mix lane rides the master gain (the player's own playback)
-    const mixAudible = anySolo ? false : !mixRow.muted;
-    player.setMixGain(mixAudible ? mixRow.volume : 0, { persist: false });
-  }
-
   function startAll(offset, when) {
     stopAll();
-    for (const s of state.lanes) {
+    for (const s of mixer.strips) {
       if (!s.buffer) continue;
       const end = s.buffer.duration - 0.005;
       if (offset >= end) continue;
@@ -310,7 +355,7 @@ export function initLanes({ gd, data, player, apiBase }) {
   }
 
   function stopAll() {
-    for (const s of state.lanes) {
+    for (const s of mixer.strips) {
       if (!s.src) continue;
       s.src.onended = null;
       try {
@@ -329,11 +374,12 @@ export function initLanes({ gd, data, player, apiBase }) {
       startAll(info.offset, info.when);
     } else if (type === 'pause') {
       stopAll();
-    } else if (type === 'mixgain' && mixRow.slider && !mixRow.muted) {
-      mixRow.volume = info.norm;
-      if (document.activeElement !== mixRow.slider) {
-        mixRow.slider.value = String(info.norm);
-        paintFill(mixRow.slider);
+    } else if (type === 'mixgain' && mixer.mix && !mixer.mix.muted) {
+      mixer.mix.volume = info.norm;
+      const volEl = state.rows.find((r) => r.model === mixer.mix)?.vol;
+      if (volEl && document.activeElement !== volEl) {
+        volEl.value = String(info.norm);
+        paintFill(volEl);
       }
     }
   });
@@ -389,109 +435,132 @@ export function initLanes({ gd, data, player, apiBase }) {
     el.style.setProperty('--fill', `${Math.min(Math.max(p, 0), 100)}%`);
   }
 
-  function buildControls(container, model, onVolume) {
-    const vol = document.createElement('input');
-    vol.type = 'range';
-    vol.className = 'stem-vol';
-    vol.min = '0';
-    vol.max = '1';
-    vol.step = '0.01';
-    vol.value = String(model.volume);
-    const mute = document.createElement('button');
-    mute.type = 'button';
-    mute.className = 'stem-btn';
-    mute.textContent = 'M';
-    mute.title = t('mute');
-    mute.setAttribute('aria-label', t('mute'));
-    const solo = document.createElement('button');
-    solo.type = 'button';
-    solo.className = 'stem-btn';
-    solo.textContent = 'S';
-    solo.title = t('solo');
-    solo.setAttribute('aria-label', t('solo'));
-    mute.classList.toggle('active', model.muted);
-    solo.classList.toggle('active', model.solo);
-    mute.addEventListener('click', () => {
-      model.muted = !model.muted;
-      mute.classList.toggle('active', model.muted);
-      applyGains();
-    });
-    solo.addEventListener('click', () => {
-      model.solo = !model.solo;
-      solo.classList.toggle('active', model.solo);
-      applyGains();
-    });
-    vol.addEventListener('input', () => {
-      model.volume = parseFloat(vol.value);
-      paintFill(vol);
-      onVolume();
-    });
-    container.append(vol, mute, solo);
-    paintFill(vol);
+  /** Why a row is currently inaudible (tooltip copy for D6) */
+  function suppressionTip(model, anySolo) {
+    if (anySolo && !model.solo) return t('soloSuppressedTip');
+    return model === mixer.mix ? t('mixerMixDuckedTip') : t('mixerMutedTip');
+  }
+
+  /** Repaint the matrix on the rows: a lane silenced by OTHERS' solo or
+   *  by the anti-clipping mix rule is shown `.dimmed` WITH a tooltip
+   *  explaining why; the M/S buttons keep reflecting the USER's own
+   *  toggle state only. */
+  function paintStates() {
+    const anySolo = mixer.anySolo;
+    for (const { model, row } of state.rows) {
+      const audible =
+        model === mixer.mix ? mixer.mixAudible() : mixer.stripAudible(model);
+      row.classList.toggle('dimmed', !audible);
+      row.title = audible ? '' : suppressionTip(model, anySolo);
+    }
+  }
+  mixer.onRepaint(paintStates);
+
+  /** Notes-button availability (D4/D5): once capabilities are known the
+   *  button is disabled with the precise reason as its tooltip; while
+   *  unknown it stays clickable and the click-time check toasts. */
+  function applyNotesAvailability(lane) {
+    const px = lane.notesBtn;
+    if (!px || !state.caps) return;
+    if (!state.caps.dl) {
+      px.disabled = true;
+      px.title = t('polyNeedsDL');
+    } else if (!state.caps.poly) {
+      px.disabled = true;
+      px.title = t('polyNeedsBP');
+    } else {
+      px.disabled = false;
+      px.title = t('laneNotesTitle');
+    }
+  }
+
+  /** Notes (扒谱) toggle: STRICTLY lazy — the capabilities check runs on
+   *  click, never on panel load; unavailability surfaces as a
+   *  dismissible toast with the precise reason, then the button is
+   *  disabled with the same tooltip. */
+  async function toggleNotes(lane) {
+    const px = lane.notesBtn;
+    if (lane.idx) {
+      lane.idx = null;
+      px.classList.remove('active');
+      drawNotes(lane);
+      return;
+    }
+    px.disabled = true;
+    try {
+      await state.capsReady;
+      if (!state.caps || !state.caps.dl) throw new PolyUnavailable('dl');
+      if (!state.caps.poly) throw new PolyUnavailable('bp');
+      const r = await fetch(
+        `${apiBase}/api/notes?track=${lane.key}&method=poly` +
+          `&source=${state.method}`
+      );
+      const body = await r.json();
+      if (!r.ok || body.error) {
+        throw new Error(body.error || `HTTP ${r.status}`);
+      }
+      lane.idx = buildNoteIndex(body.notes[lane.key] || []);
+      px.classList.add('active');
+      drawNotes(lane);
+    } catch (e) {
+      if (e instanceof PolyUnavailable) {
+        showToast(
+          e.kind === 'dl' ? t('polyNeedsDL') : t('polyNeedsBP')
+        );
+      } else {
+        showToast(t('laneNotesFailed', { msg: e.message }));
+      }
+    } finally {
+      applyNotesAvailability(lane);
+      if (state.caps && state.caps.dl && state.caps.poly) {
+        px.disabled = false;
+      }
+    }
   }
 
   function buildLaneRow(container, lane) {
-    const row = document.createElement('div');
-    row.className = 'lane-row';
-    const head = document.createElement('div');
-    head.className = 'lane-head';
-    const name = document.createElement('span');
-    name.className = 'stem-name';
-    name.textContent = t(lane.labelKey);
-    name.style.setProperty('--stem-color', lane.color);
-    head.appendChild(name);
-    buildControls(head, lane, () => applyGains());
-    // polyphonic notes overlay toggle (Basic Pitch, demucs_6 stems)
+    const parts = trackRow({
+      key: lane.key,
+      labelText: t(lane.labelKey),
+      color: lane.color,
+      withLane: true,
+    });
+    const { row, controls, scope, vol, mute, solo } = parts;
+    wireMuteSolo({
+      model: lane,
+      vol,
+      mute,
+      solo,
+      apply: () => mixer.apply(),
+      paintFill,
+    });
+    state.rows.push({ model: lane, row, vol, mute, solo });
+    // Notes (扒谱): uniform on every poly-eligible lane (D4)
     if (POLY_LANES.has(lane.key)) {
       const px = document.createElement('button');
       px.type = 'button';
       px.className = 'stem-btn lane-notes-btn';
-      px.textContent = 'PX';
+      px.textContent = t('laneNotes');
       px.title = t('laneNotesTitle');
-      px.addEventListener('click', async () => {
-        if (lane.idx) {
-          lane.idx = null;
-          px.classList.remove('active');
-          drawNotes(lane);
-          return;
-        }
-        px.disabled = true;
-        try {
-          const r = await fetch(
-            `${apiBase}/api/notes?track=${lane.key}&method=poly` +
-              `&source=${state.method}`
-          );
-          const body = await r.json();
-          if (!r.ok || body.error) {
-            throw new Error(body.error || `HTTP ${r.status}`);
-          }
-          lane.idx = buildNoteIndex(body.notes[lane.key] || []);
-          px.classList.add('active');
-          drawNotes(lane);
-        } catch (e) {
-          setStatus(t('laneNotesFailed', { msg: e.message }));
-        } finally {
-          px.disabled = false;
-        }
-      });
-      head.appendChild(px);
+      px.addEventListener('click', () => toggleNotes(lane));
+      lane.notesBtn = px;
+      controls.appendChild(px);
+      applyNotesAvailability(lane);
     }
-    const scope = document.createElement('div');
-    scope.className = 'lane-scope';
     const wave = document.createElement('canvas');
     wave.className = 'lane-wave';
-    const notes = document.createElement('canvas');
-    notes.className = 'lane-notes';
-    notes.setAttribute('aria-hidden', 'true');
-    scope.append(wave, notes);
-    row.append(head, scope);
-    container.appendChild(row);
+    const noteCv = document.createElement('canvas');
+    noteCv.className = 'lane-notes';
+    noteCv.setAttribute('aria-hidden', 'true');
+    scope.append(wave, noteCv);
     lane.waveCv = wave;
-    lane.noteCv = notes;
+    lane.noteCv = noteCv;
+    container.appendChild(row);
   }
 
   function renderShell() {
     panel.innerHTML = '';
+    state.rows = [];
     const title = document.createElement('span');
     title.className = 'stems-title';
     title.textContent = t('lanes');
@@ -519,28 +588,43 @@ export function initLanes({ gd, data, player, apiBase }) {
     panel.append(title, methodSel, status);
 
     if (!state.ready) return;
-    // Mix lane: the player's own playback, ridden by the master gain
-    const mixUi = document.createElement('div');
-    mixUi.className = 'lane-row lane-row-mix';
-    const mixHead = document.createElement('div');
-    mixHead.className = 'lane-head';
-    const mixName = document.createElement('span');
-    mixName.className = 'stem-name stem-row-mix';
-    mixName.textContent = t('laneMix');
-    mixHead.appendChild(mixName);
-    buildControls(mixHead, mixRow, () => applyGains());
-    panel.appendChild(mixUi);
-    mixRow.slider = mixUi.querySelector('.stem-vol');
-    mixRow.slider.value = String(player.mixGainNorm());
-    paintFill(mixRow.slider);
+    // Mix lane: the player's own playback, ridden by the master gain.
+    // The scope cell stays empty (no canvas) and keeps the grid aligned.
+    const mix = trackRow({
+      key: 'mix',
+      labelText: t('laneMix'),
+      color: '#ddd6c8',
+      withLane: true,
+    });
+    mix.row.classList.add('lane-row-mix');
+    mix.scope.classList.add('lane-scope-empty');
+    wireMuteSolo({
+      model: mixer.mix,
+      vol: mix.vol,
+      mute: mix.mute,
+      solo: mix.solo,
+      apply: () => mixer.apply(),
+      paintFill,
+    });
+    mix.vol.value = String(player.mixGainNorm());
+    paintFill(mix.vol);
+    panel.append(mix.row);
+    state.rows.push({
+      model: mixer.mix,
+      row: mix.row,
+      vol: mix.vol,
+      mute: mix.mute,
+      solo: mix.solo,
+    });
 
     for (const lane of state.lanes) buildLaneRow(panel, lane);
+    paintStates();
     syncFromPlot(null); // draw into the fresh canvases
   }
 
   function teardownLanes() {
     stopAll();
-    state.lanes.forEach((s) => s.gain.disconnect());
+    mixer.unroute();
     state.lanes = [];
   }
 
@@ -552,36 +636,61 @@ export function initLanes({ gd, data, player, apiBase }) {
     teardownLanes();
     renderShell();
     setStatus(t('lanesSeparating', { pct: 0 }), true);
+    let lanes = [];
     try {
       const list = await requestStems(method);
-      const lanes = [];
+      // Strict DL stem contract: exactly the fixed registry keys, in
+      // order, for every file length — a server that answers
+      // chunk-count-dependent stems fails loudly instead of rendering
+      // mystery lanes
+      const expected = DL_METHODS[method];
+      const keys = (list.stems || []).map((s) => s.key);
+      if (
+        keys.length !== expected.length ||
+        keys.some((k, i) => k !== expected[i])
+      ) {
+        throw new Error(
+          `unexpected stems for ${method}: ${keys.join(', ')}`
+        );
+      }
       for (const item of list.stems) {
-        const buffer = await decodeStem(item.url);
         const meta = LANE_META[item.key] || {};
-        lanes.push({
+        // makeStrip defaults: MUTED (gain 0) — loading lanes never
+        // changes what the user currently hears
+        const lane = mixer.makeStrip(item.key, {
           key: item.key,
           color: meta.color || '#ccc',
           labelKey: meta.labelKey || item.key,
-          buffer,
-          peaks: buildPeaks(buffer),
-          gain: ctx.createGain(),
-          src: null,
-          volume: 1,
-          muted: false,
-          solo: false,
+          peaks: null,
           idx: null,
           waveCv: null,
           noteCv: null,
+          notesBtn: null,
+          decodeFailed: false,
         });
+        lanes.push(lane);
+        try {
+          lane.buffer = await decodeStem(item.url);
+          lane.peaks = buildEnvelope(lane.buffer);
+        } catch {
+          // per-lane tolerance: placeholder inside THIS lane, the rest
+          // of the panel still loads (D2)
+          lane.decodeFailed = true;
+        }
       }
       if (state.method !== method) return; // switched away mid-load
-      lanes.forEach((l) => l.gain.connect(ctx.destination));
-      state.lanes = lanes;
+      mixer.route(lanes); // wire into the master bus only when complete
+      lanes = [];
+      state.lanes = mixer.strips;
       state.ready = true;
-      mixRow.muted = true; // lanes take over the transport's output
-      mixRow.solo = false;
+      // The Mix keeps playing at its current volume; the Mix lane fader
+      // mirrors it (lanes stay muted until the user opens one)
+      mixer.mix.volume = player.mixGainNorm();
+      mixer.mix.muted = false;
+      mixer.mix.solo = false;
       renderShell();
-      applyGains();
+      mixer.apply();
+      drawAll(); // waveforms visible immediately, before Play (D2)
       if (player.isPlaying()) {
         // jump in synced at the current position (short 60 ms handover)
         startAll(player.currentTime(), ctx.currentTime + START_LEAD);
@@ -590,11 +699,14 @@ export function initLanes({ gd, data, player, apiBase }) {
     } catch (e) {
       if (state.method === method) {
         state.ready = false;
-        teardownLanes();
+        stopAll();
+        state.lanes = [];
         renderShell();
         setStatus(t('lanesFailed', { msg: e.message }));
       }
     } finally {
+      // a failed/partial load leaves no gain nodes wired anywhere
+      lanes.forEach((l) => l.gain.disconnect());
       state.loading = false;
     }
   }
@@ -612,34 +724,39 @@ export function initLanes({ gd, data, player, apiBase }) {
     state.ready = false;
     state.loading = false;
     panel.hidden = true;
+    mixer.mix.solo = false;
     // hand the output back to the mix at the pre-enable volume
-    mixRow.muted = true;
     if (state.savedMix !== null) {
       player.setMixGain(state.savedMix, { persist: true });
     }
+    mixer.mix.volume = state.savedMix ?? mixer.mix.volume;
+    mixer.mix.muted = false;
   }
 
   toggle.addEventListener('click', (ev) => {
     const btn = ev.target.closest('button[data-lanes]');
     if (!btn || btn.disabled) return;
     const want = btn.dataset.lanes === 'on';
+    const turning = (want && !state.enabled) || (!want && state.enabled);
+    if (!turning) return;
+    if (want && state.caps && !state.caps.dl) {
+      // DL extra missing: do NOT flip the toggle — a visually "On"
+      // button over an empty panel read as an unresponsive switch
+      setStatus(t('lanesNeedDL'));
+      return;
+    }
     toggle
       .querySelectorAll('button')
       .forEach((b) => b.classList.toggle('active', b === btn));
-    if (want && !state.enabled) {
-      if (state.caps && !state.caps.dl) {
-        setStatus(t('lanesNeedDL'));
-        return;
-      }
-      enable();
-    } else if (!want && state.enabled) {
-      disable();
-    }
+    if (want) enable();
+    else disable();
   });
 
-  // ---- capabilities: hide the Demucs options when the [dl] extra is
-  // not installed (graceful degradation contract)
-  (async () => {
+  // ---- capabilities: resolved ONCE and exposed as a promise so the
+  // Notes click can await it lazily (never auto-triggering transcription
+  // on panel load); the toggle gets the remedy tooltip when DL is
+  // missing and existing Notes buttons get their precise state.
+  state.capsReady = (async () => {
     try {
       const r = await fetch(`${apiBase}/api/ping`);
       const body = await r.json();
@@ -647,12 +764,17 @@ export function initLanes({ gd, data, player, apiBase }) {
     } catch {
       state.caps = { dl: false, poly: false };
     }
+    if (state.caps && !state.caps.dl) {
+      const onBtn = toggle.querySelector('button[data-lanes="on"]');
+      if (onBtn) onBtn.title = t('lanesNeedDL');
+    }
+    for (const lane of state.lanes) applyNotesAvailability(lane);
     if (state.enabled) renderShell();
   })();
 
   // ---- keep the lanes glued to the main spectrogram's time axis ----
   gd.on('plotly_relayout', syncFromPlot);
-  new ResizeObserver(scheduleDraw).observe(panel);
+  new ResizeObserver(throttled(() => scheduleDraw())).observe(panel);
 
   // Live language switch: rebuild the panel (state is kept in models)
   onChange(() => {

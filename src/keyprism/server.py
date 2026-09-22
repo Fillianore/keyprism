@@ -10,9 +10,11 @@ The only module coupled to stdlib httpd:
                            stem, Phase 3)
 - GET  /api/midi?track=    the monophonic notes exported as a Standard MIDI File
 - GET  /api/stems?method=  classic stems (hpss/rpca/combined) computed
-                           synchronously; DL stems (demucs_4/demucs_6)
-                           served from their cache, &progress=1 polls
-- POST /api/stems?method=demucs_4|demucs_6
+                           synchronously; DL stems (demucs|demucs_4|
+                           demucs_6) served from their cache, &progress=1
+                           polls; the stems list is always the FIXED
+                           per-method registry (never file-dependent)
+- POST /api/stems?method=demucs|demucs_4|demucs_6
                            start DL separation as a background task;
                            returns {"task_id", "status_url"} (501 without
                            the optional [dl] dependencies)
@@ -52,6 +54,15 @@ POLY_AVAILABLE = poly_transcribe.BP_AVAILABLE
 
 _DL_NOT_INSTALLED = ("未安装 DL 依赖: 请执行 uv sync --extra dl "
                      "(需要 onnxruntime / basic-pitch)")
+
+#: Query alias: "demucs" always means the canonical 4-stem variant (the
+#: frontend only ever sends the explicit names; the alias exists so a
+#: manual/older client cannot get an ambiguous answer)
+_DL_METHOD_ALIAS = {"demucs": "demucs_4"}
+
+
+def _norm_method(method: str) -> str:
+    return _DL_METHOD_ALIAS.get(method, method)
 
 
 def make_server(path: Path, port: int, host: str, start: float,
@@ -272,13 +283,18 @@ def make_server(path: Path, port: int, host: str, start: float,
                     body["error"] = task["error"]
             self._json(200, body)
 
-        def _dl_stems_urls(self, method: str, status: dict) -> list:
+        def _stem_urls(self, method: str, keys) -> list:
+            """Canonical /api/stems entry list: exactly one URL per
+            registered stem key, in registry order."""
             return [
                 {"key": key,
                  "url": f"{self._api_base()}/api/stem?method={method}"
                         f"&name={urllib.parse.quote(key)}"}
-                for key in status.get("stems", [])
+                for key in keys
             ]
+
+        def _dl_stems_urls(self, method: str, status: dict) -> list:
+            return self._stem_urls(method, dlsep.STEM_SPECS[method])
 
         def _stems_dl_get(self, u, method: str):
             """GET /api/stems?method=demucs_4|demucs_6: serve the DL
@@ -340,18 +356,29 @@ def make_server(path: Path, port: int, host: str, start: float,
                 self._json(500, {"error": str(e)})
 
         def _stems(self, u):
-            """GET /api/stems?method=hpss|rpca|combined[&progress=1]
+            """GET /api/stems?method=hpss|rpca|combined|demucs[&_4|_6]
+            [&progress=1]
 
             Computes (or serves from the entry cache) the separated stems
             of the current track and returns their download URLs; with
             ``progress=1`` returns immediately with the live progress of a
-            running computation instead of blocking on it."""
+            running computation instead of blocking on it.
+
+            Contract: the ``stems`` list is derived from the FIXED
+            per-method registry (stems.STEM_SPECS / dlsep.STEM_SPECS) —
+            exactly hpss=['harmonic','percussive'],
+            rpca=['lowrank','sparse'], combined=['harmonic','percussive'],
+            demucs_4=['drums','bass','other','vocals'],
+            demucs_6=[... 6 keys]. The list NEVER depends on file length
+            or chunking; a status.json that disagrees with the registry is
+            treated as a cache miss by the compute layer and rewritten."""
             cur = state["cur"]
             if cur is None:
                 self._json(409, {"error": "暂无已加载的曲目"})
                 return
             q = urllib.parse.parse_qs(u.query)
-            method = (q.get("method", ["combined"])[0] or "combined").strip()
+            method = _norm_method(
+                (q.get("method", ["combined"])[0] or "combined").strip())
             if method in dlsep.DL_METHODS:
                 self._stems_dl_get(u, method)
                 return
@@ -384,16 +411,11 @@ def make_server(path: Path, port: int, host: str, start: float,
                 "elapsed_sec": status.get("elapsed_sec"),
                 "duration": status.get("duration"),
                 "sample_rate": status.get("sr"),
-                "stems": [
-                    {"key": key,
-                     "url": f"{self._api_base()}/api/stem?method={method}"
-                            f"&name={urllib.parse.quote(key)}"}
-                    for key in status.get("stems", [])
-                ],
+                "stems": self._stem_urls(method, stems.STEM_SPECS[method]),
             })
 
         def _start_dl_stems(self, u):
-            """POST /api/stems?method=demucs_4|demucs_6: start DL
+            """POST /api/stems?method=demucs|demucs_4|demucs_6: start DL
             separation as a background task (501 without the optional
             [dl] dependencies, 200 with the cached list when already
             computed)."""
@@ -405,7 +427,7 @@ def make_server(path: Path, port: int, host: str, start: float,
                 self._json(409, {"error": "暂无已加载的曲目"})
                 return
             q = urllib.parse.parse_qs(u.query)
-            method = (q.get("method", [""])[0] or "").strip()
+            method = _norm_method((q.get("method", [""])[0] or "").strip())
             if method not in dlsep.DL_METHODS:
                 self._json(400, {
                     "error": f"未知 DL 分离方法: {method} "
@@ -457,7 +479,7 @@ def make_server(path: Path, port: int, host: str, start: float,
                 self._json(409, {"error": "暂无已加载的曲目"})
                 return
             q = urllib.parse.parse_qs(u.query)
-            method = (q.get("method", [""])[0] or "").strip()
+            method = _norm_method((q.get("method", [""])[0] or "").strip())
             name = (q.get("name", [""])[0] or "").strip()
             is_dl = method in dlsep.DL_METHODS
             specs = dlsep.STEM_SPECS if is_dl else stems.STEM_SPECS

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "keyprism"
-version = "0.5.0"
+version = "0.6.0"
 description = "KeyPrism — piano-key spectrogram player: resolve audio into a semitone-grid spectrum with synced interactive playback"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -25,10 +25,14 @@ eval = [
     "mir_eval>=0.8",
 ]
 # Deep-learning separation/transcription (Phase 3): strictly optional —
-# the app degrades to the Phase 2 pipeline (API answers 501) when absent
+# the app degrades to the Phase 2 pipeline (API answers 501) when absent.
+# basic-pitch pins tensorflow<2.15, which ships no CPython 3.12 wheels, so
+# it only installs on 3.10/3.11; on 3.12 the Demucs stack (onnxruntime +
+# huggingface-hub) still installs and poly transcription (Basic Pitch)
+# degrades to 501 — the designed graceful degradation.
 dl = [
     "onnxruntime>=1.17",
-    "basic-pitch>=0.4.0",
+    "basic-pitch>=0.4.0; python_version < '3.12'",
     "huggingface-hub>=0.23",
 ]
 
