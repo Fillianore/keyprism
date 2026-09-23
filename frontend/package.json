@@ -9,7 +9,9 @@
     "preview": "vite preview",
     "check:i18n": "node scripts/check-i18n.mjs",
     "test:mixer": "node scripts/test-mixer.mjs",
-    "test": "npm run check:i18n && npm run test:mixer"
+    "test:geometry": "node scripts/test-geometry.mjs",
+    "test:intensity": "node scripts/test-intensity.mjs",
+    "test": "npm run check:i18n && npm run test:mixer && npm run test:geometry && npm run test:intensity"
   },
   "dependencies": {
     "plotly.js-dist-min": "^2.35.2"

@@ -40,6 +40,24 @@
   --panel: var(--panel-mid);
   --border: #2c2b2e;
   --accent: var(--gold);
+
+  /* ---------- Shared plot geometry (Phase 3.9) ----------
+     The master spectrogram plot area and EVERY lane canvas plot area use
+     IDENTICAL left/right pixel boundaries (a drum hit lands on the same
+     vertical line in both). --plot-left / --plot-right are overwritten at
+     runtime from the exported JS consts in src/geometry.js (single source
+     of truth); the lane grid below is DERIVED from them, so the 1fr scope
+     column — the lane canvas — starts at PLOT_LEFT_PX and ends at
+     W - PLOT_RIGHT_PX by construction. plot-left = 16+96+8+152+8 = 280px. */
+  --panel-pad: 16px;
+  --lane-label-w: 96px;
+  --lane-ctl-w: 152px;
+  --lane-gap: 8px;
+  --plot-left: calc(
+    var(--panel-pad) + var(--lane-label-w) + var(--lane-gap) +
+    var(--lane-ctl-w) + var(--lane-gap)
+  );
+  --plot-right: var(--panel-pad);
 }
 
 html,
@@ -667,16 +685,19 @@ input[type='range']:active::-moz-range-thumb {
  *  lanes (Mix + Demucs stems). Phase 3.7 compact grid: [label 96px]
  *  [controls 152px][lane 1fr], column-gap 8px, 80 px rows — the label
  *  and the M/S keys sit one tight line apart instead of the old
- *  140/200 px columns that left a wide dead gap. Each lane is a
- *  waveform canvas with a dedicated notes-overlay canvas absolutely
- *  positioned on top (notes are NEVER layout.shapes: 6 poly tracks
- *  would melt SVG). Canvases are redrawn from the main chart's
- *  xaxis.range on plotly_relayout ---------- */
+ *  140/200 px columns that left a wide dead gap. Phase 3.9: the grid is
+ *  DERIVED from the shared plot geometry vars (--plot-left /
+ *  --plot-right, written from geometry.js) so every lane canvas plot
+ *  area spans EXACTLY the master spectrogram's plot-area pixel
+ *  boundaries. Each lane is a waveform canvas with a dedicated
+ *  notes-overlay canvas absolutely positioned on top (notes are NEVER
+ *  layout.shapes: 6 poly tracks would melt SVG). Canvases are redrawn
+ *  from the main chart's xaxis.range on plotly_relayout ---------- */
 .lanes-panel {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 6px 16px 8px;
+  padding: 6px var(--plot-right, 16px) 8px var(--panel-pad, 16px);
   background: linear-gradient(180deg, #101014, #0d0d10);
   border-top: 1px solid var(--edge-lo);
   box-shadow: inset 0 1px 0 var(--edge-hi);
@@ -690,9 +711,12 @@ input[type='range']:active::-moz-range-thumb {
 
 .lane-row {
   display: grid;
-  grid-template-columns: 96px 152px 1fr;
+  grid-template-columns:
+    calc(var(--plot-left, 280px) - var(--panel-pad, 16px) -
+      var(--lane-gap, 8px) - var(--lane-ctl-w, 152px) - var(--lane-gap, 8px))
+    var(--lane-ctl-w, 152px) 1fr;
   align-items: center;
-  column-gap: 8px;
+  column-gap: var(--lane-gap, 8px);
   height: 80px;
 }
 
@@ -718,8 +742,11 @@ input[type='range']:active::-moz-range-thumb {
   position: relative;
   height: 100%;
   min-height: 56px;
-  border: 1px solid #232329;
+  /* Phase 3.9: an inset box-shadow instead of a real border — a border
+     would shrink the canvas box by 1px per side and break the exact
+     pixel-boundary alignment with the master plot area */
   border-radius: 6px;
+  box-shadow: inset 0 0 0 1px #232329;
   background:
     repeating-linear-gradient(
       90deg,
@@ -741,6 +768,25 @@ input[type='range']:active::-moz-range-thumb {
 
 .lane-notes {
   pointer-events: none; /* clicks fall through to the waveform */
+}
+
+/* Phase 3.9 lane playhead: one gold hairline per lane, moved by the master
+   cursor's own repaint path (player.onFrame) — single time source, zero
+   drift, and playback never repaints a lane canvas. */
+.lane-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 2px;
+  margin-left: -1px; /* center the 2px line on the sample column */
+  background: linear-gradient(180deg, #f4e2b0, #d8b26a);
+  box-shadow:
+    0 0 6px rgba(230, 201, 138, 0.75),
+    0 0 2px rgba(0, 0, 0, 0.7);
+  pointer-events: none;
+  z-index: 1;
+  will-change: transform;
 }
 
 /* ---------- Stem player panel (Phase 2): bottom strip between the plot
@@ -875,6 +921,289 @@ input[type='range']:active::-moz-range-thumb {
 .lane-notes-btn:disabled {
   cursor: default;
   opacity: 0.55;
+}
+
+/* Phase 3.9 [Wave|Spec] per-lane view toggle: mini segmented control
+   overlaid on the scope, right of the layer drag handle */
+.lane-view-toggle {
+  position: absolute;
+  top: 4px;
+  left: 26px;
+  z-index: 2;
+  display: inline-flex;
+  background: rgba(13, 13, 16, 0.85);
+  border: 1px solid #2c2c33;
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.lane-view-toggle button {
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 9px;
+  letter-spacing: 0.4px;
+  line-height: 1.4;
+  padding: 1px 7px;
+  cursor: pointer;
+  transition: color var(--t), background var(--t);
+}
+
+.lane-view-toggle button:hover {
+  color: var(--ivory);
+}
+
+.lane-view-toggle button.active {
+  background: linear-gradient(180deg, #eeda9e, #d3ad66 55%, #b98f47);
+  color: #241c0e;
+  font-weight: 700;
+}
+
+/* Phase 3.9 M2 drag handle ("⧉ layer"): chip on the scope's top-left;
+   dragging it onto the master spectrogram creates an overlay layer */
+.lane-layer-handle {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  z-index: 2;
+  height: 20px;
+  width: 20px;
+  padding: 0;
+  font-size: 11px;
+  cursor: grab;
+  touch-action: none;
+}
+
+.lane-layer-handle:active {
+  cursor: grabbing;
+}
+
+/* ---------- Layer compositor (Phase 3.9 M2) ----------
+   The stack container covers EXACTLY the master plot area (geometry.js
+   consts) and pins each overlay canvas to it. Deliberately NO z-index on
+   the container: a z-index'd container would form a stacking context and
+   then mix-blend-mode on the canvases could only blend against the stack,
+   never against the heatmap painted beneath it. With a z-auto container
+   the z-indexed, blend-mode'd canvases blend against the full backdrop
+   (the base spectrogram) and stack among themselves by DOM order.
+   pointer-events off: zoom/pan/hover/click-seek fall through to the
+   plot. The playhead stays a separate DOM layer above the layers
+   (playback never repaints overlays); the manager panel is the only
+   interactive part. */
+.layer-stack {
+  position: absolute;
+  pointer-events: none;
+}
+
+.layer-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  z-index: 3;
+}
+
+/* drop affordance while a lane handle is dragged over the plot */
+#plot-wrap.drop-ok::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border: 1px dashed var(--gold);
+  background: rgba(216, 178, 106, 0.06);
+  pointer-events: none;
+  z-index: 4;
+}
+
+.layer-drag-ghost {
+  position: fixed;
+  z-index: 90;
+  padding: 3px 10px;
+  font-size: 12px;
+  color: var(--ivory);
+  background: linear-gradient(180deg, #26262c, #17171b);
+  border: 1px solid var(--layer-color, var(--gold-line));
+  border-radius: 8px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.layer-drag-ghost.drop-ok {
+  border-color: var(--gold);
+  color: var(--gold-hi);
+  box-shadow:
+    0 6px 18px rgba(0, 0, 0, 0.55),
+    0 0 10px var(--gold-glow);
+}
+
+/* Manager: top-right of the master, below the plotly modebar */
+.layer-manager {
+  position: absolute;
+  top: 44px;
+  right: 8px;
+  z-index: 6;
+  width: 300px;
+  max-height: calc(100% - 60px);
+  overflow-y: auto;
+  padding: 6px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0) 40%),
+    linear-gradient(180deg, rgba(23, 23, 28, 0.96), rgba(13, 13, 16, 0.96));
+  border: 1px solid #302f33;
+  border-radius: 8px;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.55);
+  font-size: 11px;
+  color: var(--text);
+  user-select: none;
+}
+
+.layer-manager-title {
+  color: var(--ivory);
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  padding: 2px 4px 6px;
+}
+
+.layer-manager-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* one layer = two lines: [grip dot name blend opacity eye x] and the
+   INTENSITY line [dB slider γ slider] — visually separate from opacity */
+.layer-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 3px 4px;
+  background: rgba(10, 10, 13, 0.6);
+  border: 1px solid #26262c;
+  border-radius: 6px;
+}
+
+.layer-row-top {
+  display: grid;
+  grid-template-columns: 18px 10px 44px 64px 54px 18px 18px;
+  align-items: center;
+  gap: 4px;
+}
+
+.layer-row-fx {
+  display: grid;
+  grid-template-columns: 14px 1fr 26px 10px 1fr 26px;
+  align-items: center;
+  gap: 3px;
+  border-top: 1px dotted rgba(152, 145, 127, 0.25);
+  padding-top: 2px;
+}
+
+.fx-lab {
+  color: var(--muted);
+  font-size: 9px;
+  text-align: center;
+  line-height: 1;
+}
+
+.fx-val {
+  color: var(--text);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.layer-row .layer-fx-slider {
+  width: 100%;
+  min-width: 0;
+  height: 14px;
+}
+
+.layer-row.hidden-layer .layer-name {
+  opacity: 0.45;
+}
+
+.layer-grip {
+  cursor: grab;
+  color: var(--muted);
+  background: none;
+  border: 0;
+  padding: 0;
+  font-size: 12px;
+  touch-action: none;
+}
+
+.layer-grip:hover {
+  color: var(--ivory);
+}
+
+.layer-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  background: var(--layer-color, var(--gold));
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
+}
+
+.layer-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.layer-blend {
+  display: inline-flex;
+  border: 1px solid #2c2c33;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.layer-blend button {
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 9px;
+  padding: 1px 5px;
+  cursor: pointer;
+}
+
+.layer-blend button.active {
+  background: linear-gradient(180deg, #eeda9e, #d3ad66 55%, #b98f47);
+  color: #241c0e;
+  font-weight: 700;
+}
+
+.layer-row .layer-op {
+  width: 58px;
+  min-width: 0;
+}
+
+.layer-row input[type='range'] {
+  height: 14px;
+}
+
+.layer-eye,
+.layer-x {
+  background: none;
+  border: 0;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.layer-eye:hover,
+.layer-x:hover {
+  color: var(--gold-hi);
+}
+
+.layer-eye.off {
+  opacity: 0.5;
 }
 
 .stem-vol::-webkit-slider-runnable-track {

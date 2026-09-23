@@ -60,6 +60,32 @@
  *  - note drawing uses a SPATIAL INDEX (starts sorted ascending +
  *    binary search bounded by the longest note) so a zoom only touches
  *    the visible window's notes, never the whole track.
+ *
+ *  Phase 3.9 lane visualization engine:
+ *  - SHARED PLOT GEOMETRY (geometry.js): the master spectrogram's plot
+ *    area and every lane canvas span the identical pixel boundaries
+ *    [PLOT_LEFT_PX, W - PLOT_RIGHT_PX] — the lane grid columns are
+ *    derived from the same CSS custom properties the master margins are
+ *    written from, so a drum hit lands on the same vertical line in
+ *    both. Lanes redraw from the master's plotly_relayout with the same
+ *    time→pixel mapping (xOf below);
+ *  - lane PLAYHEADS are thin DOM hairlines (same technique as the
+ *    master cursor), moved by the master cursor's own repaint path via
+ *    player.onFrame — ONE time source (ctx.currentTime), zero drift,
+ *    and playback never repaints a single canvas pixel;
+ *  - HIGH-RES WAVEFORMS (LOD): the cached full-track envelope stays for
+ *    the overview; when the visible window is <= LOD_SPAN_SEC the
+ *    per-pixel-column min/max are computed ON DEMAND from the stem PCM
+ *    inside a Web Worker (wavelod.js — the main thread never scans
+ *    samples), cached per [lane, view window, column count] with a
+ *    small FIFO bound, and painted pixel-sharp. The worker owns one
+ *    transferred mono copy per lane, so zoom/pan requests ship only the
+ *    view window;
+ *  - [WAVE|SPEC] per-lane toggle (Phase 3.9): the lane canvas flips to a
+ *    mini-spectrogram served by GET /api/stem_spec (the Phase 0 semitone
+ *    aggregate of the stem, the SAME row space as the master heatmap),
+ *    fetched lazily on first click (Notes-chip discipline) through the
+ *    shared stemspec.js cache; a failure toasts and degrades to Wave.
  */
 
 import { t, onChange } from './i18n.js';
@@ -67,10 +93,23 @@ import { EPOCH_MS, pMs } from './spectrogram.js';
 import { MixerState, bufferPeak, makeupDb } from './mixer.js';
 import { trackRow, wireMuteSolo } from './controls.js';
 import { showToast } from './toast.js';
+import { WaveLod } from './wavelod.js';
+import { getStemSpec, createSpecImage } from './stemspec.js';
 import { throttled } from './util.js';
 
 const START_LEAD = 0.06; // keep identical to player.js START_LEAD
 const POLL_MS = 700;
+
+/** LOD waveforms (Phase 3.9): windows at or below this span switch from
+ *  the ~1024-column overview envelope to per-pixel-column min/max
+ *  computed in the worker. */
+const LOD_SPAN_SEC = 10;
+
+/** Per-lane LOD cache bound (FIFO): keys are [aMs|bMs|columns]; a pan,
+ *  zoom or resize allocates a new entry, so the bound keeps memory flat
+ *  while covering ordinary browsing. The cache dies with the lane object
+ *  (method switch / track switch re-decode). */
+const LOD_CACHE_MAX = 8;
 
 /** Fixed DL stem contract per method (mirrors
  *  keyprism.dlsep.STEM_SPECS — the frontend never reads Python data).
@@ -112,7 +151,7 @@ class PolyUnavailable extends Error {
   }
 }
 
-export function initLanes({ gd, data, player, apiBase }) {
+export function initLanes({ gd, data, player, apiBase, layers }) {
   const toggle = document.getElementById('lanesToggle');
   const panel = document.getElementById('lanesPanel');
   if (!toggle || !panel) return {};
@@ -126,6 +165,9 @@ export function initLanes({ gd, data, player, apiBase }) {
   const mixer = new MixerState(ctx, (norm, opts) =>
     player.setMixGain(norm, opts)
   );
+  // One shared LOD worker for every lane (module worker; sync fallback
+  // inside WaveLod when Workers are unavailable)
+  const lod = new WaveLod();
 
   const state = {
     enabled: false,
@@ -191,6 +233,31 @@ export function initLanes({ gd, data, player, apiBase }) {
     return ((EPOCH_MS + tSec * 1000 - aMs) / (bMs - aMs)) * w;
   }
 
+  /** Lane playheads (Phase 3.9): one thin DOM hairline per lane, moved by
+   *  the master cursor's own repaint path (player.onFrame -> reposition
+   *  runs in the playback rAF loop AND on every seek/relayout/resize).
+   *  Same clock (player.currentTime -> ctx.currentTime), same view range
+   *  and same time→pixel mapping as the waveform canvases — the playhead
+   *  is in lockstep with the master cursor by construction, and playback
+   *  never repaints a canvas. */
+  function updatePlayheads() {
+    if (!state.enabled || !state.ready) return;
+    const t = player.currentTime();
+    for (const lane of state.lanes) {
+      const ph = lane.phEl;
+      if (!ph || !ph.parentElement) continue;
+      const w = ph.parentElement.clientWidth;
+      if (!w) continue;
+      const x = xOf(t, state.view.aMs, state.view.bMs, w);
+      if (x < -1 || x > w + 1) {
+        ph.style.display = 'none';
+      } else {
+        ph.style.display = 'block';
+        ph.style.transform = `translateX(${x.toFixed(1)}px)`;
+      }
+    }
+  }
+
   /** Canvas backing store sized for the device pixels; the 2D context
    *  transform (ctx.setTransform = scale+translate) is the whole
    *  zoom/pan sync — data coords are mapped per draw from the applied
@@ -228,6 +295,9 @@ export function initLanes({ gd, data, player, apiBase }) {
     state.view.aMs = pMs(r[0]);
     state.view.bMs = pMs(r[1]);
     scheduleDraw();
+    // the view moved under the playhead: re-pin it against the fresh
+    // range immediately (player's own relayout handler may not have run yet)
+    updatePlayheads();
   }
 
   let drawRaf = 0;
@@ -242,9 +312,51 @@ export function initLanes({ gd, data, player, apiBase }) {
   function drawAll() {
     if (!state.enabled) return;
     for (const lane of state.lanes) {
-      drawWave(lane);
+      // [Wave|Spec] per-lane view (Phase 3.9); notes always overlay
+      if ((lane.view || 'wave') === 'spec') drawSpec(lane);
+      else drawWave(lane);
       drawNotes(lane);
     }
+  }
+
+  /** LOD lookup/refresh for the current view (Phase 3.9). Returns the
+   *  cached per-column {min,max} for this exact [window, column count],
+   *  or null while nothing is ready — the draw then falls back to the
+   *  overview envelope and the worker reply repaints when it lands.
+   *  Cache key = exact view window + column count: any pan, zoom or
+   *  resize gets its own entry (invalidation by construction), bounded
+   *  by LOD_CACHE_MAX FIFO. */
+  function laneLod(lane, w) {
+    if (!lane.buffer || w < 32) return null;
+    const [aSec, bSec] = viewSec();
+    if (bSec - aSec > LOD_SPAN_SEC) return null;
+    const key = `${state.view.aMs}|${state.view.bMs}|${w}`;
+    const hit = lane.lodCache && lane.lodCache.get(key);
+    if (hit) return hit;
+    if (lane.lodPending) return null; // one request in flight per lane
+    if (!lane.lodCache) lane.lodCache = new Map();
+    if (!lane.lodUp) {
+      // hand the worker a zero-copy mono transfer once; in sync-fallback
+      // mode uploadPcm returns false and a main-thread copy is kept
+      lane.lodUp = true;
+      lane.lodId = `${state.method}/${lane.key}`;
+      if (!lod.uploadPcm(lane.lodId, lane.buffer.getChannelData(0))) {
+        lane.pcmMono = new Float32Array(lane.buffer.getChannelData(0));
+      }
+    }
+    lane.lodPending = key;
+    lod
+      .compute(lane.lodId, lane.pcmMono, lane.buffer.sampleRate, w, aSec, bSec)
+      .then((res) => {
+        lane.lodPending = null;
+        if (!res) return;
+        if (lane.lodCache.size >= LOD_CACHE_MAX) {
+          lane.lodCache.delete(lane.lodCache.keys().next().value);
+        }
+        lane.lodCache.set(key, res);
+        scheduleDraw(); // repaint pixel-sharp
+      });
+    return null;
   }
 
   function drawWave(lane) {
@@ -266,11 +378,8 @@ export function initLanes({ gd, data, player, apiBase }) {
       g.fillText(t('laneDecodeFailed'), w / 2, mid);
       return;
     }
-    if (!lane.peaks) return;
     const [aSec, bSec] = viewSec();
     const span = Math.max(bSec - aSec, 1e-6);
-    const p = lane.peaks;
-    const nB = p.max.length;
     // auto-scale (I2 visuals): normalize to THIS lane's own peak so
     // quiet stems render visible waveforms instead of flat lines
     const k = lane.peak > 1e-6 ? 1 / lane.peak : 0;
@@ -281,26 +390,42 @@ export function initLanes({ gd, data, player, apiBase }) {
       lane.color,
       mixer.stripAudible(lane) ? 1 : 0.35
     );
-    for (let px = 0; px < w; px++) {
-      const ta = aSec + (px / w) * span;
-      const tb = aSec + ((px + 1) / w) * span;
-      // bucketSec lives on the envelope (lane.peaks), not the lane —
-      // reading lane.bucketSec yielded undefined -> NaN indexes -> the
-      // loop skipped every column and lanes rendered black (3.8 D1)
-      let i0 = Math.floor(ta / p.bucketSec);
-      let i1 = Math.max(i0 + 1, Math.ceil(tb / p.bucketSec));
-      i0 = Math.max(0, Math.min(nB, i0));
-      i1 = Math.max(0, Math.min(nB, i1));
-      let lo = 0;
-      let hi = 0;
-      for (let i = i0; i < i1; i++) {
-        if (p.min[i] < lo) lo = p.min[i];
-        if (p.max[i] > hi) hi = p.max[i];
+    const lodHit = laneLod(lane, w); // may kick off an async compute
+    if (lodHit) {
+      // pixel-sharp path: one min/max pair per canvas column, straight
+      // from the worker's answer
+      for (let px = 0; px < w; px++) {
+        const hi = clamp(lodHit.max[px]);
+        const lo = clamp(lodHit.min[px]);
+        if (hi <= 0 && lo >= 0) continue;
+        const y0 = mid - hi * (mid * 0.92);
+        const y1 = mid - lo * (mid * 0.92);
+        g.fillRect(px, y0, 1, Math.max(1, y1 - y0));
       }
-      if (hi <= 0 && lo >= 0) continue;
-      const y0 = mid - clamp(hi) * (mid * 0.92);
-      const y1 = mid - clamp(lo) * (mid * 0.92);
-      g.fillRect(px, y0, 1, Math.max(1, y1 - y0));
+    } else if (lane.peaks) {
+      const p = lane.peaks;
+      const nB = p.max.length;
+      for (let px = 0; px < w; px++) {
+        const ta = aSec + (px / w) * span;
+        const tb = aSec + ((px + 1) / w) * span;
+        // bucketSec lives on the envelope (lane.peaks), not the lane —
+        // reading lane.bucketSec yielded undefined -> NaN indexes -> the
+        // loop skipped every column and lanes rendered black (3.8 D1)
+        let i0 = Math.floor(ta / p.bucketSec);
+        let i1 = Math.max(i0 + 1, Math.ceil(tb / p.bucketSec));
+        i0 = Math.max(0, Math.min(nB, i0));
+        i1 = Math.max(0, Math.min(nB, i1));
+        let lo = 0;
+        let hi = 0;
+        for (let i = i0; i < i1; i++) {
+          if (p.min[i] < lo) lo = p.min[i];
+          if (p.max[i] > hi) hi = p.max[i];
+        }
+        if (hi <= 0 && lo >= 0) continue;
+        const y0 = mid - clamp(hi) * (mid * 0.92);
+        const y1 = mid - clamp(lo) * (mid * 0.92);
+        g.fillRect(px, y0, 1, Math.max(1, y1 - y0));
+      }
     }
     if (lane.peak > 1e-6) {
       // tiny peak-dB label: what the auto-scale factor is compensating
@@ -315,6 +440,117 @@ export function initLanes({ gd, data, player, apiBase }) {
         6,
         4
       );
+    }
+  }
+
+  /** Lane mini-spectrogram (Phase 3.9 [Wave|Spec] toggle): paints the
+   *  server-computed quantized semitone matrix (the same Phase 0 row
+   *  space as the master heatmap) from the shared offscreen image. The
+   *  x mapping is column = time / hopSec against the SAME shared view
+   *  range; y spans the full A0..C8 lane pitch space like the notes
+   *  overlay. Muting dims it like the waveform (silence never hides). */
+  function drawSpec(lane) {
+    const cv = lane.waveCv;
+    if (!cv || !cv.clientWidth) return;
+    const g = fitCanvas(cv);
+    const w = cv.clientWidth;
+    const h = cv.clientHeight;
+    g.clearRect(0, 0, w, h);
+    if (lane.specState !== 'ready' || !lane.specImg) {
+      // transient loading placeholder; a failure reverts the lane to Wave
+      // (with a toast) before the next paint
+      g.fillStyle = 'rgba(255,255,255,0.35)';
+      g.font = '11px system-ui, sans-serif';
+      g.textAlign = 'center';
+      g.textBaseline = 'middle';
+      g.fillText(t('laneSpecLoading'), w / 2, h / 2);
+      return;
+    }
+    const { cv: img, hopSec } = lane.specImg;
+    const [aSec, bSec] = viewSec();
+    // column c covers [c*hopSec, (c+1)*hopSec); map the view window onto
+    // source columns (out-of-range source is clipped transparent by
+    // drawImage, matching the waveform's blank margins)
+    const sx = aSec / hopSec;
+    const sw = Math.max(1e-6, (bSec - aSec) / hopSec);
+    g.globalAlpha = mixer.stripAudible(lane) ? 1 : 0.35;
+    g.imageSmoothingEnabled = false; // honest cells, like the master heatmap
+    g.drawImage(img, sx, 0, sw, img.height, 0, 0, w, h);
+    g.globalAlpha = 1;
+  }
+
+  /** Fetch + decode the stem spec once per lane (shared module cache in
+   *  stemspec.js makes repeat lanes/layers free; the master payload's
+   *  dbRange is asserted so lane/overlay views share the master's dB
+   *  basis — 3.9.1 C). A failure toasts the precise reason and degrades
+   *  the lane back to Wave. */
+  async function ensureSpec(lane) {
+    if (lane.specState === 'loading' || lane.specState === 'ready') return;
+    lane.specState = 'loading';
+    scheduleDraw(); // show the loading placeholder
+    try {
+      const spec = await getStemSpec(apiBase, state.method, lane.key, {
+        dbRange: data.dbRange,
+      });
+      lane.specImg = createSpecImage(spec, lane.color);
+      lane.specState = 'ready';
+    } catch (e) {
+      lane.specState = 'failed';
+      lane.specErr = e?.message || String(e);
+      showToast(t('laneSpecFailed', { msg: lane.specErr }));
+      lane.view = 'wave';
+      paintViewToggle(lane);
+    }
+    scheduleDraw();
+  }
+
+  /** [Wave|Spec] segmented control, overlaid top-left on the scope (the
+   *  Notes chip owns the top-right corner). Spec is lazy: nothing is
+   *  fetched until the first click (same discipline as the Notes chip). */
+  function buildViewToggle(lane, scope) {
+    const seg = document.createElement('div');
+    seg.className = 'lane-view-toggle';
+    seg.title = t('laneSpecTip');
+    lane.viewBtns = {};
+    for (const mode of ['wave', 'spec']) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = t(mode === 'wave' ? 'laneWave' : 'laneSpec');
+      b.addEventListener('click', () => {
+        if (lane.view === mode) return;
+        lane.view = mode;
+        paintViewToggle(lane);
+        if (mode === 'spec') ensureSpec(lane);
+        else scheduleDraw();
+      });
+      lane.viewBtns[mode] = b;
+      seg.appendChild(b);
+    }
+    scope.appendChild(seg);
+    paintViewToggle(lane);
+    // Phase 3.9 M2: drag handle ("⧉ layer") — dragging it onto the master
+    // spectrogram creates an overlay layer of this stem's spectrogram
+    // (layers.js). The method is stamped at drag time so the layer keeps
+    // serving the right stem even after a method switch.
+    if (layers && layers.beginLaneDrag) {
+      const handle = document.createElement('button');
+      handle.type = 'button';
+      handle.className = 'lane-layer-handle';
+      handle.textContent = '⧉';
+      handle.title = t('layerHandleTip');
+      handle.addEventListener('pointerdown', (ev) => {
+        ev.preventDefault();
+        lane.method = state.method;
+        layers.beginLaneDrag(lane, ev);
+      });
+      scope.appendChild(handle);
+    }
+  }
+
+  function paintViewToggle(lane) {
+    if (!lane.viewBtns) return;
+    for (const [mode, b] of Object.entries(lane.viewBtns)) {
+      b.classList.toggle('active', (lane.view || 'wave') === mode);
     }
   }
 
@@ -596,7 +832,15 @@ export function initLanes({ gd, data, player, apiBase }) {
     const noteCv = document.createElement('canvas');
     noteCv.className = 'lane-notes';
     noteCv.setAttribute('aria-hidden', 'true');
-    scope.append(wave, noteCv);
+    // Phase 3.9: per-lane playhead hairline (DOM, above the canvases)
+    const phEl = document.createElement('div');
+    phEl.className = 'lane-playhead';
+    phEl.setAttribute('aria-hidden', 'true');
+    scope.append(wave, noteCv, phEl);
+    lane.phEl = phEl;
+    // Phase 3.9: [Wave|Spec] toggle (view state lives on the lane model
+    // so a language-switch renderShell keeps the user's choice)
+    buildViewToggle(lane, scope);
     // Notes (扒谱): uniform on every poly-eligible lane (D4); a compact
     // chip overlaid on the lane's own scope — the controls cell stays
     // one tidy [fader M S] line at the fixed grid widths
@@ -686,6 +930,7 @@ export function initLanes({ gd, data, player, apiBase }) {
 
   function teardownLanes() {
     stopAll();
+    lod.forgetAll(); // drop the worker-side PCM copies of the old lanes
     mixer.unroute();
     state.lanes = [];
   }
@@ -734,6 +979,15 @@ export function initLanes({ gd, data, player, apiBase }) {
           waveCv: null,
           noteCv: null,
           notesBtn: null,
+          phEl: null,
+          lodCache: null, // [view window|columns] -> per-column min/max
+          lodPending: null,
+          lodUp: false,
+          lodId: null,
+          pcmMono: null, // sync-fallback copy (only when Workers are gone)
+          view: 'wave', // [Wave|Spec] per-lane view
+          specState: null, // null | loading | ready | failed
+          specImg: null,
           decodeFailed: false,
         });
         lanes.push(lane);
@@ -765,6 +1019,7 @@ export function initLanes({ gd, data, player, apiBase }) {
       renderShell();
       mixer.apply();
       drawAll(); // waveforms visible immediately, before Play (D2)
+      updatePlayheads(); // pin the lane playheads to the current position
       if (player.isPlaying()) {
         // jump in synced at the current position (short 60 ms handover)
         startAll(player.currentTime(), ctx.currentTime + START_LEAD);
@@ -869,6 +1124,8 @@ export function initLanes({ gd, data, player, apiBase }) {
 
   // ---- keep the lanes glued to the main spectrogram's time axis ----
   gd.on('plotly_relayout', syncFromPlot);
+  // lane playheads ride the master cursor's frame loop (single time source)
+  player.onFrame(updatePlayheads);
   new ResizeObserver(throttled(() => scheduleDraw())).observe(panel);
 
   // Live language switch: rebuild the panel (state is kept in models)

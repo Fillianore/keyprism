@@ -4,6 +4,7 @@ import {
   buildFigure,
   applyPitchRange,
   applyGrid,
+  applyPlotShapes,
   setSub,
   applyHoverLang,
   EPOCH_MS,
@@ -15,6 +16,7 @@ import { createPlayer } from './player.js';
 import { createSpecFeed } from './specfeed.js';
 import { initNotes } from './notes.js';
 import { initStems } from './stems.js';
+import { initLayers } from './layers.js';
 import { initLanes } from './lanes.js';
 import { throttled } from './util.js';
 import { t, onChange } from './i18n.js';
@@ -152,6 +154,20 @@ async function main() {
     apiBase: data.apiBase,
   });
 
+  // ---- Layer compositor (Phase 3.9 M2): drag a lane onto the master
+  // spectrogram to overlay that stem's spectrogram (mix-blend-mode
+  // screen/normal, per-layer opacity/visibility/z-order). Initialized
+  // BEFORE the lanes panel so it can receive the lanes' drag handles.
+  // It reads the live sub/pitch-range state to map overlay rows onto the
+  // master heatmap's y range. ----
+  const layers = initLayers({
+    gd,
+    data,
+    apiBase: data.apiBase,
+    getSub: () => curSub,
+    getPitchLoHi: () => pitchLoHi,
+  });
+
   // ---- Multi-lane DL workspace (Demucs stems + polyphonic notes,
   // Phase 3): same shared AudioContext; canvas rendering synced to the
   // main chart's xaxis range ----
@@ -160,6 +176,7 @@ async function main() {
     data,
     player,
     apiBase: data.apiBase,
+    layers,
   });
 
   // ---- Top bar: channel switch (mix/left/right) ----
@@ -475,6 +492,10 @@ async function main() {
   let resizeT = 0;
   new ResizeObserver(() => {
     sync();
+    // Phase 3.9: the keyboard strip is pinned to fixed pixel geometry, but
+    // plotly shapes are fractional — after a paper-width change one cheap
+    // shapes-only relayout re-pins it (see applyPlotShapes)
+    applyPlotShapes(gd);
     // Row pooling budget follows the plot height: rebuild the rows when it
     // changed enough to move the pooling factor (debounced)
     clearTimeout(resizeT);

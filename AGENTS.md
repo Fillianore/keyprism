@@ -10,7 +10,8 @@
 
 ```
 src/keyprism/cli.py       CLI entry (thin shell, only argparse and dispatch)
-src/keyprism/server.py    HTTP service: ping / spec / notes / midi / stems / upload
+src/keyprism/server.py    HTTP service: ping / spec / notes / midi / stems /
+                          stem_spec / upload
                           ← the only module coupled to stdlib httpd
 src/keyprism/analyze.py   staged analysis orchestrator (decode→stft→aggregate→payload)
                           + content-addressed analysis disk cache
@@ -382,6 +383,91 @@ Decisions that are easy to "simplify" into regressions:
 - **Capabilities drive the UI.** `/api/ping` returns
   `capabilities.dl/poly/dl_methods`; `lanes.js` hides/disables the Demucs
   options from it. Keep the flag → UI path intact when touching ping.
+
+## Lane Visualization Engine & Layer Compositor (Phase 3.9)
+
+Decisions that are easy to "simplify" into regressions:
+
+- **Shared plot geometry is a hard contract** (`frontend/src/geometry.js`).
+  `PLOT_LEFT_PX`/`PLOT_RIGHT_PX` are the single source: the master figure
+  runs fixed pixel margins + full-domain x axis (`margin.autoexpand`
+  off — nothing may grow the margins), and the lane grid columns are
+  DERIVED in style.css from the same `--plot-left`/`--plot-right` custom
+  properties, so every lane canvas spans exactly the master plot area's
+  [left, right] pixels. That is what makes a drum hit land on the same
+  vertical line in master + lanes + overlay layers. Consequences: do not
+  add plot margins/domain fractions anywhere, do not give `.lane-scope` a
+  real border (it is an inset box-shadow precisely so the canvas box
+  stays exact), and the keyboard strip paper fractions must be re-pinned
+  on resize (`applyPlotShapes` in the main.js resize observer).
+- **plotly 'paper' coordinates span the PLOTTING AREA INSIDE the margins**
+  (3.9.1 root cause): the margin zone [0, PLOT_LEFT_PX) is NEGATIVE paper
+  territory. The keyboard strip ([40, PLOT_LEFT_PX−4], hugging the plot
+  edge) and the pitch labels (left-anchored ANNOTATIONS at ~10px — plotly
+  tick labels cannot leave the axis edge) both live there; the plot area
+  contains only spectrum. Rebuild both together wherever
+  `currentShapes()` is relayouted (buildFigure / applyPitchRange /
+  applyPlotShapes); annotation y stays in data coords so setSub moves it
+  automatically.
+- **Pitch→pixel mapping has ONE definition** (`geometry.js`
+  `keyRangeUnits` / `rowCenterUnit` / `unitToPlotFraction`, 3.9.1 D).
+  The master yaxis range and the overlay band mapping both derive from
+  it — do not re-derive `m*sub + (sub-1)/2` in another module. The
+  ≤1 px overlay-vs-master row alignment is locked by
+  `npm run test:geometry` (pure-Node, geometry.js is DOM-import-safe by
+  a guard, wired into CI).
+- **Lane playheads ride the master cursor's frame loop**
+  (`player.onFrame`, fired from `reposition()` — the same function the
+  playback rAF loop and every seek/relayout call repaint through). One
+  time source (`ctx.currentTime`), zero drift, and playback never
+  repaints a lane canvas: the playhead is a DOM hairline with a
+  composited transform, like the master cursor.
+- **LOD waveforms never scan samples on the main thread** (`wavelod.js` +
+  `wave-worker.js`). At view windows ≤ `LOD_SPAN_SEC` (10 s) the lane
+  paints per-pixel-column min/max computed in the worker; the worker owns
+  ONE transferred mono PCM copy per lane (the AudioBuffer keeps its own
+  data for playback) so pan/zoom requests ship only the view window.
+  Results cache per [lane, exact view window, column count] — any pan,
+  zoom or resize allocates a new key (invalidation by construction), FIFO
+  bounded, and the cache dies with the lane object on method/track
+  switches (`lod.forgetAll()` drops the worker-side PCM). While a compute
+  is in flight the overview envelope keeps painting — never blank.
+- **`/api/stem_spec` reuses the Phase 0 row space** (`payload.
+  stem_spec_payload` → `spec_matrix`, sub=1 → 88 semitone rows). That row
+  identity is what makes lane mini-spectrograms and overlay layers line
+  up with the master heatmap's y axis — do not "fix" it to linear Hz
+  bands. Normalization basis (3.9.1 C): the MASTER's mix joint peak
+  (`payload.joint_spec_peak` — the exact value data.json is quantized
+  against, computed once per track in `server._master_peak`), NOT the
+  stem's own peak; the response carries `peak_ref` + `basis` and the
+  frontend asserts the master's `dbRange`. Disk cache is
+  `spec_<stem>.json` inside the version-tagged stems dir — cached bodies
+  must carry the `basis` tag, so pre-3.9.1 own-peak caches recompute
+  without touching the WAVs (bumping `STEMS_VERSION`/`DL_STEMS_VERSION`
+  would needlessly invalidate the stems themselves); compute needs only
+  the cached WAV (no onnxruntime) and 404s with the compute hint when
+  separation has not run.
+- **Overlay layers blend with CSS, not pixels** (`frontend/src/layers.js`).
+  叠加 = `mix-blend-mode: screen` + per-layer opacity (dark spec pixels
+  are no-ops under screen); 覆盖 = `normal` + opacity 1 (the spec image
+  is opaque by construction, so it occludes the base). The `.layer-stack`
+  container must stay z-auto: a z-indexed container would form a stacking
+  context and then the canvases could only blend against the stack, never
+  against the heatmap painted beneath it (the canvases carry the
+  z-index themselves). Layer y-mapping follows the master's LIVE
+  sub/pitch-range state (`getSub`/`getPitchLoHi` getters in main.js)
+  through the shared `unitToPlotFraction` — semitone m spans row units
+  [m·sub−0.5, (m+1)·sub−0.5] in [lo·sub−0.5, (hi+1)·sub−0.5]. Per-layer
+  INTENSITY (3.9.1 B) is separate from opacity: `gain_dB` shifts the dB
+  matrix and `gamma` re-shapes the colormap input (`stemspec.js
+  intensityValue`, master color-floor/γ semantics) — opacity only
+  alpha-mixes the result. γ DIRECTION (3.9.1 fix): the master warps
+  colorscale ANCHORS by p^γ, which equals warping the data by v^(1/γ) —
+  so the layer applies v^(1/γ) and a BIGGER γ reads BRIGHTER, matching
+  the master's slider; the naive v^γ inverts it (locked by
+  `npm run test:intensity`, wired into CI). Overlays redraw ONLY on
+  view-range/geometry change (throttled) — never per frame; the playhead
+  lives on its own DOM layer above the stack so playback is free.
 
 ## Known Boundaries & Pitfalls (must read before changing)
 
