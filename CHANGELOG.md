@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-09-23
+
 ### Added
 
 - Phase 3.9 — lane visualization engine + layer compositor (M1/M2):
