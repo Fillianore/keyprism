@@ -271,6 +271,154 @@ def test_pad_segment_short_tail():
     assert valid3 == 0 and z.shape == (1000,)
 
 
+# ------------------------------------------------- 6-stem contract (3.10)
+
+def test_demucs_6_registry_matches_reference_export():
+    """3.10: demucs_6 resolves to the REAL 6-stem Hub export
+    (StemSplitio/htdemucs-6s-onnx — the 3.5 "none exists" conclusion was
+    wrong) and the registry mirrors its source order
+    drums/bass/other/vocals/guitar/piano, guitar BEFORE piano: the
+    separator zips model output rows with this list positionally."""
+    assert dlsep.STEM_SPECS["demucs_6"] == \
+        ("drums", "bass", "other", "vocals", "guitar", "piano")
+    spec = dlsep._VARIANTS["demucs_6"]
+    assert spec["repo"] == "StemSplitio/htdemucs-6s-onnx"
+    assert spec["file"] == "htdemucs_6s.onnx"
+    # provenance facts for the 3.11 license audit (weights stay on the
+    # Hub, never in-repo)
+    assert spec["license"] == "mit"
+    assert "StemSplitio/htdemucs-6s-onnx" in spec["license_url"]
+
+
+def test_demucs_6_separate_returns_six_registry_stems():
+    """Injected 6-row infer -> separate() keys EXACTLY the demucs_6
+    registry in order (guitar before piano)."""
+    sr = dlsep.TARGET_SR
+
+    def infer(chunk):
+        return np.stack([chunk * (i + 1) / 6.0 for i in range(6)])
+
+    out = dlsep.DemucsSeparator("demucs_6", infer=infer).separate(
+        np.zeros(int(3.0 * sr), dtype=np.float32), sr,
+        chunk_sec=1.0, overlap_sec=0.1)
+    assert list(out) == ["drums", "bass", "other", "vocals",
+                         "guitar", "piano"]
+    assert len(out) == 6
+
+
+class _FakeSession:
+    """The slice of ort.InferenceSession that _run_session/_session_io
+    use: one 'mix' [1, 2, T] input and a fixed-stem-count output."""
+
+    class _In:
+        name = "mix"
+        shape = [1, 2, "T"]
+
+    def __init__(self, stems, fail=False):
+        self._stems = stems
+        self._fail = fail
+
+    def get_inputs(self):
+        return [self._In()]
+
+    def run(self, out_names, feed):
+        if self._fail:
+            raise RuntimeError(
+                "[ONNXRuntimeError] Pad reflect pad width > input dim")
+        t = list(feed.values())[0]
+        return [np.zeros((1, self._stems, 2, t.shape[-1]),
+                         dtype=np.float32)]
+
+
+def test_zero_probe_fails_fast_on_mislabeled_export():
+    """The zero-probe contract check (segment length + stem count) is
+    kept at session load: a mislabelled 6-stem export (the smank
+    htdemucs_6s actually ships 4 sources) fails immediately with an
+    actionable message instead of failing a 40 s background job."""
+    sep = dlsep.DemucsSeparator(
+        "demucs_6", infer=lambda c: np.zeros((6, c.shape[0]),
+                                             dtype=np.float32))
+    sep._io = ("mix", 2)
+    sep._segment = dlsep.SEGMENT_SAMPLES
+
+    sep._session = _FakeSession(stems=4)  # mislabelled export
+    with pytest.raises(ValueError, match="4 个 stem"):
+        sep._probe()
+
+    sep._session = _FakeSession(stems=6, fail=True)  # wrong segment
+    with pytest.raises(ValueError, match="固定分段"):
+        sep._probe()
+
+    sep._session = _FakeSession(stems=6)  # correct export: probe passes
+    sep._probe()
+
+
+def test_demucs6_download_records_provenance(tmp_path, monkeypatch):
+    """Auto-download of the 6-stem model records provenance (repo id,
+    revision, commit, etag, license URL) into the model-cache metadata —
+    the 3.11 license audit reads this, and no weights land in-repo."""
+    monkeypatch.setattr(audio_io, "KEYPRISM_HOME", tmp_path / "home")
+    monkeypatch.setattr(dlsep, "HF_AVAILABLE", True)
+    monkeypatch.delenv("HF_ENDPOINT", raising=False)
+    monkeypatch.delenv("KEYPRISM_DEMUCS6_REPO", raising=False)
+    seen = {}
+
+    def fake_download_to(url, dest, progress=None, urlopen=None, meta=None):
+        seen["url"] = url
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"FAKEONNX")
+        if meta is not None:
+            meta["etag"] = '"abc123"'
+            meta["commit"] = "49df9b6989cf2150840ea65b0bef77a2e471b678"
+        return dest
+
+    monkeypatch.setattr(dlsep, "_download_to", fake_download_to)
+    sep = dlsep.DemucsSeparator("demucs_6", infer=lambda c: c)
+    p = sep._resolve_model_file()
+    assert p.name == "htdemucs_6s.onnx"
+    assert seen["url"] == (
+        "https://huggingface.co/StemSplitio/htdemucs-6s-onnx/resolve/main/"
+        "htdemucs_6s.onnx")
+
+    body = json.loads(
+        (tmp_path / "home" / "models" / "demucs" / "provenance.json")
+        .read_text(encoding="utf-8"))
+    entry = body["htdemucs_6s.onnx"]
+    assert entry["variant"] == "demucs_6"
+    assert entry["repo"] == "StemSplitio/htdemucs-6s-onnx"
+    assert entry["revision"] == "main"
+    assert entry["commit"] == "49df9b6989cf2150840ea65b0bef77a2e471b678"
+    assert entry["license"] == "mit"
+    assert "StemSplitio/htdemucs-6s-onnx" in entry["license_url"]
+    assert entry["source"] == "auto-download"
+    assert "/StemSplitio/htdemucs-6s-onnx/resolve/main/" in entry["source_url"]
+    assert entry["bytes"] == 8
+
+    # resolving the cached file again preserves the original download
+    # facts (etag/commit/source_url) and only refreshes the timestamp
+    sep._resolve_model_file()
+    body = json.loads(
+        (tmp_path / "home" / "models" / "demucs" / "provenance.json")
+        .read_text(encoding="utf-8"))
+    again = body["htdemucs_6s.onnx"]
+    assert again["source"] == "cache"
+    assert again["commit"] == entry["commit"]
+    assert again["etag"] == entry["etag"]
+    assert again["source_url"] == entry["source_url"]
+
+
+def test_lanes_demucs_6_six_lane_contract():
+    """Frontend source contract: demucs_6 renders SIX lanes (registry
+    mirror in export source order) and the poly Notes chip stays on the
+    poly-capable lanes (piano/guitar/other)."""
+    lanes = strip_js_comments(
+        (FRONTEND / "lanes.js").read_text(encoding="utf-8"))
+    assert "'drums', 'bass', 'other', 'vocals', 'guitar', 'piano'" in lanes
+    assert "POLY_LANES.has(lane.key)" in lanes
+    # one lane row per registry stem (the render loop is registry-driven)
+    assert "for (const lane of state.lanes) buildLaneRow" in lanes
+
+
 # ------------------------------------------------- model download (3.8)
 
 class _FakeResp:

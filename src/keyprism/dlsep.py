@@ -38,15 +38,22 @@ Model discovery (``~/.keyprism/models/demucs/``, relocatable via
 ``KEYPRISM_DEMUCS6_FILE`` path wins, then the spec'd file name, then any
 ``*.onnx`` already in the model dir, and only then is the model
 auto-downloaded from the (env-overridable) Hugging Face repo of the
-variant spec. The download streams to ``<file>.part`` with a byte
-progress callback ``(bytes_done, bytes_total, speed_mbps)`` — the
-server pipes it into the background-task registry so the UI can show
-"downloading x.x / y.y MB" — and only ``os.replace``s the ``.part``
-file into place when complete, so an interrupted download can never
-leave a corrupt cache entry. ``HF_ENDPOINT`` relocates the endpoint
-(mirror networks); any Demucs ONNX export with a ``(1, C, T)`` float
-input and stems output is accepted; the I/O adapter normalizes 3D/4D,
-batched or listed outputs to ``(n_stems, T)`` mono.
+variant spec. The demucs_6 default repo is ``StemSplitio/htdemucs-6s-onnx``
+(the first real 6-stem ONNX export on the Hub — the 3.5 conclusion that
+none existed was wrong; its output order is
+``drums/bass/other/vocals/guitar/piano``, which
+:data:`STEM_SPECS` mirrors). The download streams to ``<file>.part``
+with a byte progress callback ``(bytes_done, bytes_total,
+speed_mbps)`` — the server pipes it into the background-task registry
+so the UI can show "downloading x.x / y.y MB" — and only ``os.replace``s
+the ``.part`` file into place when complete, so an interrupted download
+can never leave a corrupt cache entry. ``HF_ENDPOINT`` relocates the
+endpoint (mirror networks). Every resolved model file gets a
+provenance entry (repo id, revision, commit, license URL) merged into
+``<model_dir>/provenance.json`` for the license audit — weights are
+NEVER redistributed in-repo. Any Demucs ONNX export with a ``(1, C, T)``
+float input and stems output is accepted; the I/O adapter normalizes
+3D/4D, batched or listed outputs to ``(n_stems, T)`` mono.
 """
 
 import json
@@ -96,11 +103,18 @@ DL_STEMS_VERSION = "dl_v1"
 #: Query values accepted by /api/stems for DL separation.
 DL_METHODS = ("demucs_4", "demucs_6")
 
-#: method -> stem keys in canonical (htdemucs) order; the file names
-#: under <entry>/stems/<DL_STEMS_VERSION>/<method>/.
+#: method -> stem keys in the CANONICAL OUTPUT ORDER of the reference
+#: ONNX exports (the separator zips model output rows with this list, so
+#: the order must match the graph's source order, not a UI preference):
+#: StemSplitio/htdemucs-6s-onnx emits
+#: ``drums/bass/other/vocals/guitar/piano`` (guitar BEFORE piano — 3.5
+#: shipped the reversed order against the mislabelled smank export and
+#: never got past the zero-probe, so no valid demucs_6 cache can exist).
+#: These names are also the file names under
+#: <entry>/stems/<DL_STEMS_VERSION>/<method>/.
 STEM_SPECS = {
     "demucs_4": ("drums", "bass", "other", "vocals"),
-    "demucs_6": ("drums", "bass", "other", "vocals", "piano", "guitar"),
+    "demucs_6": ("drums", "bass", "other", "vocals", "guitar", "piano"),
 }
 
 #: Demucs models are trained at 44.1 kHz; input is resampled, stems are
@@ -121,22 +135,32 @@ TARGET_SR = 44100
 SEGMENT_SEC = 7.8
 SEGMENT_SAMPLES = 343980
 
-#: Variant specs: Hugging Face repo + file for the auto-download path.
-#: Both are env-overridable (KEYPRISM_DEMUCS4_REPO/_FILE and the 6-stem
-#: twins) because ONNX exports of htdemucs/htdemucs_6s are community
-#: artifacts; any compatible export can be dropped into the model dir.
-#: Graph contract of the default repo: input ``mix [1, 2, T]`` float32,
-#: single output ``sources [1, n_stems, 2, T]`` (STFT/iSTFT embedded,
-#: opset 17) — exactly what ``_normalize_output`` accepts. The previous
-#: default (Xenova/htdemucs-onnx) no longer exists on the Hub.
+#: Variant specs: Hugging Face repo + file for the auto-download path,
+#: plus the license pointer recorded into the model-cache provenance
+#: metadata (the 3.11 license audit; weights are never redistributed
+#: in-repo). Repos are env-overridable (KEYPRISM_DEMUCS4_REPO/_FILE and
+#: the 6-stem twins) because ONNX exports of htdemucs/htdemucs_6s are
+#: community artifacts; any compatible export can be dropped into the
+#: model dir. Graph contract of the default repos: input
+#: ``mix [1, 2, T]`` float32, single output ``sources|stems
+#: [1, n_stems, 2, T]`` (STFT/iSTFT embedded, opset 17) — exactly what
+#: ``_normalize_output`` accepts. The previous 4-stem default
+#: (Xenova/htdemucs-onnx) no longer exists on the Hub; the previous
+#: 6-stem default (smank's ``htdemucs_6s.onnx``) actually shipped 4
+#: sources and was replaced in 3.10 by the real 6-stem export.
 _VARIANTS = {
     "demucs_4": {
         "repo": "smank/htdemucs-onnx",
         "file": "htdemucs.onnx",
+        "license": "unknown (community export; see repo)",
+        "license_url": "https://huggingface.co/smank/htdemucs-onnx/blob/main/LICENSE",
     },
     "demucs_6": {
-        "repo": "smank/htdemucs-onnx",
+        "repo": "StemSplitio/htdemucs-6s-onnx",
         "file": "htdemucs_6s.onnx",
+        "license": "mit",
+        "license_url":
+            "https://huggingface.co/StemSplitio/htdemucs-6s-onnx/blob/main/LICENSE",
     },
 }
 
@@ -159,7 +183,7 @@ def _hf_endpoint() -> str:
 
 
 def _download_to(url: str, dest: Path, progress=None,
-                 urlopen=None) -> Path:
+                 urlopen=None, meta: dict | None = None) -> Path:
     """Stream ``url`` to ``dest`` via a ``<dest>.part`` temp file.
 
     Byte progress is reported as ``progress(bytes_done, bytes_total,
@@ -170,7 +194,10 @@ def _download_to(url: str, dest: Path, progress=None,
     removes the partial file and can never poison the model cache with
     a truncated ONNX. ``urlopen`` is the injection seam for tests (same
     pattern as ``infer=``); the real path uses stdlib urllib, keeping
-    the downloader dependency-free."""
+    the downloader dependency-free. When ``meta`` is given, the
+    response's provenance headers (``ETag``, ``X-Repo-Commit`` — both
+    set by the HF resolve endpoint) are recorded into it for the model
+    provenance metadata."""
     opener = urlopen or urllib.request.urlopen
     part = dest.with_name(dest.name + ".part")
     part.parent.mkdir(parents=True, exist_ok=True)
@@ -182,6 +209,12 @@ def _download_to(url: str, dest: Path, progress=None,
     try:
         with opener(req, timeout=30) as resp, open(part, "wb") as f:
             total = int(resp.headers.get("Content-Length") or 0)
+            if meta is not None:
+                for h in ("ETag", "X-Repo-Commit"):
+                    v = resp.headers.get(h)
+                    if v:
+                        meta[{"ETag": "etag",
+                              "X-Repo-Commit": "commit"}[h]] = v
             done = 0
             while True:
                 chunk = resp.read(1 << 20)
@@ -199,12 +232,79 @@ def _download_to(url: str, dest: Path, progress=None,
                     last_t, last_done = now, done
                     progress(done, total, speed)
         os.replace(part, dest)  # atomic: dest is never partial
+        if meta is not None:
+            meta["bytes"] = done
         if progress is not None:  # final 100% sample
             progress(done, total, speed)
     except BaseException:
         part.unlink(missing_ok=True)
         raise
     return dest
+
+
+def _provenance_path(model_file: Path) -> Path:
+    """Model-cache provenance metadata: ONE ``provenance.json`` in the
+    model dir, keyed by file name (the 3.11 license audit reads repo id,
+    revision, commit and license URL from here — the weights themselves
+    are never redistributed in-repo)."""
+    return model_file.parent / "provenance.json"
+
+
+def _record_provenance(model_file: Path, *, variant: str,
+                       repo: str | None, revision: str,
+                       license_name: str | None, license_url: str | None,
+                       source: str, source_url: str | None = None,
+                       meta: dict | None = None) -> None:
+    """Merge one entry into ``provenance.json`` (atomic write, never
+    fatal: provenance bookkeeping must not break model resolution).
+
+    ``source`` distinguishes how the file arrived: ``auto-download``,
+    ``cache`` (previously downloaded, resolved from the variant spec's
+    path — the original download facts are preserved and only the
+    recorded_at timestamp refreshes), ``env:<VAR>`` (explicit override
+    path) or ``model-dir glob`` (an anonymous local ONNX picked up by
+    the fallback; repo facts are unknown there)."""
+    path = _provenance_path(model_file)
+    try:
+        body = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(body, dict):
+            body = {}
+    except (OSError, ValueError):
+        body = {}
+    entry = {
+        "variant": variant,
+        "repo": repo,
+        "revision": revision,
+        "file": model_file.name,
+        "license": license_name,
+        "license_url": license_url,
+        "source": source,
+        "bytes": int(model_file.stat().st_size),
+        "recorded_at": datetime.now(timezone.utc).isoformat(
+            timespec="seconds"),
+    }
+    if source_url:
+        entry["source_url"] = source_url
+    if meta:
+        for k in ("etag", "commit"):
+            if meta.get(k):
+                entry[k] = meta[k]
+    if source == "cache":
+        prev = body.get(model_file.name)
+        if isinstance(prev, dict):
+            # keep the ORIGINAL download facts (etag/commit/source_url);
+            # only prove the file was re-resolved under this variant
+            entry.update({k: prev[k] for k in
+                          ("etag", "commit", "source_url", "downloaded_at")
+                          if prev.get(k)})
+    body[model_file.name] = entry
+    try:
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(body, ensure_ascii=False, indent=2),
+                       encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        pass  # read-only workspace etc. — provenance is best-effort
 
 
 # ----------------------------------------------------------- chunk math
@@ -366,20 +466,46 @@ class DemucsSeparator:
         suffix = "4" if self.variant == "demucs_4" else "6"
         return os.environ.get(f"KEYPRISM_DEMUCS{suffix}_{key}", "").strip()
 
+    def _record(self, path: Path, *, source: str, spec: dict | None = None,
+                repo: str | None = None, source_url: str | None = None,
+                meta: dict | None = None) -> None:
+        """Provenance bookkeeping for one resolved model file (never
+        fatal — a read-only workspace must still separate)."""
+        if spec is None:
+            license_name = license_url = None
+        else:
+            license_name = spec.get("license")
+            license_url = spec.get("license_url")
+        try:
+            _record_provenance(
+                path, variant=self.variant, repo=repo, revision="main",
+                license_name=license_name, license_url=license_url,
+                source=source, source_url=source_url, meta=meta)
+        except OSError:
+            pass
+
     def _resolve_model_file(self, download_progress=None) -> Path:
         d = model_dir()
+        spec = _VARIANTS[self.variant]
         explicit = self._env("FILE")
         if explicit:
             p = Path(explicit).expanduser()
             if p.is_file():
+                self._record(p, source=f"env:KEYPRISM_DEMUCS"
+                                       f"{'4' if self.variant == 'demucs_4' else '6'}"
+                                       f"_FILE", spec=spec,
+                             repo=self._env("REPO") or None)
                 return p
-        spec = _VARIANTS[self.variant]
         p = d / spec["file"]
         if p.is_file():
+            # previously downloaded (or hand-placed at the spec'd name):
+            # provenance merges into the original download entry
+            self._record(p, source="cache", spec=spec, repo=spec["repo"])
             return p
         if d.is_dir():
             onnx = sorted(d.glob("*.onnx"))
             if onnx:
+                self._record(onnx[0], source="model-dir glob")
                 return onnx[0]
         # last resort: auto-download from the variant's HF repo (streamed
         # with byte progress into the task registry, 3.8 D3)
@@ -389,13 +515,17 @@ class DemucsSeparator:
                 f"{d} 或安装 DL 依赖 (uv sync --extra dl)")
         repo = self._env("REPO") or spec["repo"]
         url = f"{_hf_endpoint()}/{repo}/resolve/main/{spec['file']}"
+        meta: dict = {}
         try:
-            return _download_to(url, d / spec["file"],
-                                progress=download_progress)
+            dest = _download_to(url, d / spec["file"],
+                                progress=download_progress, meta=meta)
         except Exception as e:  # noqa: BLE001 - network/404/... all degrade
             raise DLMissingError(
                 f"Demucs 模型下载失败 ({repo}/{spec['file']}): {e}; "
                 f"可手动放置 ONNX 模型到 {d}") from e
+        self._record(dest, source="auto-download", spec=spec, repo=repo,
+                     source_url=url, meta=meta)
+        return dest
 
     # -- inference ---------------------------------------------------------
 

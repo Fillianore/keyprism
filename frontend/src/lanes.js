@@ -114,10 +114,12 @@ const LOD_CACHE_MAX = 8;
 /** Fixed DL stem contract per method (mirrors
  *  keyprism.dlsep.STEM_SPECS — the frontend never reads Python data).
  *  The /api/stems response MUST match EXACTLY this list, in this order,
- *  for every file length. */
+ *  for every file length. demucs_6 order = the reference export's
+ *  source order (drums/bass/other/vocals/guitar/piano — guitar BEFORE
+ *  piano, StemSplitio/htdemucs-6s-onnx). */
 const DL_METHODS = {
   demucs_4: ['drums', 'bass', 'other', 'vocals'],
-  demucs_6: ['drums', 'bass', 'other', 'vocals', 'piano', 'guitar'],
+  demucs_6: ['drums', 'bass', 'other', 'vocals', 'guitar', 'piano'],
 };
 
 // demucs_6 stems eligible for polyphonic transcription (mirrors
