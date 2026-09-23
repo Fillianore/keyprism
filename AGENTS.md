@@ -346,17 +346,30 @@ Decisions that are easy to "simplify" into regressions:
   license URL) for the license audit — weights are NEVER redistributed
   in-repo, and a repo swap must keep that metadata flowing.
 - **ORT execution providers are probed, not hardcoded**
-  (3.10 `dlsep.provider_chain`): CUDA → DirectML → CoreML → CPU,
-  intersected with `ort.get_available_providers()`;
+  (3.10 `dlsep.provider_chain`): CUDA → DirectML → CoreML, intersected
+  with `ort.get_available_providers()`, with `CPUExecutionProvider`
+  ALWAYS appended last (3.10.2: ops without a GPU kernel then run on
+  CPU instead of failing the session);
   `KEYPRISM_ORT_PROVIDERS="CUDA,CPU"` (comma list, order = preference)
   overrides. Plain `[dl]` stays CPU-only; `[dl-cuda]` /
   `[dl-directml]` add the GPU builds, and a missing/broken GPU extra
-  is a SILENT CPU fallback (session load even retries CPU-only when a
-  compiled-in EP fails at creation) — never a crash, never a 500.
+  is a SILENT CPU fallback (session load retries CPU-only when a
+  compiled-in EP fails at creation, and a `session.run()` failure —
+  CUDA error 9 / NOT_IMPLEMENTED on a node without a kernel, surfaces
+  only at FIRST INFERENCE — evicts the cached session and retries once
+  pure-CPU) — never a crash, never a 500.
   What `/api/ping` reports as `capabilities.ort_providers` is the
   ACTIVE chain (the session's `get_providers()` readback — demucs'
   embedded STFT ops may partially fall back to CPU), not the requested
-  one; the frontend GPU/CPU badge renders from it.
+  one, and `ort_providers_available` lists the compiled-in providers;
+  the frontend GPU/CPU badge renders from the former and the Device
+  dropdown's GPU option from the latter. The Device selector
+  (`POST /api/stems&device=auto|gpu|cpu`, `providers_for_device`)
+  forces chains — forced choices bypass the env override, gpu without
+  a GPU EP is a 400, and the session-singleton key includes the
+  provider list so device switches never reuse a session built for
+  another chain (a device switch does NOT invalidate the stem cache:
+  the audio is identical either way).
 - **Quality tiers are external shifts, not graph options** (3.10
   `dlsep.shift_passes`): for each extra pass the CHUNK is circularly
   shifted, inferred, shifted back, and the passes averaged — the ONNX

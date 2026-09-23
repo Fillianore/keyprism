@@ -116,6 +116,17 @@ const QUALITY_LABEL_KEYS = {
 const QUALITY_PASSES = { fast: 1, balanced: 2, best: 3 };
 const QUALITY_KEY = 'keyprism-quality';
 
+/** Compute device (3.10.2): Auto = probe chain (GPU preference, CPU
+ *  always last), GPU = forced first available GPU EP + CPU, CPU = pure
+ *  CPU. Sent as &device= on every POST; persisted like the tier. */
+const DEVICE_CHOICES = ['auto', 'gpu', 'cpu'];
+const DEVICE_LABEL_KEYS = {
+  auto: 'deviceAuto',
+  gpu: 'deviceGpu',
+  cpu: 'deviceCpu',
+};
+const DEVICE_KEY = 'keyprism-device';
+
 /** LOD waveforms (Phase 3.9): windows at or below this span switch from
  *  the ~1024-column overview envelope to per-pixel-column min/max
  *  computed in the worker. */
@@ -222,6 +233,17 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
         /* localStorage unavailable: keep default */
       }
       return 'balanced';
+    })(),
+    device: (() => {
+      // persisted compute device (3.10.2, default auto); unknown
+      // values fall back instead of poisoning every POST
+      try {
+        const d = localStorage.getItem(DEVICE_KEY);
+        if (DEVICE_CHOICES.includes(d)) return d;
+      } catch {
+        /* localStorage unavailable: keep default */
+      }
+      return 'auto';
     })(),
     savedMix: null,
     rows: [], // {model, row, vol, mute, solo} mirrors for repaint
@@ -737,7 +759,8 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
    *  bytes/speed, `running` reports inference progress. */
   async function requestStems(method) {
     const r = await fetch(
-      `${apiBase}/api/stems?method=${method}&quality=${state.quality}`,
+      `${apiBase}/api/stems?method=${method}&quality=${state.quality}` +
+        `&device=${state.device}`,
       {
         method: 'POST',
       });
@@ -1008,6 +1031,51 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
       }
       load(state.method);
     });
+    // Compute device (3.10.2): Auto / GPU / CPU next to the tier. The
+    // GPU option is disabled when /api/ping reports no GPU EP in the
+    // build (ort_providers_available); a persisted 'gpu' choice on such
+    // a machine is coerced back to Auto so a stale setting can never
+    // poison every POST. Unlike the tier, a device switch does NOT
+    // re-POST: the stems' audio is identical either way — the choice
+    // applies to the next separation task.
+    const gpuAvailable = () =>
+      !!state.caps &&
+      Array.isArray(state.caps.ort_providers_available) &&
+      state.caps.ort_providers_available.some(
+        (p) => p !== 'CPUExecutionProvider'
+      );
+    if (state.device === 'gpu' && !gpuAvailable()) {
+      state.device = 'auto';
+      try {
+        localStorage.setItem(DEVICE_KEY, state.device);
+      } catch {
+        /* storage failure: keep the session value */
+      }
+    }
+    const deviceSel = document.createElement('select');
+    deviceSel.className = 'stems-method stems-device';
+    deviceSel.title = t('deviceTip');
+    for (const d of DEVICE_CHOICES) {
+      const o = document.createElement('option');
+      o.value = d;
+      o.textContent = t(DEVICE_LABEL_KEYS[d]);
+      if (d === state.device) o.selected = true;
+      if (d === 'gpu' && !gpuAvailable()) {
+        o.disabled = true;
+        o.title = t('deviceNoGpu');
+      }
+      deviceSel.appendChild(o);
+    }
+    deviceSel.disabled = state.loading || !dlOk;
+    deviceSel.addEventListener('change', () => {
+      if (deviceSel.disabled || deviceSel.value === state.device) return;
+      state.device = deviceSel.value;
+      try {
+        localStorage.setItem(DEVICE_KEY, state.device);
+      } catch {
+        /* storage failure: keep the session value */
+      }
+    });
     const status = document.createElement('span');
     status.className = 'lanes-status stems-status';
     const badge = providerBadge();
@@ -1017,9 +1085,9 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
         'provider-badge' + (badge.gpu ? ' provider-badge-gpu' : '');
       el.textContent = badge.text;
       el.title = badge.tip;
-      panel.append(title, methodSel, qualitySel, el, status);
+      panel.append(title, methodSel, qualitySel, deviceSel, el, status);
     } else {
-      panel.append(title, methodSel, qualitySel, status);
+      panel.append(title, methodSel, qualitySel, deviceSel, status);
     }
 
     if (!state.ready) return;

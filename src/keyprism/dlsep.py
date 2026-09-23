@@ -177,6 +177,42 @@ def active_providers() -> list:
             return list(_ACTIVE_PROVIDERS)
     return provider_chain()
 
+
+# -------------------------------------------------- device selector (3.10.2)
+
+#: Values accepted by /api/stems ``device`` (and by the frontend
+#: Device dropdown).
+DEVICE_CHOICES = ("auto", "gpu", "cpu")
+
+
+def providers_for_device(device: str, available: list | None = None) -> list:
+    """Device-selector routing -> the provider list for
+    ``InferenceSession``.
+
+    ``auto``: the probe chain (:func:`provider_chain` — GPU preference,
+    KEYPRISM_ORT_PROVIDERS override, CPU always last). ``cpu``: forced
+    pure CPU, bypassing all GPU probing. ``gpu``: force the first
+    available GPU EP by preference (CUDA, then DirectML, then CoreML)
+    with CPU appended; when the build ships no GPU EP at all this raises
+    ValueError("GPU requested but no GPU provider available.") which the
+    server maps to a 400 (the frontend also disables the GPU option from
+    ``/api/ping``'s available list). A forced gpu/cpu choice wins over
+    the KEYPRISM_ORT_PROVIDERS env override. ``available=`` is the test
+    seam."""
+    if available is None:
+        available = ort_available_providers()
+    avset = {str(p) for p in available}
+    if device == "cpu":
+        return [CPU_PROVIDER]
+    if device == "gpu":
+        gpus = [p for p in _PROVIDER_PREFERENCE if p in avset]
+        if not gpus:
+            raise ValueError(
+                "GPU requested but no GPU provider available. "
+                f"(可用执行提供者: {', '.join(sorted(avset)) or '无'})")
+        return [gpus[0], CPU_PROVIDER]
+    return provider_chain(available=available)
+
 try:  # optional [dl] extra: its presence gates the auto-download path
     import huggingface_hub  # noqa: F401  (availability flag only)
 
@@ -195,6 +231,7 @@ __all__ = [
     "plan_chunks", "chunk_windows", "hann_cola", "resample",
     "ola_separate", "shift_passes", "shifts_for_quality",
     "provider_chain", "ort_available_providers", "active_providers",
+    "DEVICE_CHOICES", "providers_for_device",
     "DemucsSeparator", "get_separator", "dl_stems_dir", "dl_status_path",
     "dl_stem_path", "load_status", "write_stems", "model_dir",
     "dl_spec_path", "get_stem_spec",
@@ -987,15 +1024,19 @@ def _session_io(sess):
 
 def get_separator(variant: str = "demucs_4", *, infer=None,
                   threads: int | None = None,
-                  download_progress=None) -> DemucsSeparator:
+                  download_progress=None,
+                  device_providers: list | None = None) -> DemucsSeparator:
     """Separator factory (session singleton lives inside the class).
 
     ``download_progress(bytes_done, bytes_total, speed_mbps)`` is only
     consulted on the real (session-based) path when the model weights
     still need downloading — the server forwards it into the task
-    registry's ``downloading`` phase (3.8 D3)."""
+    registry's ``downloading`` phase (3.8 D3). ``device_providers`` is
+    the Device-selector routing (3.10.2): a forced provider list from
+    :func:`providers_for_device` (None = auto / probe chain)."""
     return DemucsSeparator(variant, infer=infer, threads=threads,
-                           download_progress=download_progress)
+                           download_progress=download_progress,
+                           device_providers=device_providers)
 
 
 # ----------------------------------------------------------- stem cache

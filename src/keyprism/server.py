@@ -203,6 +203,11 @@ def make_server(path: Path, port: int, host: str, start: float,
                     # drives the frontend's GPU/CPU badge (3.10)
                     "ort_providers": dlsep.active_providers()
                     if DL_AVAILABLE else [],
+                    # providers compiled into this onnxruntime build
+                    # (3.10.2): lets the Device dropdown disable the GPU
+                    # option when no GPU EP exists
+                    "ort_providers_available": dlsep.ort_available_providers()
+                    if DL_AVAILABLE else [],
                 }
                 if not caps["poly"]:
                     # precise reason: install remedy vs the Python >= 3.12
@@ -502,6 +507,19 @@ def make_server(path: Path, port: int, host: str, start: float,
             except ValueError as e:
                 self._json(400, {"error": str(e)})
                 return
+            # 3.10.2 Device selector: auto (probe chain) / gpu (forced,
+            # 400 when the build ships no GPU EP) / cpu (pure CPU)
+            device = (q.get("device", ["auto"])[0] or "auto").strip()
+            if device not in dlsep.DEVICE_CHOICES:
+                self._json(400, {
+                    "error": f"未知设备: {device} "
+                             f"(可用: {', '.join(dlsep.DEVICE_CHOICES)})"})
+                return
+            try:
+                device_providers = dlsep.providers_for_device(device)
+            except ValueError as e:
+                self._json(400, {"error": str(e)})
+                return
             entry = self._notes_entry(cur)
             cached = dlsep.load_status(entry, method)
             if cached is not None and \
@@ -536,7 +554,8 @@ def make_server(path: Path, port: int, host: str, start: float,
 
                 started = time.time()
                 sep = dlsep.get_separator(
-                    method, download_progress=download_progress)
+                    method, download_progress=download_progress,
+                    device_providers=device_providers)
                 task["status"] = "running"
                 # 3.10 quality tier -> demucs shifts (per-pass progress;
                 # the denominator already includes every pass)

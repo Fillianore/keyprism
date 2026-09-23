@@ -583,7 +583,8 @@ def test_task_reports_downloading_phase(srv, monkeypatch):
     release = threading.Event()
 
     class DownloadingSeparator:
-        def __init__(self, variant, download_progress=None):
+        def __init__(self, variant, download_progress=None,
+                     device_providers=None):
             self.stems = dlsep.STEM_SPECS[variant]
             self._dl = download_progress
 
@@ -899,6 +900,121 @@ def test_run_session_cuda_error9_falls_back_to_cpu(tmp_path, monkeypatch):
     assert calls["n"] == 1
 
 
+def test_providers_for_device(monkeypatch):
+    """3.10.2 D3 routing: auto = probe chain; cpu = forced pure CPU
+    (bypasses probing AND the env override); gpu = first available GPU
+    EP by preference + CPU tail; gpu on a GPU-less build raises the
+    exact actionable error the server maps to 400."""
+    monkeypatch.delenv("KEYPRISM_ORT_PROVIDERS", raising=False)
+    pfd = dlsep.providers_for_device
+    assert pfd("auto", available=["CUDAExecutionProvider",
+                                  "CPUExecutionProvider"]) == \
+        ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    assert pfd("cpu", available=["CUDAExecutionProvider",
+                                 "CPUExecutionProvider"]) == \
+        ["CPUExecutionProvider"]
+    assert pfd("gpu", available=["DmlExecutionProvider",
+                                 "CPUExecutionProvider"]) == \
+        ["DmlExecutionProvider", "CPUExecutionProvider"]
+    assert pfd("gpu", available=["CUDAExecutionProvider",
+                                 "DmlExecutionProvider",
+                                 "CPUExecutionProvider"]) == \
+        ["CUDAExecutionProvider", "CPUExecutionProvider"]  # CUDA wins
+    # forced choices win over the env override
+    monkeypatch.setenv("KEYPRISM_ORT_PROVIDERS", "CUDA")
+    assert pfd("cpu", available=["CUDAExecutionProvider",
+                                 "CPUExecutionProvider"]) == \
+        ["CPUExecutionProvider"]
+    assert pfd("gpu", available=["CoreMLExecutionProvider",
+                                 "CPUExecutionProvider"]) == \
+        ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+    # no GPU EP in the build: the exact actionable error
+    with pytest.raises(ValueError, match="GPU requested but no GPU "
+                                         "provider available"):
+        pfd("gpu", available=["CPUExecutionProvider"])
+
+
+def test_stems_device_param(srv, monkeypatch):
+    """POST /api/stems&device=...: default auto; cpu forces pure CPU
+    through to the separator; gpu on a GPU-less build -> 400 with the
+    actionable message; unknown device -> 400. No session work runs for
+    the 400s (nothing reaches the separator)."""
+    monkeypatch.setattr(server_mod, "DL_AVAILABLE", True)
+    monkeypatch.setattr(server_mod, "POLY_AVAILABLE", True)
+    monkeypatch.setattr(dlsep, "get_separator", FakeSeparator)
+    monkeypatch.setattr(dlsep, "ort_available_providers",
+                        lambda: ["CPUExecutionProvider"])
+    FakeSeparator.shifts_seen.clear()
+    FakeSeparator.devices_seen.clear()
+
+    # default: absent device = auto -> probe chain of a CPU-only build
+    code, body = post(f"{srv['base']}/api/stems?method=demucs_4")
+    assert code == 200
+    wait_task(srv["base"], body["task_id"])
+    assert FakeSeparator.devices_seen == [["CPUExecutionProvider"]]
+
+    # forced CPU: pure CPU list reaches the separator (a quality switch
+    # forces the cache open — device alone never invalidates a cached
+    # render, the stems' audio is identical either way)
+    code, body = post(
+        f"{srv['base']}/api/stems?method=demucs_4&device=cpu"
+        "&quality=fast")
+    assert code == 200
+    wait_task(srv["base"], body["task_id"])
+    assert FakeSeparator.devices_seen[-1] == ["CPUExecutionProvider"]
+
+    # forced GPU on a GPU-less build: 400, no task, no separator call
+    n = len(FakeSeparator.devices_seen)
+    code, body = post(
+        f"{srv['base']}/api/stems?method=demucs_4&device=gpu")
+    assert code == 400
+    assert "GPU requested but no GPU provider available" in body["error"]
+    assert len(FakeSeparator.devices_seen) == n
+
+    # unknown device: 400 before anything starts
+    code, body = post(
+        f"{srv['base']}/api/stems?method=demucs_4&device=tpu")
+    assert code == 400 and "未知设备" in body["error"]
+
+
+def test_ping_reports_available_providers(srv, monkeypatch):
+    """/api/ping capabilities.ort_providers_available (3.10.2): the
+    providers compiled into this build — the Device dropdown disables
+    its GPU option when no GPU EP is listed; empty without [dl]."""
+    monkeypatch.setattr(server_mod, "DL_AVAILABLE", True)
+    monkeypatch.setattr(dlsep, "ort_available_providers",
+                        lambda: ["CUDAExecutionProvider",
+                                 "CPUExecutionProvider"])
+    _, ping = get(f"{srv['base']}/api/ping")
+    caps = ping["capabilities"]
+    assert caps["ort_providers_available"] == \
+        ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    assert "ort_providers" in caps  # the ACTIVE chain stays too
+    monkeypatch.setattr(server_mod, "DL_AVAILABLE", False)
+    _, ping = get(f"{srv['base']}/api/ping")
+    assert ping["capabilities"]["ort_providers_available"] == []
+
+
+def test_device_selector_frontend_contract():
+    """3.10.2 D2 frontend contract: a Device dropdown (Auto/GPU/CPU)
+    next to the quality select, POSTed as &device=, persisted in
+    localStorage, with the GPU option disabled from
+    capabilities.ort_providers_available and a stale persisted 'gpu'
+    coerced back to auto; i18n in both dicts."""
+    lanes = strip_js_comments(
+        (FRONTEND / "lanes.js").read_text(encoding="utf-8"))
+    assert "['auto', 'gpu', 'cpu']" in lanes
+    assert "&device=${state.device}" in lanes
+    assert "ort_providers_available" in lanes
+    assert "localStorage.setItem(DEVICE_KEY" in lanes
+    assert "deviceNoGpu" in lanes
+    i18n = strip_js_comments(
+        (FRONTEND / "i18n.js").read_text(encoding="utf-8"))
+    for key in ("deviceAuto", "deviceGpu", "deviceCpu", "deviceTip",
+                "deviceNoGpu"):
+        assert i18n.count(f"{key}:") >= 2
+
+
 def test_ping_reports_ort_providers(srv, monkeypatch):
     """/api/ping capabilities.ort_providers: the ACTIVE EP chain (badge
     data source); empty without the DL extra."""
@@ -1043,6 +1159,9 @@ def test_quality_tier_server_flow(srv, monkeypatch):
     monkeypatch.setattr(server_mod, "POLY_AVAILABLE", True)
     monkeypatch.setattr(dlsep, "get_separator", FakeSeparator)
     FakeSeparator.shifts_seen.clear()
+    FakeSeparator.devices_seen.clear()
+    monkeypatch.setattr(dlsep, "ort_available_providers",
+                        lambda: ["CPUExecutionProvider"])
 
     # default tier = balanced -> shifts 1
     code, body = post(f"{srv['base']}/api/stems?method=demucs_4")
@@ -1096,7 +1215,10 @@ def test_quality_tier_frontend_contract():
     lanes = strip_js_comments(
         (FRONTEND / "lanes.js").read_text(encoding="utf-8"))
     assert "'fast', 'balanced', 'best'" in lanes
-    assert "&quality=${state.quality}" in lanes
+    assert (
+      "`${apiBase}/api/stems?method=${method}&quality=${state.quality}` +\n"
+      "        `&device=${state.device}`"
+    ) in lanes
     assert "qualityTip" in lanes
     assert "QUALITY_PASSES" in lanes
     assert "passes: QUALITY_PASSES[state.quality] || 1" in lanes
@@ -1184,14 +1306,18 @@ def test_convert_raw_accepts_library_shapes():
 
 class FakeSeparator:
     """Stands in for the ONNX DemucsSeparator (no weights needed).
-    Records the shifts each separate() call received (3.10 quality
-    tier -> shifts plumbing assertion seam)."""
+    Records the shifts and device providers each separate()/init
+    received (3.10 quality-tier + 3.10.2 device-routing seams)."""
 
     shifts_seen: list = []
+    devices_seen: list = []
 
-    def __init__(self, variant, download_progress=None):
+    def __init__(self, variant, download_progress=None,
+                 device_providers=None):
         self.variant = variant
         self.stems = dlsep.STEM_SPECS[variant]
+        FakeSeparator.devices_seen.append(
+            list(device_providers) if device_providers else None)
 
     def separate(self, pcm, sr, chunk_sec=10.0, overlap_sec=1.0,
                  shifts=0, progress=None):

@@ -48,8 +48,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exist (the previous variant always failed the zero-probe), so
   `DL_STEMS_VERSION` was NOT bumped — 4-stem caches stay valid
 
+### Added
+
+- 3.10.2 hotfix — ORT CUDA fallback + Device selector:
+  - Device dropdown (Auto / GPU / CPU) in the AI Separation panel,
+    persisted in localStorage and POSTed as `&device=`; the GPU option
+    disables itself (and a stale persisted `gpu` coerces back to Auto)
+    when `/api/ping` reports no GPU EP in the build
+    (`capabilities.ort_providers_available`)
+  - `/api/stems&device=auto|gpu|cpu` routing: auto = probe chain,
+    cpu = forced pure CPU, gpu = forced first available GPU EP + CPU
+    (400 "GPU requested but no GPU provider available." on a GPU-less
+    build); a session-singleton key now includes the provider list so a
+    device switch never reuses a session built for another chain
+
 ### Fixed
 
+- ORT CUDA fallback (D1): `provider_chain` ALWAYS ends with
+  `CPUExecutionProvider` (ops without a GPU kernel run on CPU instead
+  of failing the session); a GPU EP that fails at FIRST INFERENCE
+  (CUDA error 9 / NOT_IMPLEMENTED on e.g. a Conv node — surfaces at
+  `session.run()`, not at session creation) is now caught: warning
+  logged, cached session evicted, pure-CPU session rebuilt, the call
+  retried once — verified live on a CUDA host with a missing cuDNN
+  (`libcudnn.so`): the task completed on CPU instead of crashing
 - 3.10.1 hotfix — dead dropdowns + 6-stem UI plumbing:
   - The method/quality dropdowns in BOTH separation panels came up
     permanently disabled: the post-load re-render ran while the loading
