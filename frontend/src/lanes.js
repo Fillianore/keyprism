@@ -959,6 +959,21 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
   function renderShell() {
     panel.innerHTML = '';
     state.rows = [];
+    // 3.10.3 D1: the Mix row's right cell IS the control strip —
+    // [title][method ▾][quality ▾][device ▾][GPU badge][status] inline
+    // on one wrapped flex line instead of stacked full-width rows, and
+    // the empty dashed Mix lane placeholder is gone. The Mix row renders
+    // in EVERY state (loading/error/ready) so the controls stay
+    // reachable while a task runs.
+    const mix = trackRow({
+      key: 'mix',
+      labelText: t('laneMix'),
+      color: '#ddd6c8',
+      withLane: true,
+      fader: 'norm',
+    });
+    mix.row.classList.add('lane-row-mix');
+    mix.scope.classList.add('mix-controls');
     const title = document.createElement('span');
     title.className = 'stems-title';
     title.textContent = t('lanes');
@@ -1078,6 +1093,7 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
     });
     const status = document.createElement('span');
     status.className = 'lanes-status stems-status';
+    mix.scope.append(title, methodSel, qualitySel, deviceSel, status);
     const badge = providerBadge();
     if (badge) {
       const el = document.createElement('span');
@@ -1085,23 +1101,9 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
         'provider-badge' + (badge.gpu ? ' provider-badge-gpu' : '');
       el.textContent = badge.text;
       el.title = badge.tip;
-      panel.append(title, methodSel, qualitySel, deviceSel, el, status);
-    } else {
-      panel.append(title, methodSel, qualitySel, deviceSel, status);
+      mix.scope.insertBefore(el, status);
     }
-
-    if (!state.ready) return;
     // Mix lane: the player's own playback, ridden by the master gain.
-    // The scope cell stays empty (no canvas) and keeps the grid aligned.
-    const mix = trackRow({
-      key: 'mix',
-      labelText: t('laneMix'),
-      color: '#ddd6c8',
-      withLane: true,
-      fader: 'norm',
-    });
-    mix.row.classList.add('lane-row-mix');
-    mix.scope.classList.add('lane-scope-empty');
     const { syncFader: mixSync } = wireMuteSolo({
       mixer,
       model: mixer.mix,

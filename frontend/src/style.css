@@ -720,13 +720,11 @@ input[type='range']:active::-moz-range-thumb {
   height: 80px;
 }
 
-.lane-row-mix .lane-scope-empty {
-  border-style: dotted;
-  background: none;
-}
-
 .lane-row-mix {
-  height: 44px;
+  /* 3.10.3 D1: height auto — the Mix row's right cell is the control
+   * strip, which may wrap to a second line on narrow panels */
+  height: auto;
+  min-height: 44px;
 }
 
 .lane-row-mix .lane-scope {
@@ -736,6 +734,41 @@ input[type='range']:active::-moz-range-thumb {
 .lane-row-mix .stem-name {
   color: var(--ivory);
   border-bottom: 1px dotted rgba(152, 145, 127, 0.55);
+}
+
+/* ---------- Control strip (3.10.3 D1): the Mix row's right cell.
+ * One horizontal wrapped line carrying every separation control —
+ * [title][method ▾][quality ▾][device ▾][GPU badge][stop][restart]
+ * [status] — vertically centered, instead of stacked full-width rows
+ * plus an empty dashed lane placeholder. */
+.mix-controls {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  align-content: center;
+  overflow: visible; /* native dropdown lists must not clip */
+  background: none;
+  box-shadow: none;
+}
+
+.mix-controls .stems-method {
+  width: auto;
+  height: 28px;
+  flex: 0 0 auto;
+}
+
+.mix-controls .stems-title {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.mix-controls .lanes-status {
+  flex: 1 1 120px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .lane-scope {

@@ -481,6 +481,31 @@ def test_dropdowns_not_born_disabled_contract():
     assert "z-index" not in stack  # z-auto: the 3.9.1 blend contract
 
 
+def test_control_strip_inline_contract():
+    """3.10.3 D1: the Mix row's right cell is the control strip —
+    method/quality/device selects + provider badge + status live INLINE
+    in .mix-controls (flex row, wrap, 28px selects), the dashed empty
+    Mix lane placeholder is gone, and the Mix row renders in every
+    state so the controls stay reachable while a task runs."""
+    lanes = strip_js_comments(
+        (FRONTEND / "lanes.js").read_text(encoding="utf-8"))
+    assert "mix.scope.classList.add('mix-controls')" in lanes
+    assert "mix.scope.append(title, methodSel, qualitySel, deviceSel" in lanes
+    assert "lane-scope-empty" not in lanes
+    # the strip exists BEFORE the ready gate: no `if (!state.ready)
+    # return` may precede the mix-row construction in renderShell
+    shell = lanes[lanes.index("function renderShell"):]
+    shell = shell[:shell.index("for (const lane of state.lanes)")]
+    assert "if (!state.ready) return" not in shell
+    css = (FRONTEND / "style.css").read_text(encoding="utf-8")
+    strip = css[css.index(".mix-controls {"):]
+    strip = strip[:strip.index("}")]
+    assert "flex-direction: row" in strip and "flex-wrap: wrap" in strip
+    assert "gap: 8px" in strip and "align-items: center" in strip
+    assert ".mix-controls .stems-method" in css
+    assert "lane-scope-empty" not in css
+
+
 def test_unified_method_selector_contract():
     """3.10.1 D1: the AI Separation panel's method dropdown exposes the
     FULL backend registry — classic hpss/rpca/combined (grouped) plus
