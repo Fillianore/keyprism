@@ -1,12 +1,13 @@
-KeyPrism — third-party license inventory (NOTICE v1, Phase 3.8)
-================================================================
+KeyPrism — third-party license inventory (NOTICE v2, Phase 3.11 final audit)
+=============================================================================
 
 KeyPrism is MIT-licensed. This file inventories the licenses of the
 third-party dependencies actually shipped/used at this release, so the
 obligations stay visible as the dependency set grows. It is generated
-by hand against pyproject.toml / frontend/package.json — update it when
-a dependency is added or removed (TODO(3.10): automate with a license
-report in CI).
+by hand against pyproject.toml / frontend/package.json and re-verified
+per release (deliberately not automated in CI: the set is small and the
+characterizations need judgment, not just a package listing — reviewed
+as part of every changelog cut).
 
 Python runtime dependencies (pyproject [project].dependencies)
 --------------------------------------------------------------
@@ -18,14 +19,23 @@ matplotlib    BSD-3-Clause (bundled fonts carry their own licenses:
 mido          MIT
 soundfile     BSD-3-Clause (Python package); the libsndfile binary it
               bundles is LGPL-2.1-or-later.
-              TODO(3.10): confirm our redistribution story (LGPL
-              dynamic-link notice in the distribution docs) — LGPL is
-              not MIT-incompatible but carries notice obligations we
-              do not yet document.
+              LGPL notice (resolved 3.11): KeyPrism never bundles or
+              modifies libsndfile — the library arrives inside the
+              soundfile wheel from PyPI as an unmodified, separately
+              linked shared library, which satisfies the LGPL for
+              distribution. Any distributor who re-ships those wheels
+              must keep this notice (and the library's own LICENSE
+              shipped inside the wheel) intact; the LGPL does not
+              attach to KeyPrism's MIT code.
 av (PyAV)     BSD-3-Clause (Python package); the FFmpeg shared
               libraries bundled in its wheels are LGPL-2.1-or-later
               (default builds).
-              TODO(3.10): same LGPL notice obligation as soundfile.
+              LGPL notice (resolved 3.11): same story as libsndfile —
+              unmodified FFmpeg shared libraries inside the PyAV wheel,
+              dynamically linked, never statically merged into
+              KeyPrism. Carry this notice and PyAV's bundled FFmpeg
+              LICENSE when redistributing the wheels; no further
+              obligation for KeyPrism's own code.
 
 Optional [dl] extra (pyproject [project.optional-dependencies].dl)
 ------------------------------------------------------------------
@@ -35,6 +45,34 @@ basic-pitch   Apache-2.0 (installs on Python 3.10/3.11 only; on 3.12
               polyphonic transcription degrades to 501 by design)
 tensorflow    Apache-2.0 (pulled in by basic-pitch; not invoked
               directly by KeyPrism)
+
+Optional [dl-cuda] extra (Linux GPU; strictly on top of [dl])
+-------------------------------------------------------------
+onnxruntime-gpu        MIT (the ORT GPU build itself; the NVIDIA
+                       runtime it loads is covered below)
+nvidia-cublas          NVIDIA CUDA Toolkit End User License Agreement
+nvidia-cuda-runtime    — proprietary, NOT OSI-approved. NVIDIA
+nvidia-cuda-nvrtc        publishes these wheels on PyPI precisely so
+nvidia-curand            applications can redistribute the CUDA
+nvidia-cufft             runtime alongside themselves (pip is the
+                         distribution channel); redistribution is
+                         permitted under the EULA's redistribution
+                         rights, with NVIDIA's license terms traveling
+                         with the wheels. No source obligation applies
+                         to KeyPrism's MIT code.
+nvidia-nvjitlink       NVIDIA CUDA Toolkit EULA (transitive dependency
+                       of nvidia-cufft, installed automatically).
+nvidia-cudnn-cu13      NVIDIA cuDNN License Agreement — proprietary,
+                       NOT OSI-approved; redistributable via pip under
+                       its own terms, same model as the CUDA wheels.
+
+Optional [dl-directml] extra (Windows GPU; strictly on top of [dl])
+-------------------------------------------------------------------
+onnxruntime-directml   MIT
+
+All nvidia wheels carry Linux platform markers in pyproject.toml
+(`sys_platform == 'linux'`) — they are never installed on other
+platforms (Windows GPU users ride DirectML).
 
 Optional [eval] extra (scripts/eval_trans.py only; never runtime)
 ------------------------------------------------------------------
@@ -49,34 +87,75 @@ Web MIDI/other browser APIs: none used.
 Models / pretrained weights (not distributed with KeyPrism; downloaded
 at first run to ~/.keyprism/models/demucs/)
 ------------------------------------------------------------------
-Demucs code (facebookresearch/demucs)  MIT
-htdemucs ONNX exports (e.g. smank/htdemucs-onnx, the default
-auto-download source) — third-party conversions of the MIT Demucs
-model; conversion repos do not always restate a license.
-              NOTE: the htdemucs weights were trained with MUSDB18-HQ
-              and similar sources; MUSDB18(-HQ) is released for
-              ACADEMIC / RESEARCH USE ONLY. KeyPrism does not
-              redistribute the weights and makes no claim about their
-              fitness for production/commercial use.
-              TODO(3.10): verify the provenance/license of every
-              auto-downloadable ONNX export in dlsep._VARIANTS and
-              surface it in the model-download UI; reconsider the
-              default repo if any export lacks clear terms.
-              NOTE: Slakh2100 / MUSDB18 datasets are NOT referenced
-              anywhere in KeyPrism code or docs (verified at NOTICE
-              v1); if a future phase adds dataset-backed training or
-              evaluation, they must be listed here as research-only.
+Demucs code (facebookresearch/demucs)  MIT — both htdemucs variants
+              are conversions of this MIT codebase's weights.
+
+htdemucs_6s ONNX (StemSplitio/htdemucs-6s-onnx, the demucs_6
+auto-download source):
+              MIT — the export repo ships an explicit LICENSE; the
+              6-stem registry order (drums/bass/other/vocals/guitar/
+              piano) mirrors that export. Weights are auto-downloaded
+              from the Hub at first use and NEVER stored in the
+              KeyPrism repository; every resolved model file records
+              its provenance (repo id, revision, commit, etag, license
+              URL, source URL) into <model_dir>/provenance.json for
+              exactly this audit.
+
+htdemucs ONNX (smank/htdemucs-onnx, the demucs_4 auto-download
+source):
+              Demucs code MIT; the community export repo does not
+              restate a weight license (dlsep._VARIANTS records
+              license "unknown (community export)" plus the repo URL).
+              FLAG (carried over from NOTICE v1): the htdemucs weights
+              were trained with MUSDB18-HQ and similar sources;
+              MUSDB18(-HQ) is released for ACADEMIC / RESEARCH USE
+              ONLY. That usage restriction travels with the weights,
+              not with KeyPrism's code: KeyPrism does not redistribute
+              the weights, and makes no claim about their fitness for
+              production/commercial use. Prefer demucs_6 (MIT,
+              fully characterized) when licensing matters.
+
+Dataset provenance re-check (verified 2026-09-23, Phase 3.11 audit):
+Slakh2100 and MUSDB18(-HQ) are referenced nowhere in KeyPrism source
+code, docs, scripts, tests or configs — grep over src/, frontend/src/,
+docs/, scripts/, tests/ and both READMEs finds nothing outside this
+audit note. If a future phase adds dataset-backed training or
+evaluation, they must be listed here as research-only.
 
 License compatibility with KeyPrism (MIT)
 -----------------------------------------
-All runtime dependencies above are permissive (MIT / BSD / Apache-2.0 /
-ISC). Known obligations to track (none blocking internal use):
+Core product (default install + [dl] + [dl-directml]): all runtime
+dependencies are permissive (MIT / BSD-3-Clause / Apache-2.0 / ISC).
+No license conflict for the core MIT product.
+
+Non-OSI components
+------------------
+The only non-OSI, proprietary components in the dependency tree are
+the NVIDIA wheels of the OPTIONAL [dl-cuda] extra (CUDA Toolkit EULA +
+cuDNN License Agreement, see above). Consequences, by design:
+  - They are opt-in: plain `uv sync`, the `[dl]` extra (CPU
+    onnxruntime) and the Windows `[dl-directml]` extra never install
+    them; the core MIT product ships none of them.
+  - They are Linux-only (pyproject platform markers); other platforms
+    never even resolve them.
+  - They are fetched by the user's own package manager directly from
+    PyPI; KeyPrism does not redistribute, embed or re-host them.
+  - Their terms govern those wheels only and do not viralize into
+    KeyPrism's MIT code (no source obligations; NVIDIA's pip wheels
+    are published for exactly this redistribution).
+The core product remains MIT-clean; the GPU acceleration extras are
+flagged proprietary for anyone auditing a deployment that enables them.
+
+Known obligations to track (none blocking):
   - LGPL-2.1 (libsndfile via soundfile, FFmpeg libs via PyAV wheels):
-    keep them unmodified as separately-linked libraries and carry the
-    LGPL notices in any binary distribution. TODO(3.10).
+    keep them unmodified as separately-linked libraries; this NOTICE
+    (plus the license files inside the wheels) constitutes the
+    required notice for any binary redistribution of those wheels —
+    resolved 3.11, no further action.
   - Apache-2.0 (basic-pitch, huggingface-hub, tensorflow): requires
     retaining NOTICE files and stating changes if modified. Compatible
     with MIT distribution; no action beyond this inventory.
-  - Research-only datasets/weights (MUSDB18-HQ lineage of htdemucs):
-    usage restriction travels with the weights, not with KeyPrism
-    code; documented above. TODO(3.10) as noted.
+  - Research-only weights lineage (MUSDB18-HQ behind the 4-stem
+    demucs export): restriction travels with the auto-downloaded
+    weights, not with KeyPrism code; documented above, surfaced via
+    provenance.json. No further action for this release.
