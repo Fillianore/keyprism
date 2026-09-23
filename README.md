@@ -16,7 +16,9 @@ suite of interactive analysis tools.
 
 ```
 audio → STFT → semitone aggregation → interactive heatmap + player
-              └→ source separation (HPSS / RPCA) → stem player
+              ├→ source separation (HPSS / RPCA) → stem player
+              └→ Demucs separation (4/6-stem, optional [dl]) → lane workspace
+                                            └→ polyphonic notes (Basic Pitch)
 ```
 
 <div align="center">
@@ -54,30 +56,63 @@ audio → STFT → semitone aggregation → interactive heatmap + player
   and rendered to per-stem WAV files (original phase preserved), cached
   under the analysis entry and served on demand (`/api/stems`, serve mode
   required)
-- **Stem player**: a multi-track panel (per-stem volume, Mute, Solo plus a
-  Mix row for the original track) driven by the same transport — all stems
-  start on one absolute AudioContext timestamp together with the mix, so
-  playback is sample-accurately synchronized; mute/solo switch via ramped
-  gain nodes without clicks or pops; stems are downloadable as WAVs for
-  external DAWs
+- **Stem player & DAW mixer**: a multi-track panel (per-stem faders with a
+  live dB readout, Mute, Solo plus a Mix row for the original track) driven
+  by the same transport — all stems start on one absolute AudioContext
+  timestamp together with the mix, so playback is sample-accurately
+  synchronized. Mixer semantics are DAW-grade: solo is destructive
+  (materialized as real mute states, so M and S can never both light up),
+  each stem gets a make-up gain default (so a lone stem auditions at
+  mix-comparable loudness), and a brickwall limiter (−1 dB threshold,
+  20:1, 1 ms attack) guards the master bus against summed overshoots;
+  mute/solo switch via ramped gain nodes without clicks or pops; stems are
+  downloadable as WAVs for external DAWs
 - **DL separation — Demucs (optional `[dl]` extra)**: with the optional
   deep-learning dependencies installed (`uv sync --extra dl`), htdemucs
-  (4-stem) and htdemucs_6s (6-stem) run locally via ONNX Runtime: the
-  track is processed in 10 s chunks with 1 s overlap blended by a
+  4-stem and the MIT-licensed 6-stem export (drums / bass / other /
+  vocals / guitar / piano — auto-downloaded on first use with recorded
+  provenance) run locally via ONNX Runtime: the track is processed in
+  fixed model-segment chunks with a 50% overlap blended by a
   strictly-positive Hann window normalized by the accumulated window sum
   (seam-free cross-fades, exact edge reconstruction, memory bounded by
   one chunk — the full track is never handed to the model). Stems are
   cached like classic stems and downloadable as WAVs. Without the extra
   every DL endpoint answers a clean `501` and the frontend hides the
   options — the app keeps working on the Phase 2 pipeline
+- **Inference quality tiers & device selection (optional)**: quality
+  fast / balanced / best trades speed for accuracy via demucs shift
+  averaging (1 / 2 / 3 inference passes around the untouched ONNX graph;
+  tier-aware stem cache); the Device selector (Auto / GPU / CPU) routes
+  the ONNX Runtime execution providers, with the GPU option disabled
+  when the installed build has none. GPU builds (`[dl-cuda]` on Linux,
+  `[dl-directml]` on Windows) auto-detect their provider chain, ship the
+  CUDA 13 runtime as pip wheels with a gated preload (a complete system
+  CUDA install wins; the wheels only fill gaps), and fall back silently
+  to CPU when a GPU EP is missing or fails — a GPU-less setup degrades,
+  never crashes. `/api/ping` reports the active provider chain (the
+  GPU/CPU badge in the panel)
 - **Multi-lane workspace (optional)**: a stacked-lane panel (Mix +
-  vocals/drums/bass/piano/guitar/other) with per-lane waveform, volume,
-  Mute/Solo, all lanes sample-locked to the shared transport clock.
-  Polyphonic piano/guitar/other note overlays (Basic Pitch with
+  vocals/drums/bass/other or the six Demucs stems) with per-lane
+  waveform, volume, Mute/Solo, all lanes sample-locked to the shared
+  transport clock (per-lane playheads ride the master cursor's frame
+  loop; high-res waveforms are computed in a Web Worker for zoomed-in
+  views). Polyphonic piano/guitar/other note overlays (Basic Pitch with
   same-pitch fragment merging, 50 ms gap threshold) render on a
   dedicated HTML canvas per lane — never SVG shapes — spatially indexed
   (binary search over sorted starts) and re-synced to the main
-  spectrogram's zoom/pan on every relayout
+  spectrogram's zoom/pan on every relayout. Long runs are background
+  tasks with live progress, model-download phase and Stop/Restart
+  controls (cooperative cancel at chunk boundaries; Restart re-submits
+  with the cache bypassed)
+- **Layer compositor (optional)**: drag a lane's ⧉ handle onto the master
+  spectrogram to overlay that stem's semitone spectrogram exactly on the
+  master plot (time and pitch axes shared with the master heatmap,
+  brightness normalized against the master's mix peak so an overlay reads
+  its true share of the mix). Layers blend via CSS mix-blend-mode —
+  叠加 (screen: dark pixels are no-ops) or 覆盖 (normal: opaque) — with
+  per-layer opacity, gain (±24 dB) and highlight-γ reshaping, plus
+  visibility / drag-to-reorder / remove in a top-right manager; overlays
+  repaint only on view changes, never during playback
 - **Online track picking**: the "Select music" button in the top bar picks a
   local audio file, uploads it to the backend for analysis and switches the
   whole page (serve mode required)
@@ -155,13 +190,23 @@ keyprism/
         ├── notes.js       # note overlay (Phase 1 transcription)
         ├── stems.js       # stem player: Web Audio multi-track sync (Phase 2)
         ├── lanes.js       # multi-lane DL workspace: canvas lanes + poly notes (Phase 3)
+        ├── mixer.js       # DAW mixer state: destructive solo, make-up gain, master bus
+        ├── controls.js    # shared panel-row factory (volume / M / S / Notes)
+        ├── geometry.js    # shared plot geometry (master + lane pixel contract)
+        ├── layers.js      # layer compositor: stem-spectrum overlays on the master
+        ├── stemspec.js    # stem spectrogram fetch cache + intensity shaping
+        ├── wavelod.js     # LOD waveform cache (Web Worker client)
+        ├── wave-worker.js # per-pixel-column min/max worker
+        ├── specfeed.js    # wheel-gesture pan/zoom slide for the heatmap trace
+        ├── trackIcons.js  # inline SVG glyphs for mixer row labels
+        ├── toast.js       # dismissible toast messages
         └── style.css
 ```
 
 ## Testing
 
 `tests/` implements no product features; it is an automated regression suite.
-After changing code, run `uv run pytest -q`: 110 cases covering DSP algorithms
+After changing code, run `uv run pytest -q`: 172 cases covering DSP algorithms
 (including a deterministic 120 BPM click-track case), the decode-chain
 fallback (real m4a encoding), the payload contract (field-by-field assertions
 the frontend depends on), transcription (synthetic note recovery), source
@@ -234,9 +279,17 @@ never overrides already-exported environment variables):
   lower versions)
 - Optional DL separation/transcription (Phase 3): `uv sync --extra dl`
   installs `onnxruntime` + `basic-pitch` + `huggingface-hub`; Demucs weights
-  are downloaded automatically on first use into `~/.keyprism/models/demucs/`
-  (or drop any compatible htdemucs ONNX export there). Everything works
-  without it — the DL features simply answer 501 and stay hidden in the UI
+  (4-stem, and the 6-stem export) are downloaded automatically on first use
+  into `~/.keyprism/models/demucs/` (or drop any compatible htdemucs ONNX
+  export there; on networks that cannot reach huggingface.co set
+  `HF_ENDPOINT=https://hf-mirror.com`). Everything works without it — the
+  DL features simply answer 501 and stay hidden in the UI
+- Optional GPU acceleration: `uv sync --extra dl --extra dl-cuda` (Linux,
+  NVIDIA — installs `onnxruntime-gpu` plus the CUDA 13 runtime as pip
+  wheels, preloaded automatically) or `uv sync --extra dl --extra
+  dl-directml` (Windows, any GPU vendor). Install at most one of the two
+  onnxruntime builds; a missing/broken GPU extra is a silent CPU fallback,
+  never an error, and `KEYPRISM_ORT_PROVIDERS` can pin the provider chain
 
 ## Quick Start
 
@@ -303,16 +356,18 @@ uv run python -m keyprism [audio] [--serve PORT] [--rate R] [--sub S]
 
 | Endpoint | Description |
 |------|------|
-| `GET /api/ping` | health check + DL capability flags (`capabilities.dl` / `capabilities.poly`) |
+| `GET /api/ping` | health check + DL capability flags (`capabilities.dl` / `capabilities.poly` / `dl_methods` / `ort_providers` / `ort_providers_available`) |
 | `GET /api/spec?rate=15&sub=5` | recompute the spectrum at the given resolution (three channels + envelopes), cached |
 | `GET /api/notes?track=bass\|lead\|both` | monophonic transcription notes, cached per track |
 | `GET /api/notes?track=piano\|guitar\|other&method=poly[&source=demucs_6]` | polyphonic notes of a DL stem (Basic Pitch, merged fragments; 501 without the `[dl]` extra) |
 | `GET /api/midi?track=bass\|lead\|both` | the same notes as a Standard MIDI File download |
 | `GET /api/stems?method=hpss\|rpca\|combined` | separated stems of the current track (`&progress=1` polls a running computation) |
 | `GET /api/stems?method=demucs_4\|demucs_6` | serve computed DL stems from the entry cache (404 until computed) |
-| `POST /api/stems?method=demucs_4\|demucs_6` | start DL separation as a background task; returns `{"task_id", "status_url"}` (501 without the `[dl]` extra; cached results short-circuit) |
-| `GET /api/task/{task_id}` | background-task poll: `{"status": "running"\|"done"\|"error", "progress": 0..1, "stems": [...]}` |
+| `POST /api/stems?method=demucs_4\|demucs_6[&quality=fast\|balanced\|best][&device=auto\|gpu\|cpu][&force=1]` | start DL separation as a background task; returns `{"task_id", "status_url"}` (501 without the `[dl]` extra; cached results short-circuit unless `force=1`; quality/device are cache-aware) |
+| `GET /api/task/{task_id}` | background-task poll: `{"status": "running"\|"downloading"\|"done"\|"error"\|"cancelled", "progress": 0..1, "stems": [...]}` |
+| `POST /api/task/{task_id}/cancel` | cooperative stop: cancels at the next chunk/segment boundary; partial downloads are discarded |
 | `GET /api/stem?method=..&name=..` | one stem as a WAV attachment download (classic and DL methods) |
+| `GET /api/stem_spec?method=..&stem=..` | the stem's semitone spectrogram (88 rows, dB against the master mix peak) for lane mini-spectrograms and overlay layers |
 | `POST /api/upload?name=song.mp3` | upload a local audio file (request body is raw file bytes); the backend analyzes it, switches the current track and refreshes `data.json`; returns the full payload |
 
 For the full reference (error codes / response structure / preflight) see
@@ -331,9 +386,11 @@ covering mainstream audio formats.
 | Double click | restore the full-track view |
 | Click the spectrogram | seek playback (no autoplay) |
 | Stems → On | computes/serves the separated stems and opens the stem panel below the plot (serve mode required); the mix is muted automatically and hands back on Off |
-| Stem panel | per-stem volume slider, M (mute), S (solo); method switch (combined / HPSS / RPCA); download via `/api/stem` links |
-| Lanes → On | DL workspace: starts the Demucs separation for the selected variant (background task with live progress) and opens the stacked-lane panel (serve mode + `[dl]` extra required); the mix is muted automatically and hands back on Off |
-| Lane panel | per-lane waveform, volume slider, M (mute), S (solo); PX toggles the polyphonic note overlay (piano/guitar/other); lanes zoom/pan in lockstep with the main spectrogram |
+| Stem panel | per-stem fader with live dB readout (defaults to make-up gain), M (mute), S (solo); method switch (combined / HPSS / RPCA); download via `/api/stem` links; the master bus runs through a brickwall limiter |
+| Lanes → On | opens the DL workspace panel (serve mode + `[dl]` extra required); the mix is muted automatically and hands back on Off; nothing auto-analyzes |
+| Lane control strip | method (classic HPSS/RPCA/combined or Demucs 4/6-stem), quality (fast / balanced / best), device (Auto / GPU / CPU), GPU/CPU badge, and ▶ Run / ⏹ Stop / ↻ Restart: Run submits the separation task (live progress incl. model-download phase), Stop cooperatively cancels it, Restart cancels + re-runs bypassing the cache |
+| Lane panel | per-lane waveform (LOD hi-res when zoomed in) or mini-spectrogram ([Wave\|Spec] toggle), volume slider, M (mute), S (solo); PX toggles the polyphonic note overlay (piano/guitar/other); lanes zoom/pan in lockstep with the main spectrogram |
+| Drag a lane's ⧉ handle onto the master | overlays that stem's spectrogram as a compositor layer (叠加 screen / 覆盖 normal blend, per-layer opacity, gain ±24 dB, highlight γ; manage/reorder/remove top-right) |
 | Bottom navigation bar | drag the window to pan / drag handles to resize / click empty space to jump |
 | Top bar | resolution, channel, pitch range, BPM, offset, time signature, palette, color floor, highlight γ |
 | Click a numeric label | type a value directly (Enter commits / Esc cancels), ↺ restores the default |
@@ -372,6 +429,17 @@ covering mainstream audio formats.
   Stems cache next to the STFT entry (`stems/<version>/<method>/`), so
   the first request for a method pays the compute (a few seconds for the
   demo track) and later requests serve files instantly
+- **DL separation**: the ONNX graph embeds its own STFT/iSTFT sized for
+  one fixed segment (~7.8 s @ 44.1 kHz), so chunks follow the model
+  (50% overlap, COLA-exact Hann, zero-padded tail) and the ONNX session
+  is a singleton per model + provider chain. Quality tiers wrap the same
+  graph with circular shift → infer → shift back passes and average
+  them (fast/balanced/best = 1/2/3 passes; `shifts=0` is byte-equivalent
+  to the single pass). GPU providers are probed (CUDA → DirectML →
+  CoreML, CPU always last), the CUDA 13 pip wheels are preloaded only
+  when they actually fill a gap, and a GPU EP that fails at first
+  inference evicts the session and retries pure CPU — the stems come
+  out identical either way
 - **Stem player sync**: every stem and the mix are scheduled with
   `source.start(when, offset)` on ONE shared AudioContext at ONE absolute
   timestamp (`ctx.currentTime + 0.06`), so multi-track playback is
