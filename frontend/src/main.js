@@ -16,6 +16,7 @@ import { createPlayer } from './player.js';
 import { createSpecFeed } from './specfeed.js';
 import { initNotes } from './notes.js';
 import { initStems } from './stems.js';
+import { initLayers } from './layers.js';
 import { initLanes } from './lanes.js';
 import { throttled } from './util.js';
 import { t, onChange } from './i18n.js';
@@ -153,6 +154,19 @@ async function main() {
     apiBase: data.apiBase,
   });
 
+  // ---- Layer compositor (Phase 3.9 M2): drag a lane onto the master
+  // spectrogram to overlay that stem's spectrogram (mix-blend-mode
+  // screen/normal, per-layer opacity/visibility/z-order). Initialized
+  // BEFORE the lanes panel so it can receive the lanes' drag handles.
+  // It reads the live sub/pitch-range state to map overlay rows onto the
+  // master heatmap's y range. ----
+  const layers = initLayers({
+    gd,
+    apiBase: data.apiBase,
+    getSub: () => curSub,
+    getPitchLoHi: () => pitchLoHi,
+  });
+
   // ---- Multi-lane DL workspace (Demucs stems + polyphonic notes,
   // Phase 3): same shared AudioContext; canvas rendering synced to the
   // main chart's xaxis range ----
@@ -161,6 +175,7 @@ async function main() {
     data,
     player,
     apiBase: data.apiBase,
+    layers,
   });
 
   // ---- Top bar: channel switch (mix/left/right) ----

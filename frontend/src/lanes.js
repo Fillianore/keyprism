@@ -151,7 +151,7 @@ class PolyUnavailable extends Error {
   }
 }
 
-export function initLanes({ gd, data, player, apiBase }) {
+export function initLanes({ gd, data, player, apiBase, layers }) {
   const toggle = document.getElementById('lanesToggle');
   const panel = document.getElementById('lanesPanel');
   if (!toggle || !panel) return {};
@@ -524,6 +524,23 @@ export function initLanes({ gd, data, player, apiBase }) {
     }
     scope.appendChild(seg);
     paintViewToggle(lane);
+    // Phase 3.9 M2: drag handle ("⧉ layer") — dragging it onto the master
+    // spectrogram creates an overlay layer of this stem's spectrogram
+    // (layers.js). The method is stamped at drag time so the layer keeps
+    // serving the right stem even after a method switch.
+    if (layers && layers.beginLaneDrag) {
+      const handle = document.createElement('button');
+      handle.type = 'button';
+      handle.className = 'lane-layer-handle';
+      handle.textContent = '⧉';
+      handle.title = t('layerHandleTip');
+      handle.addEventListener('pointerdown', (ev) => {
+        ev.preventDefault();
+        lane.method = state.method;
+        layers.beginLaneDrag(lane, ev);
+      });
+      scope.appendChild(handle);
+    }
   }
 
   function paintViewToggle(lane) {
