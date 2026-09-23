@@ -833,6 +833,24 @@ input[type='range']:active::-moz-range-thumb {
   cursor: default;
 }
 
+/* ORT execution-provider badge (3.10): "GPU: CUDA" / "CPU" next to the
+ * method select; the tooltip carries the full active EP chain */
+.provider-badge {
+  padding: 2px 8px;
+  border: 1px solid #26262c;
+  border-radius: 6px;
+  background: #0c0c0f;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: help;
+}
+
+.provider-badge-gpu {
+  color: #9ad48a;
+  border-color: #2d4a2b;
+}
+
 .stems-status {
   color: var(--muted);
   font-size: 11px;

@@ -537,6 +537,201 @@ def test_task_reports_downloading_phase(srv, monkeypatch):
     assert "bytes_done" not in done  # download fields leave with the phase
 
 
+# -------------------------------------------- execution providers (3.10)
+
+def test_provider_chain_prefers_gpu(monkeypatch):
+    """Probe order CUDA -> DirectML -> CoreML -> CPU, intersected with
+    the compiled-in providers: a plain [dl] install (CPU-only build)
+    silently falls back to CPU, never an error."""
+    monkeypatch.delenv("KEYPRISM_ORT_PROVIDERS", raising=False)
+    pc = dlsep.provider_chain
+    assert pc(available=["CUDAExecutionProvider",
+                         "CPUExecutionProvider"]) == \
+        ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    assert pc(available=["DmlExecutionProvider",
+                         "CPUExecutionProvider"]) == \
+        ["DmlExecutionProvider", "CPUExecutionProvider"]
+    assert pc(available=["CoreMLExecutionProvider",
+                         "CPUExecutionProvider"]) == \
+        ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+    assert pc(available=["CPUExecutionProvider"]) == ["CPUExecutionProvider"]
+    assert pc(available=[]) == []
+    # several GPUs compiled in: the first entry of the preference wins
+    assert pc(available=["CoreMLExecutionProvider",
+                         "CUDAExecutionProvider",
+                         "CPUExecutionProvider"])[0] == \
+        "CUDAExecutionProvider"
+
+
+def test_provider_chain_env_override(monkeypatch):
+    """KEYPRISM_ORT_PROVIDERS="CUDA,CPU" overrides the preference
+    (comma list, order = preference, aliases accepted); EPs the build
+    lacks are silently dropped."""
+    av = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    monkeypatch.setenv("KEYPRISM_ORT_PROVIDERS", "CUDA,CPU")
+    assert dlsep.provider_chain(available=av) == \
+        ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    # order = preference: CPU first is honored verbatim
+    monkeypatch.setenv("KEYPRISM_ORT_PROVIDERS", "CPU,CUDA")
+    assert dlsep.provider_chain(available=av) == \
+        ["CPUExecutionProvider", "CUDAExecutionProvider"]
+    # requested-but-missing EP: silently dropped -> CPU
+    monkeypatch.setenv("KEYPRISM_ORT_PROVIDERS", "CUDA")
+    assert dlsep.provider_chain(
+        available=["CPUExecutionProvider"]) == ["CPUExecutionProvider"]
+    # short alias
+    monkeypatch.setenv("KEYPRISM_ORT_PROVIDERS", "DirectML")
+    assert dlsep.provider_chain(
+        available=["DmlExecutionProvider", "CPUExecutionProvider"]) == \
+        ["DmlExecutionProvider", "CPUExecutionProvider"]
+    # override= beats the env var (test seam)
+    monkeypatch.setenv("KEYPRISM_ORT_PROVIDERS", "CUDA")
+    assert dlsep.provider_chain(
+        available=["CoreMLExecutionProvider", "CPUExecutionProvider"],
+        override="coreml") == \
+        ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+    # the override replaces the default probe entirely: an unlisted-but-
+    # available GPU is NOT picked (user preference wins); CPU remains
+    monkeypatch.setenv("KEYPRISM_ORT_PROVIDERS", "CUDA,DirectML")
+    assert dlsep.provider_chain(
+        available=["CoreMLExecutionProvider",
+                   "CPUExecutionProvider"]) == ["CPUExecutionProvider"]
+    # an all-unknown override on a CPU-less fake build falls back to the
+    # default probe
+    assert dlsep.provider_chain(
+        available=["CoreMLExecutionProvider"],
+        override="CUDA") == ["CoreMLExecutionProvider"]
+
+
+class _FakeOrt:
+    """Stands in for the onnxruntime module inside _load_session:
+    compiled-in provider list (get_available_providers) vs the ACTIVE
+    readback (session.get_providers()), plus an optional failure set
+    simulating a GPU EP that is compiled in but unusable."""
+
+    class GraphOptimizationLevel:
+        ORT_ENABLE_ALL = "all"
+
+    class SessionOptions:
+        def __init__(self):
+            self.graph_optimization_level = None
+            self.intra_op_num_threads = 0
+            self.inter_op_num_threads = 0
+
+    def __init__(self, active, available=None, fail_on=None):
+        self._active = list(active)
+        self._available = list(available if available is not None
+                               else active)
+        self._fail_on = set(fail_on or ())
+        self.requests = []
+
+    def get_available_providers(self):
+        return list(self._available)
+
+    def InferenceSession(self, path, sess_options=None, providers=None):
+        self.requests.append(list(providers or []))
+        if set(providers or []) & self._fail_on:
+            raise RuntimeError("CUDA error: driver/runtime mismatch")
+
+        class _Sess:
+            def get_providers(inner_self):  # noqa: N805
+                return list(self._active)
+
+        return _Sess()
+
+
+def test_load_session_selects_providers_and_reads_back_active(
+        tmp_path, monkeypatch):
+    """The session is created with the probed chain and the ACTIVE
+    provider list (session.get_providers() readback — ops may fall back
+    to CPU inside the graph) is recorded for /api/ping."""
+    fake = _FakeOrt(active=["CUDAExecutionProvider",
+                            "CPUExecutionProvider"],
+                    available=["CUDAExecutionProvider",
+                               "CPUExecutionProvider"])
+    monkeypatch.setattr(dlsep, "ort", fake)
+    monkeypatch.setattr(dlsep, "_ACTIVE_PROVIDERS", [])
+    monkeypatch.delenv("KEYPRISM_ORT_PROVIDERS", raising=False)
+    model = tmp_path / "m.onnx"
+    model.write_bytes(b"x")
+    dlsep._load_session(model, threads=0)
+    assert fake.requests == \
+        [["CUDAExecutionProvider", "CPUExecutionProvider"]]
+    assert dlsep.active_providers() == \
+        ["CUDAExecutionProvider", "CPUExecutionProvider"]
+
+
+def test_load_session_silent_cpu_fallback_when_gpu_unusable(
+        tmp_path, monkeypatch):
+    """A GPU EP that is compiled in but fails at session creation
+    (driver/runtime mismatch) retries CPU-only — never a crash — and
+    the active readback then reports plain CPU."""
+    fake = _FakeOrt(active=["CPUExecutionProvider"],
+                    available=["CUDAExecutionProvider",
+                               "CPUExecutionProvider"],
+                    fail_on={"CUDAExecutionProvider"})
+    monkeypatch.setattr(dlsep, "ort", fake)
+    monkeypatch.setattr(dlsep, "_ACTIVE_PROVIDERS", [])
+    monkeypatch.delenv("KEYPRISM_ORT_PROVIDERS", raising=False)
+    model = tmp_path / "m2.onnx"
+    model.write_bytes(b"x")
+    dlsep._load_session(model, threads=0)  # must not raise
+    assert fake.requests == [
+        ["CUDAExecutionProvider", "CPUExecutionProvider"],
+        ["CPUExecutionProvider"],
+    ]
+    assert dlsep.active_providers() == ["CPUExecutionProvider"]
+
+    # a CPU-only request that still fails is a real error (re-raised)
+    fake2 = _FakeOrt(active=[], available=["CPUExecutionProvider"],
+                     fail_on={"CPUExecutionProvider"})
+    monkeypatch.setattr(dlsep, "ort", fake2)
+    model3 = tmp_path / "m3.onnx"
+    model3.write_bytes(b"x")
+    with pytest.raises(RuntimeError):
+        dlsep._load_session(model3, threads=0)
+    assert fake2.requests == [["CPUExecutionProvider"]]
+
+
+def test_ping_reports_ort_providers(srv, monkeypatch):
+    """/api/ping capabilities.ort_providers: the ACTIVE EP chain (badge
+    data source); empty without the DL extra."""
+    monkeypatch.setattr(server_mod, "DL_AVAILABLE", True)
+    monkeypatch.setattr(dlsep, "_ACTIVE_PROVIDERS",
+                        ["CUDAExecutionProvider", "CPUExecutionProvider"])
+    _, ping = get(f"{srv['base']}/api/ping")
+    assert ping["capabilities"]["ort_providers"] == \
+        ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    monkeypatch.setattr(server_mod, "DL_AVAILABLE", False)
+    _, ping = get(f"{srv['base']}/api/ping")
+    assert ping["capabilities"]["ort_providers"] == []
+
+
+def test_gpu_extras_declared():
+    """[dl-cuda] / [dl-directml] extras exist (plain [dl] stays
+    CPU-only onnxruntime)."""
+    txt = (Path(__file__).resolve().parent.parent / "pyproject.toml") \
+        .read_text(encoding="utf-8")
+    assert "dl-cuda" in txt and "onnxruntime-gpu" in txt
+    assert "dl-directml" in txt and "onnxruntime-directml" in txt
+
+
+def test_provider_badge_contract():
+    """Frontend source contract: the lanes panel renders a GPU/CPU
+    provider badge from capabilities.ort_providers with a full-chain
+    tooltip, and both i18n dicts carry the keys."""
+    lanes = strip_js_comments(
+        (FRONTEND / "lanes.js").read_text(encoding="utf-8"))
+    assert "ort_providers" in lanes
+    assert "providerBadge" in lanes
+    assert "CUDAExecutionProvider" in lanes
+    assert "DmlExecutionProvider" in lanes
+    i18n = strip_js_comments(
+        (FRONTEND / "i18n.js").read_text(encoding="utf-8"))
+    for key in ("providerGpu", "providerCpu", "providerTip"):
+        assert i18n.count(f"{key}:") >= 2
+
+
 # --------------------------------------------------------- note merging
 
 def test_merge_fragmented_notes():

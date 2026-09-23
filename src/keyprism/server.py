@@ -198,6 +198,11 @@ def make_server(path: Path, port: int, host: str, start: float,
                     "poly": POLY_AVAILABLE,
                     "dl_methods": list(dlsep.DL_METHODS)
                     if DL_AVAILABLE else [],
+                    # active ORT execution providers (session readback
+                    # once a model is loaded, else the selected chain):
+                    # drives the frontend's GPU/CPU badge (3.10)
+                    "ort_providers": dlsep.active_providers()
+                    if DL_AVAILABLE else [],
                 }
                 if not caps["poly"]:
                     # precise reason: install remedy vs the Python >= 3.12

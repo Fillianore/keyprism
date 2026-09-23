@@ -77,6 +77,104 @@ except ImportError:  # pragma: no cover - exercised via the flag in tests
     ort = None
     ORT_AVAILABLE = False
 
+# ------------------------------------------------- execution providers
+#
+# The ONNX session picks its execution provider (EP) through
+# ``provider_chain``: a GPU preference probed against what the installed
+# onnxruntime build ACTUALLY ships (``ort.get_available_providers()``).
+# A plain ``[dl]`` extra installs CPU-only onnxruntime — the GPU builds
+# are separate extras (``[dl-cuda]`` = onnxruntime-gpu, ``[dl-directml]``
+# = onnxruntime-directml) — and a missing extra is a SILENT CPU
+# fallback, never an error. ``KEYPRISM_ORT_PROVIDERS`` (comma list,
+# order = preference, e.g. "CUDA,CPU") overrides the probe chain.
+
+#: The CPU EP is always the last resort (every build ships it).
+CPU_PROVIDER = "CPUExecutionProvider"
+
+#: Default preference: NVIDIA CUDA, then DirectML (any-GPU on Windows),
+#: then Apple CoreML.
+_PROVIDER_PREFERENCE = (
+    "CUDAExecutionProvider",
+    "DmlExecutionProvider",
+    "CoreMLExecutionProvider",
+)
+
+#: ``KEYPRISM_ORT_PROVIDERS`` accepts short names or raw ORT names,
+#: case-insensitively.
+_PROVIDER_ALIASES = {
+    "cuda": "CUDAExecutionProvider",
+    "cudaexecutionprovider": "CUDAExecutionProvider",
+    "directml": "DmlExecutionProvider",
+    "dml": "DmlExecutionProvider",
+    "dmlexecutionprovider": "DmlExecutionProvider",
+    "coreml": "CoreMLExecutionProvider",
+    "coremlexecutionprovider": "CoreMLExecutionProvider",
+    "cpu": "CPUExecutionProvider",
+    "cpuexecutionprovider": "CPUExecutionProvider",
+}
+
+
+def ort_available_providers() -> list:
+    """Providers compiled into the installed onnxruntime build
+    (``[]`` without onnxruntime — probing never raises)."""
+    if not ORT_AVAILABLE:
+        return []
+    try:
+        return [str(p) for p in ort.get_available_providers()]
+    except Exception:  # noqa: BLE001 - a broken install degrades to CPU
+        return []
+
+
+def provider_chain(available: list | None = None,
+                   override: str | None = None) -> list:
+    """The provider list handed to ``InferenceSession`` (ordered).
+
+    Default: CUDA -> DirectML -> CoreML -> CPU, intersected with
+    ``available`` (``ort.get_available_providers()`` when not given).
+    ``KEYPRISM_ORT_PROVIDERS="CUDA,CPU"`` replaces the preference part
+    (short names or raw ORT names, order = preference); tokens naming
+    providers this build lacks are silently dropped — the fallback is
+    CPU, never a crash. ``override=`` is the test seam (wins over the
+    env var)."""
+    if available is None:
+        available = ort_available_providers()
+    avset = {str(p) for p in available}
+    if override is None:
+        override = os.environ.get("KEYPRISM_ORT_PROVIDERS", "")
+    prefs = []
+    for token in str(override or "").split(","):
+        token = token.strip()
+        if token:
+            prefs.append(_PROVIDER_ALIASES.get(token.lower(), token))
+    if not prefs:
+        prefs = list(_PROVIDER_PREFERENCE)
+    chain = []
+    for p in prefs + [CPU_PROVIDER]:
+        if p in avset and p not in chain:
+            chain.append(p)
+    if not chain:  # override named nothing this build ships
+        chain = [p for p in list(_PROVIDER_PREFERENCE) + [CPU_PROVIDER]
+                 if p in avset]
+    return chain
+
+
+#: ACTIVE providers of the most recently loaded session, read back via
+#: ``session.get_providers()``: an EP can be REQUESTED yet partially
+#: fall back to CPU (demucs' embedded STFT ops may run on CPU), so the
+#: ping capability reports this readback, not the requested chain.
+_ACTIVE_PROVIDERS: list = []
+_ACTIVE_LOCK = threading.Lock()
+
+
+def active_providers() -> list:
+    """The EP chain to advertise via /api/ping: the loaded session's
+    ``get_providers()`` readback once a model has been loaded, else the
+    selected (requested) chain."""
+    with _ACTIVE_LOCK:
+        if _ACTIVE_PROVIDERS:
+            return list(_ACTIVE_PROVIDERS)
+    return provider_chain()
+
 try:  # optional [dl] extra: its presence gates the auto-download path
     import huggingface_hub  # noqa: F401  (availability flag only)
 
@@ -654,8 +752,17 @@ def _normalize_output(outs, n_samples: int) -> np.ndarray:
     return arr[..., :n_samples].astype(np.float32, copy=False)
 
 
-def _load_session(path: Path, threads: int | None):
-    """Cached session loader (singleton per resolved path+mtime)."""
+def _load_session(path: Path, threads: int | None = None):
+    """Cached session loader (singleton per resolved path+mtime).
+
+    Providers come from :func:`provider_chain` (GPU preference
+    intersected with the installed build). When a requested GPU EP makes
+    session creation fail anyway (driver/runtime mismatch — the EP can
+    be compiled in yet unusable on this host), the load silently retries
+    CPU-only: a missing/broken GPU stack must never crash the server.
+    The ACTIVE provider list (``session.get_providers()`` — individual
+    ops may still fall back to CPU inside the graph) is recorded for
+    :func:`active_providers` / the /api/ping capability."""
     key = (str(path.resolve()), int(path.stat().st_mtime))
     with _SESSIONS_LOCK:
         hit = _SESSIONS.get(key)
@@ -672,8 +779,17 @@ def _load_session(path: Path, threads: int | None):
         if threads and threads > 0:
             opts.intra_op_num_threads = threads
             opts.inter_op_num_threads = 1
-        sess = ort.InferenceSession(str(path), sess_options=opts,
-                                    providers=["CPUExecutionProvider"])
+        providers = provider_chain()
+        try:
+            sess = ort.InferenceSession(str(path), sess_options=opts,
+                                        providers=providers)
+        except Exception:  # noqa: BLE001 - GPU advertised but unusable
+            if providers in ([], [CPU_PROVIDER]):
+                raise
+            sess = ort.InferenceSession(str(path), sess_options=opts,
+                                        providers=[CPU_PROVIDER])
+        with _ACTIVE_LOCK:
+            _ACTIVE_PROVIDERS[:] = list(sess.get_providers())
         _SESSIONS[key] = sess
         return sess
 

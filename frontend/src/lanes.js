@@ -127,6 +127,16 @@ const DL_METHODS = {
 // Python data)
 const POLY_LANES = new Set(['piano', 'guitar', 'other']);
 
+/** ORT execution-provider display names (mirrors the raw provider names
+ *  /api/ping reports in capabilities.ort_providers — the frontend never
+ *  reads Python data). */
+const EP_NAMES = {
+  CUDAExecutionProvider: 'CUDA',
+  DmlExecutionProvider: 'DirectML',
+  CoreMLExecutionProvider: 'CoreML',
+  CPUExecutionProvider: 'CPU',
+};
+
 const LANE_META = {
   mix: { labelKey: 'laneMix', color: '#ddd6c8' },
   vocals: { labelKey: 'laneVocals', color: '#e2c48a' },
@@ -665,6 +675,27 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
     el.classList.toggle('busy', busy);
   }
 
+  /** GPU/CPU badge (3.10): the active ORT execution-provider chain from
+   *  /api/ping capabilities.ort_providers (the session's readback once a
+   *  model is loaded, else the selected chain). GPU = the first non-CPU
+   *  provider; tooltip lists the full active chain in order. */
+  function providerBadge() {
+    const eps =
+      state.caps && Array.isArray(state.caps.ort_providers)
+        ? state.caps.ort_providers
+        : [];
+    if (!eps.length) return null;
+    const names = eps.map((p) => EP_NAMES[p] || p);
+    const gpu = eps.filter((p) => p !== 'CPUExecutionProvider');
+    return {
+      gpu: gpu.length > 0,
+      text: gpu.length
+        ? t('providerGpu', { name: EP_NAMES[gpu[0]] || gpu[0] })
+        : t('providerCpu'),
+      tip: t('providerTip', { chain: names.join(' → ') }),
+    };
+  }
+
   /** POST starts the separation task, then poll /api/task/{id} until
    *  done — a cached method short-circuits to its stem list at once.
    *  Two-phase progress (3.8 D3): `downloading` reports model-download
@@ -889,7 +920,17 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
     });
     const status = document.createElement('span');
     status.className = 'lanes-status stems-status';
-    panel.append(title, methodSel, status);
+    const badge = providerBadge();
+    if (badge) {
+      const el = document.createElement('span');
+      el.className =
+        'provider-badge' + (badge.gpu ? ' provider-badge-gpu' : '');
+      el.textContent = badge.text;
+      el.title = badge.tip;
+      panel.append(title, methodSel, el, status);
+    } else {
+      panel.append(title, methodSel, status);
+    }
 
     if (!state.ready) return;
     // Mix lane: the player's own playback, ridden by the master gain.

@@ -35,6 +35,18 @@ dl = [
     "basic-pitch>=0.4.0; python_version < '3.12'",
     "huggingface-hub>=0.23",
 ]
+# GPU execution-provider builds (3.10): strictly optional on top of
+# [dl] — install AT MOST ONE of the onnxruntime builds (they conflict):
+#   uv sync --extra dl --extra dl-cuda       (NVIDIA CUDA)
+#   uv sync --extra dl --extra dl-directml   (Windows, any GPU)
+# A missing extra is a silent CPU fallback (dlsep.provider_chain);
+# KEYPRISM_ORT_PROVIDERS overrides the auto-detected preference chain.
+dl-cuda = [
+    "onnxruntime-gpu>=1.17",
+]
+dl-directml = [
+    "onnxruntime-directml>=1.17",
+]
 
 [dependency-groups]
 dev = [
