@@ -7,6 +7,109 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-23
+
+Phase 3 feature-complete release. The Phase 3 batch was cut incrementally
+as 0.5.0–0.6.4 — those sections below keep the granular records; this
+section consolidates the capability set as it ships in 0.7.0, on top of
+the final compliance and documentation pass of this release.
+
+### Features
+
+- 6-stem Demucs separation: `demucs_6` auto-downloads the real 6-stem
+  ONNX export (`StemSplitio/htdemucs-6s-onnx`, MIT; registry order
+  drums/bass/other/vocals/guitar/piano) — guitar/piano lanes work end
+  to end, with poly Notes on the poly-capable ones; `demucs_4` stays
+  the 4-stem default; a zero-probe still validates the graph contract
+  (fixed segment + stem count) at model load
+- Inference quality tiers fast / balanced / best via demucs shift
+  averaging around the untouched ONNX graph (1 / 2 / 3 passes;
+  `shifts=0` byte-equivalent to the single pass), tier-aware stem
+  cache, per-pass progress denominator, persisted dropdown
+- Device selector Auto / GPU / CPU (`&device=` routing; the GPU option
+  disables itself on GPU-less builds; provider list is part of the
+  session-singleton key) and explicit Run / Stop / Restart task
+  control: cooperative cancel at chunk/pass boundaries (partial
+  downloads discarded, no cache written), Restart = cancel + re-run
+  with `force=1` cache bypass; parameter changes never auto-analyze
+- Layer compositor: drag a lane's ⧉ handle onto the master spectrogram
+  to overlay that stem's semitone spectrogram exactly on the master
+  plot — time/pitch alignment via the shared plot geometry and pitch
+  mapping, intensity alignment via master-mix-peak normalization
+  (`peak_ref` + `basis` tag), CSS screen/normal blending with per-layer
+  opacity, ±24 dB gain and highlight-γ reshaping, visibility /
+  drag-to-reorder / remove manager; overlays repaint only on view
+  changes
+
+### Audio Engine
+
+- DAW-grade mixer (`frontend/src/mixer.js`): destructive solo
+  materialized as real mute states (M and S can never both light up),
+  per-stem make-up gain defaults (lone stems audition at
+  mix-comparable loudness), a brickwall limiter (−1 dB / 20:1 / 1 ms)
+  on the master bus, strips born muted, anti-clipping mix ducking —
+  locked by the `npm run test:mixer` transition-table suite
+- Per-lane playheads driven by the master cursor's frame loop (one
+  `ctx.currentTime` time source, zero drift) and LOD hi-res lane
+  waveforms: per-pixel-column min/max computed in a Web Worker,
+  cached per [lane, view window, columns], overview envelope keeps
+  painting while a compute is in flight
+
+### UI-UX
+
+- Lane visualization engine: shared pixel-exact plot geometry between
+  the master heatmap and every lane canvas (`geometry.js` + CSS custom
+  properties, alignment locked by `npm run test:geometry`), the
+  keyboard strip / pitch labels rebuilt into the left margin, [Wave|
+  Spec] per-lane mini-spectrograms from `GET /api/stem_spec`
+  (Phase 0 row space, disk-cached, basis-checked)
+- Compact control strip inside the Mix row (method / quality / device
+  selects, GPU/CPU badge, Run/Stop/Restart, status) — the empty lane
+  placeholder is gone and the controls stay reachable mid-task; the
+  full separation registry (classic + Demucs) is exposed in one
+  dropdown with a hand-off to the stems panel
+- Capability gating everywhere: Notes (扒谱) availability checked
+  lazily on click against `/api/ping` with precise-reason toasts,
+  dead-dropdown fixes, i18n key-completeness enforced by
+  `npm run check:i18n` in CI
+
+### GPU & Deployment
+
+- ORT execution-provider auto-detection (CUDA → DirectML → CoreML,
+  CPU always last) with `KEYPRISM_ORT_PROVIDERS` override; new extras
+  `[dl-cuda]` (Linux) and `[dl-directml]` (Windows) — a missing or
+  broken GPU extra is a silent CPU fallback, and a GPU EP failing at
+  first inference evicts the session and retries pure CPU
+- CUDA 13 runtime shipped as pip wheels with a gated preload
+  (`ort.preload_dlls` only fills gaps: a complete system CUDA install
+  wins and is never shadowed; without a CUDA-13-capable driver the
+  wheels are skipped) — fixes the
+  `libcublasLt.so.13: cannot open shared object file` silent
+  CPU degrade on WSL/驱动less hosts
+- Model provenance metadata: every resolved model file records repo
+  id, revision, commit, etag, license URL and source URL into
+  `<model_dir>/provenance.json` (weights are never redistributed
+  in-repo); auto-download streams to `.part` + atomic rename,
+  honors `HF_ENDPOINT`, and is per-byte-chunk cancellable
+
+### Docs
+
+- NOTICE final audit (v2): NVIDIA CUDA Toolkit / cuDNN wheels
+  characterized (proprietary, non-OSI, optional `[dl-cuda]`-only,
+  Linux-only, never redistributed by KeyPrism), onnxruntime-gpu /
+  onnxruntime-directml MIT, the MIT 6-stem export and the 4-stem
+  export's research-only MUSDB18-HQ weight lineage, LGPL
+  (libsndfile/FFmpeg) redistribution story resolved, Slakh2100 /
+  MUSDB18 dataset re-check — a "Non-OSI components" section keeps the
+  core MIT product clean
+- README / README_CN feature refresh for the stable Phase 3 set:
+  6-stem + quality tiers + device selector + CUDA-13 preload, layer
+  compositor, DAW mixer, lane workspace and the extended HTTP API
+  table (EN/zh kept in lockstep)
+- AGENTS.md carries the Phase 3.9/3.10 architecture decisions
+  (geometry contract, LOD worker, provider chains, quality tiers,
+  cancel chain)
+
 ## [0.6.4] - 2026-09-23
 
 ### Added
