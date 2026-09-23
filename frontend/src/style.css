@@ -60,6 +60,14 @@
   --plot-right: var(--panel-pad);
 }
 
+/* The hidden attribute MUST always win: author display rules (e.g.
+   .lanes-panel { display:flex }) otherwise override the UA's
+   [hidden] { display:none }, and the AI Separation panel never
+   collapsed when the master toggle went off (3.10.4 D6) */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body,
 #app {

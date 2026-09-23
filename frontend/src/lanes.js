@@ -1064,7 +1064,9 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
       const m = methodSel.value;
       if (m === state.method) return;
       if (DL_METHODS[m]) {
-        load(m);
+        // 3.10.4 D5: selecting a variant NEVER triggers analysis — the
+        // explicit Run button submits with the current parameters
+        state.method = m;
         return;
       }
       // classic variant: hand off to the stems panel — close the lanes
@@ -1093,13 +1095,15 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
     qualitySel.disabled = state.loading || !dlOk;
     qualitySel.addEventListener('change', () => {
       if (qualitySel.disabled || qualitySel.value === state.quality) return;
+      // 3.10.4 D5: parameter changes never auto-analyze — the next Run
+      // submits with them (the server recomputes when the cached render
+      // used a different tier)
       state.quality = qualitySel.value;
       try {
         localStorage.setItem(QUALITY_KEY, state.quality);
       } catch {
         /* storage failure: keep the session value */
       }
-      load(state.method);
     });
     // Compute device (3.10.2): Auto / GPU / CPU next to the tier. The
     // GPU option is disabled when /api/ping reports no GPU EP in the
@@ -1148,11 +1152,25 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
     });
     const status = document.createElement('span');
     status.className = 'lanes-status stems-status';
-    // Stop & Restart (3.10.3 D2, restyled 3.10.4 D1): house 26px square
+    // Run / Stop / Restart (3.10.4 D5 + 3.10.3 D2): house 26px square
     // icon-buttons (same chrome as the M/S keys; champagne active fill
-    // marks an in-flight task). State machine — stop enabled ONLY while
-    // a task is downloading/running; restart enabled when done/error/
-    // cancelled and re-submits with force=1 (cache bypassed).
+    // marks an in-flight task). State machine — idle: only Run enabled;
+    // running/downloading: only Stop enabled; done/error/cancelled:
+    // Run + Restart enabled, Stop disabled. Run submits a plain POST
+    // (opening the panel or changing parameters NEVER auto-analyzes);
+    // Restart = cancel-if-running + Run with force=1.
+    const runBtn = document.createElement('button');
+    runBtn.type = 'button';
+    runBtn.className = 'stem-btn';
+    runBtn.textContent = '▶';
+    runBtn.setAttribute('aria-label', t('runSep'));
+    runBtn.title = t('runTip');
+    runBtn.addEventListener('click', () => {
+      if (!state.loading && state.taskState !== 'running' &&
+          state.taskState !== 'downloading') {
+        load(state.method, false);
+      }
+    });
     const stopBtn = document.createElement('button');
     stopBtn.type = 'button';
     stopBtn.className = 'stem-btn';
@@ -1167,8 +1185,8 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
     restartBtn.setAttribute('aria-label', t('restartSep'));
     restartBtn.title = t('restartTip');
     restartBtn.addEventListener('click', () => restartSeparation());
-    mix.scope.append(title, methodSel, qualitySel, deviceSel, stopBtn,
-      restartBtn, status);
+    mix.scope.append(title, methodSel, qualitySel, deviceSel, runBtn,
+      stopBtn, restartBtn, status);
     const badge = providerBadge();
     if (badge) {
       const el = document.createElement('span');
@@ -1176,8 +1194,9 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
         'provider-badge' + (badge.gpu ? ' provider-badge-gpu' : '');
       el.textContent = badge.text;
       el.title = badge.tip;
-      mix.scope.insertBefore(el, stopBtn);
+      mix.scope.insertBefore(el, runBtn);
     }
+    state.runBtn = runBtn;
     state.stopBtn = stopBtn;
     state.restartBtn = restartBtn;
     paintStripButtons();
@@ -1216,19 +1235,26 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
     state.lanes = [];
   }
 
-  /** Button state machine (3.10.3 D2): stop enabled ONLY while a task
-   *  is downloading/running; restart enabled when idle/done/error/
-   *  cancelled (it cancels any running task, then re-submits with
-   *  force=1). Both stay dead without the DL extra. */
+  /** Button state machine (3.10.4 D5): idle → Run enabled; running/
+   *  downloading → Stop enabled, Run/Restart disabled (champagne .active
+   *  fill marks the in-flight Run); done/error/cancelled → Run and
+   *  Restart enabled, Stop disabled. Everything stays dead without the
+   *  DL extra. */
   function paintStripButtons() {
+    const dlOk = !!state.caps && state.caps.dl;
     const active =
       state.taskState === 'running' || state.taskState === 'downloading';
     if (state.stopBtn) {
       state.stopBtn.disabled = !active;
     }
+    if (state.runBtn) {
+      state.runBtn.disabled = !dlOk || state.loading || active;
+      state.runBtn.classList.toggle('active', active);
+    }
     if (state.restartBtn) {
-      state.restartBtn.disabled =
-        state.loading || active || !state.caps || !state.caps.dl;
+      // idle has nothing to restart: Run is the entry action there
+      state.restartBtn.disabled = !dlOk || state.loading || active ||
+        state.taskState === 'idle';
     }
   }
 
@@ -1289,7 +1315,10 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
       ?.classList.add('loading');
     teardownLanes();
     renderShell();
-    setStatus(t('lanesSeparating', { pct: 0 }), true);
+    setStatus(t('lanesSeparating', {
+      pct: 0,
+      passes: QUALITY_PASSES[state.quality] || 1,
+    }), true);
     let lanes = [];
     try {
       const list = await requestStems(method, force);
@@ -1400,11 +1429,19 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
     }
   }
 
+  /** Panel entry (3.10.4 D5): opening the AI Separation panel shows an
+   *  IDLE strip — no analysis is started until the explicit Run button.
+   *  Parameter changes only update state; Run submits with them. */
   function enable() {
     state.enabled = true;
     state.savedMix = player.mixGainNorm();
     panel.hidden = false;
-    load(state.method);
+    state.taskId = null;
+    state.taskState = 'idle';
+    state.abortLoad = false;
+    state.stopRequested = false;
+    renderShell();
+    setStatus(t('lanesIdle'));
   }
 
   function disable() {

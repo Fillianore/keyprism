@@ -698,6 +698,56 @@ def test_stop_restart_frontend_contract():
         assert i18n.count(f"{key}:") >= 2
 
 
+def test_run_button_no_auto_analysis_contract():
+    """3.10.4 D5: an explicit ▶ Run button submits the separation;
+    opening the panel or changing method/quality/device NEVER triggers
+    analysis (enable() renders idle, parameter handlers only persist
+    state); Restart = cancel-if-running + Run with force=1; the strip
+    state machine is idle→Run, running→Stop, done/error/cancelled→
+    Run+Restart."""
+    lanes = strip_js_comments(
+        (FRONTEND / "lanes.js").read_text(encoding="utf-8"))
+    assert "runBtn.className = 'stem-btn'" in lanes
+    assert "runSeparation" not in lanes or "load(state.method, false)" in \
+        lanes
+    # enable() is IDLE: no load() call on panel entry
+    enable_src = lanes[lanes.index("function enable()"):]
+    enable_src = enable_src[:enable_src.index("function disable()")]
+    assert "load(" not in enable_src
+    assert "t('lanesIdle')" in enable_src
+    # parameter handlers persist without loading
+    method_blk = lanes[lanes.index("methodSel.addEventListener"):]
+    method_blk = method_blk[:method_blk.index("qualitySel.addEventListener")]
+    assert "state.method = m;" in method_blk and "load(m)" not in method_blk
+    qual_blk = lanes[lanes.index("qualitySel.addEventListener"):]
+    qual_blk = qual_blk[:qual_blk.index("const gpuAvailable")]
+    assert "load(" not in qual_blk
+    # the state machine: champagne .active marks the in-flight run
+    assert "state.runBtn.classList.toggle('active', active)" in lanes
+    assert "state.restartBtn.disabled = !dlOk || state.loading || active ||" \
+        in lanes
+    i18n = strip_js_comments(
+        (FRONTEND / "i18n.js").read_text(encoding="utf-8"))
+    for key in ("runSep", "runTip", "lanesIdle"):
+        assert i18n.count(f"{key}:") >= 2
+
+
+def test_master_toggle_collapse_contract():
+    """3.10.4 D6: the master AI Separation toggle off collapses the
+    panel (disable() sets panel.hidden + teardownLanes which stops all
+    stem sources) — and the global [hidden] rule makes the attribute
+    actually win over author display rules (the .lanes-panel flex rule
+    used to defeat it, so the panel never collapsed)."""
+    lanes = strip_js_comments(
+        (FRONTEND / "lanes.js").read_text(encoding="utf-8"))
+    disable_src = lanes[lanes.index("function disable()"):]
+    disable_src = disable_src[:disable_src.index("panel.hidden = true") + 60]
+    assert "panel.hidden = true" in disable_src
+    assert "teardownLanes()" in disable_src
+    css = (FRONTEND / "style.css").read_text(encoding="utf-8")
+    assert "[hidden] {" in css and "display: none !important;" in css
+
+
 def test_unified_method_selector_contract():
     """3.10.1 D1: the AI Separation panel's method dropdown exposes the
     FULL backend registry — classic hpss/rpca/combined (grouped) plus
