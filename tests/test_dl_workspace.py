@@ -407,6 +407,38 @@ def test_demucs6_download_records_provenance(tmp_path, monkeypatch):
     assert again["source_url"] == entry["source_url"]
 
 
+def test_glob_fallback_cannot_hijack_variant_download(
+        tmp_path, monkeypatch):
+    """A foreign ONNX already in the model dir (e.g. a 4-stem
+    htdemucs.onnx from an earlier demucs_4 install) must NOT satisfy a
+    demucs_6 resolve: the variant download is attempted FIRST, and the
+    glob only serves as the manual/offline escape hatch."""
+    monkeypatch.setattr(audio_io, "KEYPRISM_HOME", tmp_path / "home")
+    d = tmp_path / "home" / "models" / "demucs"
+    d.mkdir(parents=True)
+    (d / "htdemucs.onnx").write_bytes(b"OLD4STEM")
+
+    def fake_download_to(url, dest, progress=None, urlopen=None, meta=None):
+        seen["url"] = url
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"NEW6STEM")
+        return dest
+
+    seen = {}
+    monkeypatch.setattr(dlsep, "HF_AVAILABLE", True)
+    monkeypatch.setattr(dlsep, "_download_to", fake_download_to)
+    sep = dlsep.DemucsSeparator("demucs_6", infer=lambda c: c)
+    p = sep._resolve_model_file()
+    assert p.read_bytes() == b"NEW6STEM"          # the real model wins
+    assert "StemSplitio/htdemucs-6s-onnx" in seen["url"]
+
+    # offline (no huggingface_hub): the glob escape hatch still serves
+    monkeypatch.setattr(dlsep, "HF_AVAILABLE", False)
+    (d / "htdemucs_6s.onnx").unlink(missing_ok=True)
+    sep2 = dlsep.DemucsSeparator("demucs_6", infer=lambda c: c)
+    assert sep2._resolve_model_file().read_bytes() == b"OLD4STEM"
+
+
 def test_lanes_demucs_6_six_lane_contract():
     """Frontend source contract: demucs_6 renders SIX lanes (registry
     mirror in export source order) and the poly Notes chip stays on the

@@ -666,30 +666,40 @@ class DemucsSeparator:
             # provenance merges into the original download entry
             self._record(p, source="cache", spec=spec, repo=spec["repo"])
             return p
+        # auto-download BEFORE the anonymous glob fallback: the model dir
+        # may hold an UNRELATED export under a different name (first real
+        # 3.10 deployment: a 4-stem htdemucs.onnx from an earlier
+        # demucs_4 install), and the glob would serve it — the zero-probe
+        # then rejects it with a confusing stem-count error instead of
+        # ever fetching the right model. The glob stays as the manual
+        # escape hatch (offline hosts, custom exports) and the failure
+        # path of the download.
+        last_err: Exception | None = None
+        if HF_AVAILABLE:
+            repo = self._env("REPO") or spec["repo"]
+            url = f"{_hf_endpoint()}/{repo}/resolve/main/{spec['file']}"
+            meta: dict = {}
+            try:
+                dest = _download_to(url, d / spec["file"],
+                                    progress=download_progress, meta=meta)
+            except Exception as e:  # noqa: BLE001 - network/404/... degrade
+                last_err = e
+            else:
+                self._record(dest, source="auto-download", spec=spec,
+                             repo=repo, source_url=url, meta=meta)
+                return dest
         if d.is_dir():
             onnx = sorted(d.glob("*.onnx"))
             if onnx:
                 self._record(onnx[0], source="model-dir glob")
                 return onnx[0]
-        # last resort: auto-download from the variant's HF repo (streamed
-        # with byte progress into the task registry, 3.8 D3)
         if not HF_AVAILABLE:
             raise DLMissingError(
                 f"未找到 Demucs 模型且 huggingface_hub 未安装: 请将 ONNX 模型放到 "
                 f"{d} 或安装 DL 依赖 (uv sync --extra dl)")
-        repo = self._env("REPO") or spec["repo"]
-        url = f"{_hf_endpoint()}/{repo}/resolve/main/{spec['file']}"
-        meta: dict = {}
-        try:
-            dest = _download_to(url, d / spec["file"],
-                                progress=download_progress, meta=meta)
-        except Exception as e:  # noqa: BLE001 - network/404/... all degrade
-            raise DLMissingError(
-                f"Demucs 模型下载失败 ({repo}/{spec['file']}): {e}; "
-                f"可手动放置 ONNX 模型到 {d}") from e
-        self._record(dest, source="auto-download", spec=spec, repo=repo,
-                     source_url=url, meta=meta)
-        return dest
+        raise DLMissingError(
+            f"Demucs 模型下载失败 ({spec['repo']}/{spec['file']}): "
+            f"{last_err}; 可手动放置 ONNX 模型到 {d}")
 
     # -- inference ---------------------------------------------------------
 

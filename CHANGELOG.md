@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Phase 3.10 — 6-stem auto-download, GPU providers, quality tiers:
+  - `demucs_6` now auto-downloads the REAL 6-stem ONNX export
+    (`StemSplitio/htdemucs-6s-onnx`, MIT) — the Phase 3.5 conclusion
+    that no auto-downloadable 6-stem export existed was wrong; the
+    registry mirrors the export's source order
+    drums/bass/other/vocals/guitar/piano (guitar BEFORE piano), so the
+    piano/guitar lanes finally work end to end (six lanes, poly Notes
+    on the poly-capable ones). The zero-probe contract check (segment
+    length + stem count) still fails fast on mislabelled exports
+  - Model provenance metadata: every resolved model file (auto-download,
+    cache re-resolve, env override, model-dir glob) is recorded into
+    `<model_dir>/provenance.json` — repo id, revision, commit, etag,
+    license URL, source URL — for the license audit; weights are never
+    redistributed in-repo
+  - ORT execution-provider auto-detection: CUDA → DirectML → CoreML →
+    CPU probed against `ort.get_available_providers()`; overridable via
+    `KEYPRISM_ORT_PROVIDERS` (comma list, order = preference, short or
+    raw names); new extras `[dl-cuda]` (onnxruntime-gpu) and
+    `[dl-directml]` (onnxruntime-directml) — plain `[dl]` stays
+    CPU-only, and a missing GPU extra is a silent CPU fallback; a
+    compiled-in but unusable GPU EP retries CPU-only at session load.
+    `/api/ping` exposes the ACTIVE provider chain (session
+    `get_providers()` readback) as `capabilities.ort_providers`, and
+    the lanes panel shows a GPU/CPU badge with the chain as tooltip
+  - Inference quality tiers via demucs `shifts`, applied externally
+    around the ONNX graph (circular-shift → infer → shift back →
+    average; chunking/OLA untouched): fast = 1 pass, balanced = 2
+    (default), best = 3; `POST /api/stems&quality=` with a tier-aware
+    cache (tier switch recomputes; `status.json` records the tier) and
+    a per-pass progress denominator (chunks × passes); the lanes panel
+    gains a persisted quality dropdown beside the method select
+
+### Changed
+
+- `dlsep.STEM_SPECS["demucs_6"]` order changed to match the reference
+  export (`guitar` now before `piano`); no valid demucs_6 cache can
+  exist (the previous variant always failed the zero-probe), so
+  `DL_STEMS_VERSION` was NOT bumped — 4-stem caches stay valid
+
+### Fixed
+
+- DL model resolution order: the anonymous model-dir glob
+  (`*.onnx`) is now consulted only AFTER the variant's auto-download —
+  previously a foreign export already in the dir (e.g. a 4-stem
+  `htdemucs.onnx` from an earlier demucs_4 install) satisfied a
+  demucs_6 resolve first and was rejected by the zero-probe with a
+  confusing stem-count error instead of fetching the right model; the
+  glob stays as the manual/offline escape hatch
+
 ## [0.6.3] - 2026-09-23
 
 ### Added
