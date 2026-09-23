@@ -95,6 +95,7 @@ import { trackRow, wireMuteSolo } from './controls.js';
 import { showToast } from './toast.js';
 import { WaveLod } from './wavelod.js';
 import { getStemSpec, createSpecImage } from './stemspec.js';
+import { openWithMethod } from './stems.js';
 import { throttled } from './util.js';
 
 const START_LEAD = 0.06; // keep identical to player.js START_LEAD
@@ -132,6 +133,14 @@ const DL_METHODS = {
   demucs_4: ['drums', 'bass', 'other', 'vocals'],
   demucs_6: ['drums', 'bass', 'other', 'vocals', 'guitar', 'piano'],
 };
+
+/** Classic separation variants (mirrors keyprism.stems.STEM_SPECS /
+ *  server stems.METHODS — the frontend never reads Python data). They
+ *  complete the method registry (3.10.1 D1): the AI Separation panel's
+ *  dropdown exposes ALL five backend variants; picking a classic one
+ *  hands off to the stems panel (openWithMethod) instead of forking a
+ *  classic renderer into the lanes pipeline. */
+const CLASSIC_METHODS = ['hpss', 'rpca', 'combined'];
 
 // demucs_6 stems eligible for polyphonic transcription (mirrors
 // keyprism.poly_transcribe.POLY_TRACKS — the frontend never reads
@@ -926,21 +935,47 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
     const methodSel = document.createElement('select');
     methodSel.className = 'stems-method';
     const dlOk = !!state.caps && state.caps.dl;
+    // The FULL separation registry in one dropdown (3.10.1 D1): classic
+    // variants grouped first, then the Demucs variants this panel owns.
+    const classicGroup = document.createElement('optgroup');
+    classicGroup.label = t('methodClassic');
+    for (const m of CLASSIC_METHODS) {
+      const o = document.createElement('option');
+      o.value = m;
+      o.textContent = t(`stemsMethod_${m}`);
+      classicGroup.appendChild(o);
+    }
+    const dlGroup = document.createElement('optgroup');
+    dlGroup.label = t('methodAI');
     for (const m of Object.keys(DL_METHODS)) {
       const o = document.createElement('option');
       o.value = m;
       o.textContent = t(`lanesMethod_${m}`);
       if (m === state.method) o.selected = true;
-      methodSel.appendChild(o);
+      dlGroup.appendChild(o);
     }
+    methodSel.append(classicGroup, dlGroup);
     methodSel.disabled = state.loading || !dlOk;
     if (!dlOk) {
       methodSel.title = t('dlNeedsExtra');
     }
     methodSel.addEventListener('change', () => {
-      if (!methodSel.disabled && methodSel.value !== state.method) {
-        load(methodSel.value);
+      if (methodSel.disabled) return;
+      const m = methodSel.value;
+      if (m === state.method) return;
+      if (DL_METHODS[m]) {
+        load(m);
+        return;
       }
+      // classic variant: hand off to the stems panel — close the lanes
+      // panel first so the mix gain hands back before the stems panel
+      // re-saves it (the off button's visual state rides along)
+      const offBtn = toggle.querySelector('button[data-lanes="off"]');
+      toggle
+        .querySelectorAll('button')
+        .forEach((b) => b.classList.toggle('active', b === offBtn));
+      disable();
+      openWithMethod(m);
     });
     // Inference quality tier (3.10): demucs shifts — fast = 1 pass,
     // balanced = 2, best = 3. Persisted; a switch re-POSTs, and the

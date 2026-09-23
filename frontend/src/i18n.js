@@ -53,6 +53,8 @@ export const dict = {
     lanesAria: 'AI separation lanes (Demucs)',
     lanesMethod_demucs_4: 'Demucs 4-stem',
     lanesMethod_demucs_6: 'Demucs 6-stem',
+    methodClassic: 'Classic',
+    methodAI: 'AI (Demucs)',
     lanesSeparating: 'DL separating… {pct}%',
     lanesDownloading:
       'Downloading model {done} / {total} MB ({speed} MB/s)',
@@ -190,6 +192,8 @@ export const dict = {
     lanesAria: 'AI 分离多轨 (Demucs)',
     lanesMethod_demucs_4: 'Demucs 4 轨',
     lanesMethod_demucs_6: 'Demucs 6 轨',
+    methodClassic: '传统',
+    methodAI: 'AI 分离 (Demucs)',
     lanesSeparating: 'DL 分离中… {pct}%',
     lanesDownloading: '下载模型 {done} / {total} MB ({speed} MB/s)',
     lanesFailed: '多轨失败: {msg}',

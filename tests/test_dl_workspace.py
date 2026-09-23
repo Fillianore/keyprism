@@ -451,6 +451,31 @@ def test_lanes_demucs_6_six_lane_contract():
     assert "for (const lane of state.lanes) buildLaneRow" in lanes
 
 
+def test_unified_method_selector_contract():
+    """3.10.1 D1: the AI Separation panel's method dropdown exposes the
+    FULL backend registry — classic hpss/rpca/combined (grouped) plus
+    demucs_4/demucs_6 — and a classic selection hands off to the stems
+    panel (openWithMethod) instead of forking a classic renderer into
+    the lanes pipeline. demucs_6 is POSTed explicitly (never rewritten
+    to demucs_4)."""
+    lanes = strip_js_comments(
+        (FRONTEND / "lanes.js").read_text(encoding="utf-8"))
+    assert "['hpss', 'rpca', 'combined']" in lanes
+    assert "demucs_6: ['drums', 'bass', 'other', 'vocals', 'guitar', 'piano']" \
+        in lanes
+    assert "optgroup" in lanes
+    assert "openWithMethod" in lanes
+    assert "`${apiBase}/api/stems?method=${method}&quality=${state.quality}`" \
+        in lanes
+    stems = strip_js_comments(
+        (FRONTEND / "stems.js").read_text(encoding="utf-8"))
+    assert "export function openWithMethod" in stems
+    i18n = strip_js_comments(
+        (FRONTEND / "i18n.js").read_text(encoding="utf-8"))
+    for key in ("methodClassic", "methodAI"):
+        assert i18n.count(f"{key}:") >= 2
+
+
 # ------------------------------------------------- model download (3.8)
 
 class _FakeResp:

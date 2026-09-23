@@ -357,6 +357,24 @@ export function initStems({ data, player, apiBase }) {
     load(state.method);
   }
 
+  /** Programmatic entry (3.10.1): the AI Separation panel's method
+   *  dropdown lists the FULL backend registry and hands classic
+   *  variants (hpss/rpca/combined) over here — reveal the panel (with
+   *  the toggle's visual state synced) and load the requested method.
+   *  No classic renderer is forked into lanes.js; the panels keep their
+   *  own pipelines and this stays the one classic entry point. */
+  export function openWithMethod(method) {
+    const onBtn = toggle.querySelector('button[data-stems="on"]');
+    if (!state.enabled) {
+      toggle
+        .querySelectorAll('button')
+        .forEach((b) => b.classList.toggle('active', b === onBtn));
+      enable();
+    } else if (method !== state.method && !state.loading) {
+      load(method);
+    }
+  }
+
   function disable() {
     state.enabled = false;
     stopAll();
