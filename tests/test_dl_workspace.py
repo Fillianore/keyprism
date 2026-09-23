@@ -951,10 +951,12 @@ class _FakeOrt:
 
 
 def test_load_session_selects_providers_and_reads_back_active(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, capsys):
     """The session is created with the probed chain and the ACTIVE
     provider list (session.get_providers() readback — ops may fall back
-    to CPU inside the graph) is recorded for /api/ping."""
+    to CPU inside the graph) is recorded for /api/ping; the requested vs
+    active chain is logged so a device switch is observable (3.10.4
+    D4)."""
     fake = _FakeOrt(active=["CUDAExecutionProvider",
                             "CPUExecutionProvider"],
                     available=["CUDAExecutionProvider",
@@ -972,6 +974,9 @@ def test_load_session_selects_providers_and_reads_back_active(
         [["CUDAExecutionProvider", "CPUExecutionProvider"]]
     assert dlsep.active_providers() == \
         ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    out = capsys.readouterr().out
+    assert "requested" in out or "请求" in out
+    assert "CUDAExecutionProvider" in out
 
 
 def test_load_session_silent_cpu_fallback_when_gpu_unusable(
@@ -1005,6 +1010,26 @@ def test_load_session_silent_cpu_fallback_when_gpu_unusable(
     with pytest.raises(RuntimeError):
         dlsep._load_session(model3, threads=0)
     assert fake2.requests == [["CPUExecutionProvider"]]
+
+
+def test_stop_cancel_chain_contract():
+    """3.10.4 D3 regression contract: the FULL stop chain is present —
+    button → POST /api/task/{id}/cancel → (server flag → boundary abort
+    → cancelled status, covered by test_task_cancel_endpoint_and_no_cache)
+    → poll unwind to idle. The traced breakpoint (an enabled Stop click
+    in the window before the task id arrives silently no-op'd) is closed
+    by the stopRequested latch honored in requestStems."""
+    lanes = strip_js_comments(
+        (FRONTEND / "lanes.js").read_text(encoding="utf-8"))
+    assert "state.stopRequested" in lanes
+    assert "stopRequested = true" in lanes
+    # the latch is honored the moment the task id arrives
+    latch = lanes[lanes.index("state.taskId = body.task_id"):]
+    latch = latch[:latch.index("const taskUrl")]
+    assert "state.stopRequested" in latch and "cancel" in latch
+    # the poll unwinds a cancelled task to idle with no failure text
+    assert "tb.status === 'cancelled'" in lanes
+    assert "e.cancelled" in lanes
 
 
 def test_session_key_includes_providers(tmp_path, monkeypatch):

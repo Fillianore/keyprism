@@ -260,6 +260,7 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
     taskId: null, // /api/task/{id} of the in-flight separation (3.10.3)
     taskState: 'idle', // idle | running | downloading | done | error | cancelled
     abortLoad: false, // restart asks the in-flight load to unwind
+    stopRequested: false, // stop clicked before the task id arrived (3.10.4 D3)
     view: {
       aMs: EPOCH_MS,
       bMs: EPOCH_MS + Math.round(data.durationSec * 1000),
@@ -790,6 +791,17 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
     state.taskId = body.task_id;
     state.taskState = 'running';
     paintStripButtons();
+    // 3.10.4 D3: Stop was clicked before the task id existed — cancel
+    // immediately instead of running the task to completion
+    if (state.stopRequested) {
+      state.stopRequested = false;
+      fetch(`${apiBase}/api/task/${state.taskId}/cancel`, {
+        method: 'POST',
+      }).catch(() => {});
+      state.taskState = 'cancelled';
+      paintStripButtons();
+      throw cancelledError();
+    }
     const taskUrl = `${apiBase}${body.status_url}`;
     for (;;) {
       if (!state.enabled || state.method !== method || state.abortLoad) {
@@ -1220,16 +1232,21 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
     }
   }
 
-  /** Stop: POST /api/task/{id}/cancel — the server flips the task's
-   *  cooperative cancel flag and the job aborts at the next chunk/pass
-   *  boundary (ort run() is uninterruptible; bounded by one ~7.8 s
-   *  model segment). The poll loop sees status "cancelled" and unwinds
-   *  the load; the UI returns to idle and no stem cache is written. */
+  /** Stop (3.10.4 D3): the POST /api/task/{id}/cancel → registry flag →
+   *  chunk/pass boundary → status "cancelled" chain. The one breakpoint
+   *  QA hit: between dispatching the separation POST and its response
+   *  there is NO task id yet — an enabled Stop click silently no-op'd.
+   *  The click now LATCHES (stopRequested) and requestStems cancels the
+   *  task the moment it learns the id. */
   async function stopSeparation() {
-    if (!state.taskId || state.abortLoad) return;
-    const id = state.taskId;
+    if (state.abortLoad) return;
+    if (!state.taskId) {
+      state.stopRequested = true;
+      setStatus(t('lanesCancelling'), true);
+      return;
+    }
     try {
-      await fetch(`${apiBase}/api/task/${id}/cancel`, {
+      await fetch(`${apiBase}/api/task/${state.taskId}/cancel`, {
         method: 'POST',
       });
     } catch {
@@ -1263,6 +1280,7 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
     state.method = method;
     state.ready = false;
     state.taskId = null;
+    state.stopRequested = false;
     state.taskState = 'running';
     // spinner on the On button immediately (3.8 D2): a click is never
     // visually dead while the task starts up
@@ -1397,6 +1415,7 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
     state.taskId = null;
     state.taskState = 'idle';
     state.abortLoad = false;
+    state.stopRequested = false;
     toggle
       .querySelector('button[data-lanes="on"]')
       ?.classList.remove('loading');

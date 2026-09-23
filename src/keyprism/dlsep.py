@@ -1044,10 +1044,17 @@ def _load_session(path: Path, threads: int | None = None,
         except Exception:  # noqa: BLE001 - GPU advertised but unusable
             if providers == [CPU_PROVIDER]:
                 raise
+            print(f"[dlsep] 会话创建在 {providers} 上失败, 回退纯 CPU",
+                  flush=True)
             sess = ort.InferenceSession(str(path), sess_options=opts,
                                         providers=[CPU_PROVIDER])
         with _ACTIVE_LOCK:
             _ACTIVE_PROVIDERS[:] = list(sess.get_providers())
+        # 3.10.4 D4: make the EP chain observable in the backend log —
+        # requested vs ACTIVE (ops may fall back to CPU inside the
+        # graph), so a device switch shows the rebuilt session's chain
+        print(f"[dlsep] ONNX 会话 {path.name}: 请求 {providers}, "
+              f"激活 {list(sess.get_providers())}", flush=True)
         _SESSIONS[key] = sess
         _SESSION_META[key] = {"providers": list(providers)}
         return sess
