@@ -44,6 +44,21 @@ const START_LEAD = 0.06; // keep identical to player.js START_LEAD
 const METHODS = ['combined', 'hpss', 'rpca'];
 const POLL_MS = 700;
 
+/** Classic-handoff entry point (3.10.1 D1), registered by initStems and
+ *  dispatched by openWithMethod below — initStems may run before a
+ *  classic handoff is ever requested, and the closure it registers owns
+ *  the toggle/state/load bindings. */
+let classicEntry = null;
+
+/** Programmatic entry for the AI Separation panel's method dropdown:
+ *  reveal the classic stems panel (toggle visual state synced) and load
+ *  the requested classic method (hpss/rpca/combined). No classic
+ *  renderer is forked into lanes.js — this stays the ONE classic entry
+ *  point. A no-op until initStems has run (static mode / early calls). */
+export function openWithMethod(method) {
+  if (classicEntry) classicEntry(method);
+}
+
 /** Fixed stem contract per method (mirrors keyprism.stems.STEM_SPECS —
  *  the frontend never reads Python data). The /api/stems response MUST
  *  match EXACTLY this list, in this order, for every file length: a
@@ -329,6 +344,12 @@ export function initStems({ data, player, apiBase }) {
       mixer.mix.volume = player.mixGainNorm();
       mixer.mix.muted = false;
       mixer.mix.solo = false;
+      // 3.10.1 D2 root cause: clear the flag BEFORE the final render —
+      // renderPanel disables the method select while state.loading is
+      // set, so the old ordering (cleared only in finally, after the
+      // render) left the dropdown permanently dead. Ends the progress
+      // poll loop too (best-effort by then).
+      state.loading = false;
       renderPanel();
       mixer.apply();
       if (player.isPlaying()) {
@@ -339,6 +360,7 @@ export function initStems({ data, player, apiBase }) {
     } catch (e) {
       if (state.method === method) {
         state.ready = false;
+        state.loading = false; // same ordering rule: render enabled
         renderPanel();
         setStatus(t('stemsFailed', { msg: e.message }));
       }
@@ -356,6 +378,21 @@ export function initStems({ data, player, apiBase }) {
     panel.hidden = false;
     load(state.method);
   }
+
+  // 3.10.1 D1: the classic handoff entry the AI Separation panel's
+  // method dropdown calls (registered by initStems below — the toggle,
+  // state and load live in this init closure)
+  classicEntry = (method) => {
+    const onBtn = toggle.querySelector('button[data-stems="on"]');
+    if (!state.enabled) {
+      toggle
+        .querySelectorAll('button')
+        .forEach((b) => b.classList.toggle('active', b === onBtn));
+      enable();
+    } else if (method !== state.method && !state.loading) {
+      load(method);
+    }
+  };
 
   function disable() {
     state.enabled = false;

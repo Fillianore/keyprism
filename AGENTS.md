@@ -328,20 +328,57 @@ Decisions that are easy to "simplify" into regressions:
   chunk (`_pad_segment`); injected-infer backends and
   `KEYPRISM_DL_SEGMENT` overrides flow through the same seam. Do not
   "simplify" back to arbitrary chunk sizes.
-- **Model discovery defaults live in `dlsep._VARIANTS`** — currently
-  `smank/htdemucs-onnx` (graph contract: input `mix [1,2,T]`, single
-  output `sources [1,S,2,T]`, STFT embedded). The previous default
-  repo (Xenova/htdemucs-onnx) vanished from the Hub, which silently
-  broke auto-download. huggingface.co is unreachable from the dev
-  network: set `HF_ENDPOINT=https://hf-mirror.com` for the download,
-  or drop any compatible ONNX into `~/.keyprism/models/demucs/` (the
-  glob fallback picks it up). Caveat: as of Phase 3.5 the Hub has NO
-  usable auto-downloadable 6-stem export (smank's `htdemucs_6s.onnx`
-  actually ships 4 sources; the Kani95/timcsy exports expose the
-  internal STFT as a required second input) — `demucs_6` therefore
-  fails FAST at model load (session zero-probe validating segment +
-  stem count) until a compatible export is provided via
-  `KEYPRISM_DEMUCS6_FILE`; `demucs_4` auto-downloads and works.
+- **Model discovery defaults live in `dlsep._VARIANTS`** — demucs_4 is
+  `smank/htdemucs-onnx`, demucs_6 is `StemSplitio/htdemucs-6s-onnx`
+  (graph contract of both: input `mix [1,2,T]`, single output
+  `sources|stems [1,S,2,T]`, STFT embedded, opset 17). Phase 3.5's
+  claim that no auto-downloadable 6-stem export existed was WRONG
+  (its smank default shipped 4 sources and always failed the
+  zero-probe); 3.10 points demucs_6 at the real 6-stem export, whose
+  source order is drums/bass/other/vocals/**guitar/piano** —
+  `STEM_SPECS` mirrors that order POSITIONALLY (rows are zipped, never
+  name-matched), so do not "alphabetize" it. huggingface.co is
+  unreachable from the dev network: set `HF_ENDPOINT=https://hf-mirror.com`
+  for the download, or drop any compatible ONNX into
+  `~/.keyprism/models/demucs/` (the glob fallback picks it up). Every
+  resolved model file is recorded into
+  `<model_dir>/provenance.json` (repo id, revision, commit, etag,
+  license URL) for the license audit — weights are NEVER redistributed
+  in-repo, and a repo swap must keep that metadata flowing.
+- **ORT execution providers are probed, not hardcoded**
+  (3.10 `dlsep.provider_chain`): CUDA → DirectML → CoreML, intersected
+  with `ort.get_available_providers()`, with `CPUExecutionProvider`
+  ALWAYS appended last (3.10.2: ops without a GPU kernel then run on
+  CPU instead of failing the session);
+  `KEYPRISM_ORT_PROVIDERS="CUDA,CPU"` (comma list, order = preference)
+  overrides. Plain `[dl]` stays CPU-only; `[dl-cuda]` /
+  `[dl-directml]` add the GPU builds, and a missing/broken GPU extra
+  is a SILENT CPU fallback (session load retries CPU-only when a
+  compiled-in EP fails at creation, and a `session.run()` failure —
+  CUDA error 9 / NOT_IMPLEMENTED on a node without a kernel, surfaces
+  only at FIRST INFERENCE — evicts the cached session and retries once
+  pure-CPU) — never a crash, never a 500.
+  What `/api/ping` reports as `capabilities.ort_providers` is the
+  ACTIVE chain (the session's `get_providers()` readback — demucs'
+  embedded STFT ops may partially fall back to CPU), not the requested
+  one, and `ort_providers_available` lists the compiled-in providers;
+  the frontend GPU/CPU badge renders from the former and the Device
+  dropdown's GPU option from the latter. The Device selector
+  (`POST /api/stems&device=auto|gpu|cpu`, `providers_for_device`)
+  forces chains — forced choices bypass the env override, gpu without
+  a GPU EP is a 400, and the session-singleton key includes the
+  provider list so device switches never reuse a session built for
+  another chain (a device switch does NOT invalidate the stem cache:
+  the audio is identical either way).
+- **Quality tiers are external shifts, not graph options** (3.10
+  `dlsep.shift_passes`): for each extra pass the CHUNK is circularly
+  shifted, inferred, shifted back, and the passes averaged — the ONNX
+  graph, chunking and OLA math stay untouched (`shifts=0` must remain
+  byte-equivalent to the pre-3.10 single pass). fast/balanced/best →
+  0/1/2 extra passes. The `/api/stems` cache is QUALITY-AWARE: the
+  POST serves the cache only when `status.json`'s `quality` matches
+  the request (a tier switch recomputes instead of serving a
+  mismatched render); progress denominators are chunks × passes.
 - **Frontend gain architecture is `frontend/src/mixer.js`.**
   `MixerState` is the single source of truth: strips feed a MASTER
   GainNode capped at `MASTER_CEILING` (mirrors `player.js` `VOL_MAX`,

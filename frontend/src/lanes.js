@@ -95,10 +95,37 @@ import { trackRow, wireMuteSolo } from './controls.js';
 import { showToast } from './toast.js';
 import { WaveLod } from './wavelod.js';
 import { getStemSpec, createSpecImage } from './stemspec.js';
+import { openWithMethod } from './stems.js';
 import { throttled } from './util.js';
 
 const START_LEAD = 0.06; // keep identical to player.js START_LEAD
 const POLL_MS = 700;
+
+/** Inference quality tiers (3.10): server-side demucs shifts —
+ *  fast = 1 pass, balanced = 2, best = 3 (compute ~linear in passes).
+ *  Mirrors keyprism.dlsep.QUALITY_SHIFTS. */
+const QUALITY_TIERS = ['fast', 'balanced', 'best'];
+const QUALITY_LABEL_KEYS = {
+  fast: 'qualityFast',
+  balanced: 'qualityBalanced',
+  best: 'qualityBest',
+};
+/** Passes per tier (shifts + 1): the progress denominator is chunks x
+ *  passes server-side, and the status line names the pass count so the
+ *  scaling is visible while a tier runs (3.10.1 D3). */
+const QUALITY_PASSES = { fast: 1, balanced: 2, best: 3 };
+const QUALITY_KEY = 'keyprism-quality';
+
+/** Compute device (3.10.2): Auto = probe chain (GPU preference, CPU
+ *  always last), GPU = forced first available GPU EP + CPU, CPU = pure
+ *  CPU. Sent as &device= on every POST; persisted like the tier. */
+const DEVICE_CHOICES = ['auto', 'gpu', 'cpu'];
+const DEVICE_LABEL_KEYS = {
+  auto: 'deviceAuto',
+  gpu: 'deviceGpu',
+  cpu: 'deviceCpu',
+};
+const DEVICE_KEY = 'keyprism-device';
 
 /** LOD waveforms (Phase 3.9): windows at or below this span switch from
  *  the ~1024-column overview envelope to per-pixel-column min/max
@@ -114,16 +141,36 @@ const LOD_CACHE_MAX = 8;
 /** Fixed DL stem contract per method (mirrors
  *  keyprism.dlsep.STEM_SPECS — the frontend never reads Python data).
  *  The /api/stems response MUST match EXACTLY this list, in this order,
- *  for every file length. */
+ *  for every file length. demucs_6 order = the reference export's
+ *  source order (drums/bass/other/vocals/guitar/piano — guitar BEFORE
+ *  piano, StemSplitio/htdemucs-6s-onnx). */
 const DL_METHODS = {
   demucs_4: ['drums', 'bass', 'other', 'vocals'],
-  demucs_6: ['drums', 'bass', 'other', 'vocals', 'piano', 'guitar'],
+  demucs_6: ['drums', 'bass', 'other', 'vocals', 'guitar', 'piano'],
 };
+
+/** Classic separation variants (mirrors keyprism.stems.STEM_SPECS /
+ *  server stems.METHODS — the frontend never reads Python data). They
+ *  complete the method registry (3.10.1 D1): the AI Separation panel's
+ *  dropdown exposes ALL five backend variants; picking a classic one
+ *  hands off to the stems panel (openWithMethod) instead of forking a
+ *  classic renderer into the lanes pipeline. */
+const CLASSIC_METHODS = ['hpss', 'rpca', 'combined'];
 
 // demucs_6 stems eligible for polyphonic transcription (mirrors
 // keyprism.poly_transcribe.POLY_TRACKS — the frontend never reads
 // Python data)
 const POLY_LANES = new Set(['piano', 'guitar', 'other']);
+
+/** ORT execution-provider display names (mirrors the raw provider names
+ *  /api/ping reports in capabilities.ort_providers — the frontend never
+ *  reads Python data). */
+const EP_NAMES = {
+  CUDAExecutionProvider: 'CUDA',
+  DmlExecutionProvider: 'DirectML',
+  CoreMLExecutionProvider: 'CoreML',
+  CPUExecutionProvider: 'CPU',
+};
 
 const LANE_META = {
   mix: { labelKey: 'laneMix', color: '#ddd6c8' },
@@ -151,6 +198,15 @@ class PolyUnavailable extends Error {
   }
 }
 
+/** Marks an unwound separation (user stop, restart, method/panel
+ *  switch): the load() catch path goes back to IDLE silently instead of
+ *  showing a failure (3.10.3). */
+function cancelledError() {
+  const e = new Error('cancelled');
+  e.cancelled = true;
+  return e;
+}
+
 export function initLanes({ gd, data, player, apiBase, layers }) {
   const toggle = document.getElementById('lanesToggle');
   const panel = document.getElementById('lanesPanel');
@@ -176,9 +232,35 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
     loading: false,
     ready: false,
     method: 'demucs_4',
+    quality: (() => {
+      // persisted quality tier (default balanced); unknown values fall
+      // back instead of poisoning every POST
+      try {
+        const q = localStorage.getItem(QUALITY_KEY);
+        if (QUALITY_TIERS.includes(q)) return q;
+      } catch {
+        /* localStorage unavailable: keep default */
+      }
+      return 'balanced';
+    })(),
+    device: (() => {
+      // persisted compute device (3.10.2, default auto); unknown
+      // values fall back instead of poisoning every POST
+      try {
+        const d = localStorage.getItem(DEVICE_KEY);
+        if (DEVICE_CHOICES.includes(d)) return d;
+      } catch {
+        /* localStorage unavailable: keep default */
+      }
+      return 'auto';
+    })(),
     savedMix: null,
     rows: [], // {model, row, vol, mute, solo} mirrors for repaint
     lanes: [], // mixer strips + canvas fields (peaks, idx, waveCv, noteCv)
+    taskId: null, // /api/task/{id} of the in-flight separation (3.10.3)
+    taskState: 'idle', // idle | running | downloading | done | error | cancelled
+    abortLoad: false, // restart asks the in-flight load to unwind
+    stopRequested: false, // stop clicked before the task id arrived (3.10.4 D3)
     view: {
       aMs: EPOCH_MS,
       bMs: EPOCH_MS + Math.round(data.durationSec * 1000),
@@ -663,26 +745,89 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
     el.classList.toggle('busy', busy);
   }
 
+  /** GPU/CPU badge (3.10): the active ORT execution-provider chain from
+   *  /api/ping capabilities.ort_providers (the session's readback once a
+   *  model is loaded, else the selected chain). GPU = the first non-CPU
+   *  provider; tooltip lists the full active chain in order. */
+  function providerBadge() {
+    const eps =
+      state.caps && Array.isArray(state.caps.ort_providers)
+        ? state.caps.ort_providers
+        : [];
+    if (!eps.length) return null;
+    const names = eps.map((p) => EP_NAMES[p] || p);
+    const gpu = eps.filter((p) => p !== 'CPUExecutionProvider');
+    return {
+      gpu: gpu.length > 0,
+      text: gpu.length
+        ? t('providerGpu', { name: EP_NAMES[gpu[0]] || gpu[0] })
+        : t('providerCpu'),
+      tip: t('providerTip', { chain: names.join(' → ') }),
+    };
+  }
+
   /** POST starts the separation task, then poll /api/task/{id} until
    *  done — a cached method short-circuits to its stem list at once.
    *  Two-phase progress (3.8 D3): `downloading` reports model-download
-   *  bytes/speed, `running` reports inference progress. */
-  async function requestStems(method) {
-    const r = await fetch(`${apiBase}/api/stems?method=${method}`, {
-      method: 'POST',
-    });
+   *  bytes/speed, `running` reports inference progress. `force`
+   *  (3.10.3 restart) bypasses the stems cache server-side. The
+   *  cooperative cancel (3.10.3): `cancelled` task status unwinds the
+   *  poll with a cancelled error (no cache was written). */
+  async function requestStems(method, force = false) {
+    const r = await fetch(
+      `${apiBase}/api/stems?method=${method}&quality=${state.quality}` +
+        `&device=${state.device}${force ? '&force=1' : ''}`,
+      {
+        method: 'POST',
+      });
     const body = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
-    if (body.cached || !body.task_id) return body;
+    if (body.cached || !body.task_id) {
+      // cache hit: no task was created — the strip goes straight to done
+      state.taskState = 'done';
+      paintStripButtons();
+      return body;
+    }
+    state.taskId = body.task_id;
+    state.taskState = 'running';
+    paintStripButtons();
+    // 3.10.4 D3: Stop was clicked before the task id existed — cancel
+    // immediately instead of running the task to completion
+    if (state.stopRequested) {
+      state.stopRequested = false;
+      fetch(`${apiBase}/api/task/${state.taskId}/cancel`, {
+        method: 'POST',
+      }).catch(() => {});
+      state.taskState = 'cancelled';
+      paintStripButtons();
+      throw cancelledError();
+    }
     const taskUrl = `${apiBase}${body.status_url}`;
     for (;;) {
-      if (!state.enabled || state.method !== method) {
-        throw new Error('cancelled');
+      if (!state.enabled || state.method !== method || state.abortLoad) {
+        throw cancelledError();
       }
       const res = await fetch(taskUrl);
       const tb = await res.json();
-      if (tb.status === 'done') return tb;
-      if (tb.status === 'error') throw new Error(tb.error || 'task failed');
+      if (tb.status === 'done') {
+        state.taskState = 'done';
+        paintStripButtons();
+        return tb;
+      }
+      if (tb.status === 'cancelled') {
+        state.taskState = 'cancelled';
+        paintStripButtons();
+        throw cancelledError();
+      }
+      if (tb.status === 'error') {
+        state.taskState = 'error';
+        paintStripButtons();
+        throw new Error(tb.error || 'task failed');
+      }
+      state.taskState = tb.status === 'downloading'
+        ? 'downloading'
+        : 'running';
+      paintStripButtons();
       if (tb.status === 'downloading') {
         const mb = (n) => (n / 1e6).toFixed(1);
         setStatus(
@@ -695,7 +840,10 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
         );
       } else {
         setStatus(
-          t('lanesSeparating', { pct: Math.round((tb.progress || 0) * 100) }),
+          t('lanesSeparating', {
+            pct: Math.round((tb.progress || 0) * 100),
+            passes: QUALITY_PASSES[state.quality] || 1,
+          }),
           true
         );
       }
@@ -863,35 +1011,12 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
   function renderShell() {
     panel.innerHTML = '';
     state.rows = [];
-    const title = document.createElement('span');
-    title.className = 'stems-title';
-    title.textContent = t('lanes');
-    const methodSel = document.createElement('select');
-    methodSel.className = 'stems-method';
-    const dlOk = !!state.caps && state.caps.dl;
-    for (const m of Object.keys(DL_METHODS)) {
-      const o = document.createElement('option');
-      o.value = m;
-      o.textContent = t(`lanesMethod_${m}`);
-      if (m === state.method) o.selected = true;
-      methodSel.appendChild(o);
-    }
-    methodSel.disabled = state.loading || !dlOk;
-    if (!dlOk) {
-      methodSel.title = t('dlNeedsExtra');
-    }
-    methodSel.addEventListener('change', () => {
-      if (!methodSel.disabled && methodSel.value !== state.method) {
-        load(methodSel.value);
-      }
-    });
-    const status = document.createElement('span');
-    status.className = 'lanes-status stems-status';
-    panel.append(title, methodSel, status);
-
-    if (!state.ready) return;
-    // Mix lane: the player's own playback, ridden by the master gain.
-    // The scope cell stays empty (no canvas) and keeps the grid aligned.
+    // 3.10.3 D1: the Mix row's right cell IS the control strip —
+    // [title][method ▾][quality ▾][device ▾][GPU badge][status] inline
+    // on one wrapped flex line instead of stacked full-width rows, and
+    // the empty dashed Mix lane placeholder is gone. The Mix row renders
+    // in EVERY state (loading/error/ready) so the controls stay
+    // reachable while a task runs.
     const mix = trackRow({
       key: 'mix',
       labelText: t('laneMix'),
@@ -899,8 +1024,183 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
       withLane: true,
       fader: 'norm',
     });
+    // 3.10.4 D2: the Mix cell is NOT a lane window — drop the .lane-scope
+    // chrome entirely so the right cell is ONLY the control strip (no
+    // canvas, no dashed placeholder, no lane box)
     mix.row.classList.add('lane-row-mix');
-    mix.scope.classList.add('lane-scope-empty');
+    mix.scope.className = 'mix-controls';
+    const title = document.createElement('span');
+    title.className = 'stems-title';
+    title.textContent = t('lanes');
+    const methodSel = document.createElement('select');
+    methodSel.className = 'stems-method';
+    const dlOk = !!state.caps && state.caps.dl;
+    // The FULL separation registry in one dropdown (3.10.1 D1): classic
+    // variants grouped first, then the Demucs variants this panel owns.
+    const classicGroup = document.createElement('optgroup');
+    classicGroup.label = t('methodClassic');
+    for (const m of CLASSIC_METHODS) {
+      const o = document.createElement('option');
+      o.value = m;
+      o.textContent = t(`stemsMethod_${m}`);
+      classicGroup.appendChild(o);
+    }
+    const dlGroup = document.createElement('optgroup');
+    dlGroup.label = t('methodAI');
+    for (const m of Object.keys(DL_METHODS)) {
+      const o = document.createElement('option');
+      o.value = m;
+      o.textContent = t(`lanesMethod_${m}`);
+      if (m === state.method) o.selected = true;
+      dlGroup.appendChild(o);
+    }
+    methodSel.append(classicGroup, dlGroup);
+    methodSel.disabled = state.loading || !dlOk;
+    if (!dlOk) {
+      methodSel.title = t('dlNeedsExtra');
+    }
+    methodSel.addEventListener('change', () => {
+      if (methodSel.disabled) return;
+      const m = methodSel.value;
+      if (m === state.method) return;
+      if (DL_METHODS[m]) {
+        // 3.10.4 D5: selecting a variant NEVER triggers analysis — the
+        // explicit Run button submits with the current parameters
+        state.method = m;
+        return;
+      }
+      // classic variant: hand off to the stems panel — close the lanes
+      // panel first so the mix gain hands back before the stems panel
+      // re-saves it (the off button's visual state rides along)
+      const offBtn = toggle.querySelector('button[data-lanes="off"]');
+      toggle
+        .querySelectorAll('button')
+        .forEach((b) => b.classList.toggle('active', b === offBtn));
+      disable();
+      openWithMethod(m);
+    });
+    // Inference quality tier (3.10): demucs shifts — fast = 1 pass,
+    // balanced = 2, best = 3. Persisted; a switch re-POSTs, and the
+    // server recomputes when the cached render used a different tier.
+    const qualitySel = document.createElement('select');
+    qualitySel.className = 'stems-method stems-quality';
+    qualitySel.title = t('qualityTip');
+    for (const q of QUALITY_TIERS) {
+      const o = document.createElement('option');
+      o.value = q;
+      o.textContent = t(QUALITY_LABEL_KEYS[q]);
+      if (q === state.quality) o.selected = true;
+      qualitySel.appendChild(o);
+    }
+    qualitySel.disabled = state.loading || !dlOk;
+    qualitySel.addEventListener('change', () => {
+      if (qualitySel.disabled || qualitySel.value === state.quality) return;
+      // 3.10.4 D5: parameter changes never auto-analyze — the next Run
+      // submits with them (the server recomputes when the cached render
+      // used a different tier)
+      state.quality = qualitySel.value;
+      try {
+        localStorage.setItem(QUALITY_KEY, state.quality);
+      } catch {
+        /* storage failure: keep the session value */
+      }
+    });
+    // Compute device (3.10.2): Auto / GPU / CPU next to the tier. The
+    // GPU option is disabled when /api/ping reports no GPU EP in the
+    // build (ort_providers_available); a persisted 'gpu' choice on such
+    // a machine is coerced back to Auto so a stale setting can never
+    // poison every POST. Unlike the tier, a device switch does NOT
+    // re-POST: the stems' audio is identical either way — the choice
+    // applies to the next separation task.
+    const gpuAvailable = () =>
+      !!state.caps &&
+      Array.isArray(state.caps.ort_providers_available) &&
+      state.caps.ort_providers_available.some(
+        (p) => p !== 'CPUExecutionProvider'
+      );
+    if (state.device === 'gpu' && !gpuAvailable()) {
+      state.device = 'auto';
+      try {
+        localStorage.setItem(DEVICE_KEY, state.device);
+      } catch {
+        /* storage failure: keep the session value */
+      }
+    }
+    const deviceSel = document.createElement('select');
+    deviceSel.className = 'stems-method stems-device';
+    deviceSel.title = t('deviceTip');
+    for (const d of DEVICE_CHOICES) {
+      const o = document.createElement('option');
+      o.value = d;
+      o.textContent = t(DEVICE_LABEL_KEYS[d]);
+      if (d === state.device) o.selected = true;
+      if (d === 'gpu' && !gpuAvailable()) {
+        o.disabled = true;
+        o.title = t('deviceNoGpu');
+      }
+      deviceSel.appendChild(o);
+    }
+    deviceSel.disabled = state.loading || !dlOk;
+    deviceSel.addEventListener('change', () => {
+      if (deviceSel.disabled || deviceSel.value === state.device) return;
+      state.device = deviceSel.value;
+      try {
+        localStorage.setItem(DEVICE_KEY, state.device);
+      } catch {
+        /* storage failure: keep the session value */
+      }
+    });
+    const status = document.createElement('span');
+    status.className = 'lanes-status stems-status';
+    // Run / Stop / Restart (3.10.4 D5 + 3.10.3 D2): house 26px square
+    // icon-buttons (same chrome as the M/S keys; champagne active fill
+    // marks an in-flight task). State machine — idle: only Run enabled;
+    // running/downloading: only Stop enabled; done/error/cancelled:
+    // Run + Restart enabled, Stop disabled. Run submits a plain POST
+    // (opening the panel or changing parameters NEVER auto-analyzes);
+    // Restart = cancel-if-running + Run with force=1.
+    const runBtn = document.createElement('button');
+    runBtn.type = 'button';
+    runBtn.className = 'stem-btn';
+    runBtn.textContent = '▶';
+    runBtn.setAttribute('aria-label', t('runSep'));
+    runBtn.title = t('runTip');
+    runBtn.addEventListener('click', () => {
+      if (!state.loading && state.taskState !== 'running' &&
+          state.taskState !== 'downloading') {
+        load(state.method, false);
+      }
+    });
+    const stopBtn = document.createElement('button');
+    stopBtn.type = 'button';
+    stopBtn.className = 'stem-btn';
+    stopBtn.textContent = '⏹';
+    stopBtn.setAttribute('aria-label', t('stopSep'));
+    stopBtn.title = t('stopTip');
+    stopBtn.addEventListener('click', () => stopSeparation());
+    const restartBtn = document.createElement('button');
+    restartBtn.type = 'button';
+    restartBtn.className = 'stem-btn';
+    restartBtn.textContent = '↻';
+    restartBtn.setAttribute('aria-label', t('restartSep'));
+    restartBtn.title = t('restartTip');
+    restartBtn.addEventListener('click', () => restartSeparation());
+    mix.scope.append(title, methodSel, qualitySel, deviceSel, runBtn,
+      stopBtn, restartBtn, status);
+    const badge = providerBadge();
+    if (badge) {
+      const el = document.createElement('span');
+      el.className =
+        'provider-badge' + (badge.gpu ? ' provider-badge-gpu' : '');
+      el.textContent = badge.text;
+      el.title = badge.tip;
+      mix.scope.insertBefore(el, runBtn);
+    }
+    state.runBtn = runBtn;
+    state.stopBtn = stopBtn;
+    state.restartBtn = restartBtn;
+    paintStripButtons();
+    // Mix lane: the player's own playback, ridden by the master gain.
     const { syncFader: mixSync } = wireMuteSolo({
       mixer,
       model: mixer.mix,
@@ -935,11 +1235,79 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
     state.lanes = [];
   }
 
-  async function load(method) {
+  /** Button state machine (3.10.4 D5): idle → Run enabled; running/
+   *  downloading → Stop enabled, Run/Restart disabled (champagne .active
+   *  fill marks the in-flight Run); done/error/cancelled → Run and
+   *  Restart enabled, Stop disabled. Everything stays dead without the
+   *  DL extra. */
+  function paintStripButtons() {
+    const dlOk = !!state.caps && state.caps.dl;
+    const active =
+      state.taskState === 'running' || state.taskState === 'downloading';
+    if (state.stopBtn) {
+      state.stopBtn.disabled = !active;
+    }
+    if (state.runBtn) {
+      state.runBtn.disabled = !dlOk || state.loading || active;
+      state.runBtn.classList.toggle('active', active);
+    }
+    if (state.restartBtn) {
+      // idle has nothing to restart: Run is the entry action there
+      state.restartBtn.disabled = !dlOk || state.loading || active ||
+        state.taskState === 'idle';
+    }
+  }
+
+  /** Stop (3.10.4 D3): the POST /api/task/{id}/cancel → registry flag →
+   *  chunk/pass boundary → status "cancelled" chain. The one breakpoint
+   *  QA hit: between dispatching the separation POST and its response
+   *  there is NO task id yet — an enabled Stop click silently no-op'd.
+   *  The click now LATCHES (stopRequested) and requestStems cancels the
+   *  task the moment it learns the id. */
+  async function stopSeparation() {
+    if (state.abortLoad) return;
+    if (!state.taskId) {
+      state.stopRequested = true;
+      setStatus(t('lanesCancelling'), true);
+      return;
+    }
+    try {
+      await fetch(`${apiBase}/api/task/${state.taskId}/cancel`, {
+        method: 'POST',
+      });
+    } catch {
+      /* network hiccup: the poll still reports the outcome */
+    }
+    setStatus(t('lanesCancelling'), true);
+  }
+
+  /** Restart: cancel any running task, wait for the in-flight load to
+   *  unwind, then re-submit with force=1 — the server bypasses the
+   *  stems cache and recomputes from zero. */
+  async function restartSeparation() {
+    if (state.loading) {
+      state.abortLoad = true;
+      if (state.taskId) {
+        fetch(`${apiBase}/api/task/${state.taskId}/cancel`, {
+          method: 'POST',
+        }).catch(() => {});
+      }
+      while (state.loading) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      state.abortLoad = false;
+    }
+    load(state.method, true);
+  }
+
+  async function load(method, force = false) {
     if (state.loading) return;
     state.loading = true;
     state.method = method;
     state.ready = false;
+    state.taskId = null;
+    state.stopRequested = false;
+    state.taskState = 'running';
     // spinner on the On button immediately (3.8 D2): a click is never
     // visually dead while the task starts up
     toggle
@@ -947,10 +1315,13 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
       ?.classList.add('loading');
     teardownLanes();
     renderShell();
-    setStatus(t('lanesSeparating', { pct: 0 }), true);
+    setStatus(t('lanesSeparating', {
+      pct: 0,
+      passes: QUALITY_PASSES[state.quality] || 1,
+    }), true);
     let lanes = [];
     try {
-      const list = await requestStems(method);
+      const list = await requestStems(method, force);
       // Strict DL stem contract: exactly the fixed registry keys, in
       // order, for every file length — a server that answers
       // chunk-count-dependent stems fails loudly instead of rendering
@@ -1016,6 +1387,12 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
       mixer.mix.volume = player.mixGainNorm();
       mixer.mix.muted = false;
       mixer.mix.solo = false;
+      // 3.10.1 D2 root cause: the flag MUST be cleared before the final
+      // render — renderShell builds the method/quality selects with
+      // disabled = state.loading, so when this render ran while the
+      // flag was still set (it used to be cleared only in finally,
+      // AFTER the render) both dropdowns came up permanently dead.
+      state.loading = false;
       renderShell();
       mixer.apply();
       drawAll(); // waveforms visible immediately, before Play (D2)
@@ -1030,8 +1407,17 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
         state.ready = false;
         stopAll();
         state.lanes = [];
-        renderShell();
-        setStatus(t('lanesFailed', { msg: e.message }));
+        state.loading = false; // same ordering rule: render enabled
+        if (e.cancelled) {
+          // user stop / restart unwind: back to IDLE, no failure text
+          state.taskState = state.abortLoad ? 'cancelled' : state.taskState;
+          renderShell();
+          setStatus('');
+        } else {
+          if (state.taskState !== 'error') state.taskState = 'error';
+          renderShell();
+          setStatus(t('lanesFailed', { msg: e.message }));
+        }
       }
     } finally {
       // a failed/partial load leaves no gain nodes wired anywhere
@@ -1043,11 +1429,19 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
     }
   }
 
+  /** Panel entry (3.10.4 D5): opening the AI Separation panel shows an
+   *  IDLE strip — no analysis is started until the explicit Run button.
+   *  Parameter changes only update state; Run submits with them. */
   function enable() {
     state.enabled = true;
     state.savedMix = player.mixGainNorm();
     panel.hidden = false;
-    load(state.method);
+    state.taskId = null;
+    state.taskState = 'idle';
+    state.abortLoad = false;
+    state.stopRequested = false;
+    renderShell();
+    setStatus(t('lanesIdle'));
   }
 
   function disable() {
@@ -1055,6 +1449,10 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
     teardownLanes();
     state.ready = false;
     state.loading = false;
+    state.taskId = null;
+    state.taskState = 'idle';
+    state.abortLoad = false;
+    state.stopRequested = false;
     toggle
       .querySelector('button[data-lanes="on"]')
       ?.classList.remove('loading');

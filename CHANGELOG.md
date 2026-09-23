@@ -7,6 +7,110 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- 3.10.3 — compact control strip + stop/restart:
+  - The AI Separation panel's controls (method / quality / device
+    selects, GPU badge, status) collapsed from stacked full-width rows
+    into ONE horizontal wrapped control strip living in the Mix row's
+    right cell (the empty dashed lane placeholder is gone); the Mix row
+    renders in every state so the controls stay reachable mid-task
+  - Stop (⏹) & Restart (↻) buttons: `POST /api/task/{id}/cancel` flips
+    a per-task cooperative cancel flag — the model download checks it
+    per byte-chunk and inference per chunk / per shift pass (ort
+    `run()` is uninterruptible; the stop lands at the next boundary,
+    ≤ one ~7.8 s model segment later) — the task ends `cancelled`,
+    partial `.part` downloads are removed and no stem cache is written;
+    Restart cancels any running task and re-submits with `force=1`
+    (`POST /api/stems&force=1` bypasses the stems cache and recomputes)
+- Phase 3.10 — 6-stem auto-download, GPU providers, quality tiers:
+  - `demucs_6` now auto-downloads the REAL 6-stem ONNX export
+    (`StemSplitio/htdemucs-6s-onnx`, MIT) — the Phase 3.5 conclusion
+    that no auto-downloadable 6-stem export existed was wrong; the
+    registry mirrors the export's source order
+    drums/bass/other/vocals/guitar/piano (guitar BEFORE piano), so the
+    piano/guitar lanes finally work end to end (six lanes, poly Notes
+    on the poly-capable ones). The zero-probe contract check (segment
+    length + stem count) still fails fast on mislabelled exports
+  - Model provenance metadata: every resolved model file (auto-download,
+    cache re-resolve, env override, model-dir glob) is recorded into
+    `<model_dir>/provenance.json` — repo id, revision, commit, etag,
+    license URL, source URL — for the license audit; weights are never
+    redistributed in-repo
+  - ORT execution-provider auto-detection: CUDA → DirectML → CoreML →
+    CPU probed against `ort.get_available_providers()`; overridable via
+    `KEYPRISM_ORT_PROVIDERS` (comma list, order = preference, short or
+    raw names); new extras `[dl-cuda]` (onnxruntime-gpu) and
+    `[dl-directml]` (onnxruntime-directml) — plain `[dl]` stays
+    CPU-only, and a missing GPU extra is a silent CPU fallback; a
+    compiled-in but unusable GPU EP retries CPU-only at session load.
+    `/api/ping` exposes the ACTIVE provider chain (session
+    `get_providers()` readback) as `capabilities.ort_providers`, and
+    the lanes panel shows a GPU/CPU badge with the chain as tooltip
+  - Inference quality tiers via demucs `shifts`, applied externally
+    around the ONNX graph (circular-shift → infer → shift back →
+    average; chunking/OLA untouched): fast = 1 pass, balanced = 2
+    (default), best = 3; `POST /api/stems&quality=` with a tier-aware
+    cache (tier switch recomputes; `status.json` records the tier) and
+    a per-pass progress denominator (chunks × passes); the lanes panel
+    gains a persisted quality dropdown beside the method select
+
+### Changed
+
+- `dlsep.STEM_SPECS["demucs_6"]` order changed to match the reference
+  export (`guitar` now before `piano`); no valid demucs_6 cache can
+  exist (the previous variant always failed the zero-probe), so
+  `DL_STEMS_VERSION` was NOT bumped — 4-stem caches stay valid
+
+### Added
+
+- 3.10.2 hotfix — ORT CUDA fallback + Device selector:
+  - Device dropdown (Auto / GPU / CPU) in the AI Separation panel,
+    persisted in localStorage and POSTed as `&device=`; the GPU option
+    disables itself (and a stale persisted `gpu` coerces back to Auto)
+    when `/api/ping` reports no GPU EP in the build
+    (`capabilities.ort_providers_available`)
+  - `/api/stems&device=auto|gpu|cpu` routing: auto = probe chain,
+    cpu = forced pure CPU, gpu = forced first available GPU EP + CPU
+    (400 "GPU requested but no GPU provider available." on a GPU-less
+    build); a session-singleton key now includes the provider list so a
+    device switch never reuses a session built for another chain
+
+### Fixed
+
+- ORT CUDA fallback (D1): `provider_chain` ALWAYS ends with
+  `CPUExecutionProvider` (ops without a GPU kernel run on CPU instead
+  of failing the session); a GPU EP that fails at FIRST INFERENCE
+  (CUDA error 9 / NOT_IMPLEMENTED on e.g. a Conv node — surfaces at
+  `session.run()`, not at session creation) is now caught: warning
+  logged, cached session evicted, pure-CPU session rebuilt, the call
+  retried once — verified live on a CUDA host with a missing cuDNN
+  (`libcudnn.so`): the task completed on CPU instead of crashing
+- 3.10.1 hotfix — dead dropdowns + 6-stem UI plumbing:
+  - The method/quality dropdowns in BOTH separation panels came up
+    permanently disabled: the post-load re-render ran while the loading
+    flag was still set (cleared only in `finally`, after the render),
+    and the selects are built with `disabled = state.loading` — so
+    demucs_6 was unreachable and every click died. Latent since 3.8;
+    the loading flag is now cleared BEFORE the final render on the
+    success and error paths of both panels (the 3.9 layer compositor
+    was NOT the cause: `.layer-stack` is z-auto + `pointer-events:
+    none` by design)
+  - The AI Separation panel's method dropdown exposes the FULL
+    separation registry in one place (classic hpss/rpca/combined
+    grouped, then demucs_4/demucs_6); a classic selection hands off to
+    the stems panel via the new `stems.openWithMethod()` entry point
+  - The DL progress status names the tier's pass count
+    ("{pct}% ({passes} passes)") so the chunks × passes scaling is
+    visible while a tier runs
+- DL model resolution order: the anonymous model-dir glob
+  (`*.onnx`) is now consulted only AFTER the variant's auto-download —
+  previously a foreign export already in the dir (e.g. a 4-stem
+  `htdemucs.onnx` from an earlier demucs_4 install) satisfied a
+  demucs_6 resolve first and was rejected by the zero-probe with a
+  confusing stem-count error instead of fetching the right model; the
+  glob stays as the manual/offline escape hatch
+
 ## [0.6.3] - 2026-09-23
 
 ### Added
