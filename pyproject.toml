@@ -43,6 +43,18 @@ dl = [
 # KEYPRISM_ORT_PROVIDERS overrides the auto-detected preference chain.
 dl-cuda = [
     "onnxruntime-gpu>=1.17",
+    # CUDA 13 runtime libraries as pip wheels — since ORT 1.23 the GPU
+    # build targets CUDA 13 and NVIDIA ships the runtime this way (short
+    # names are the CUDA-13-era packages; cuDNN kept the -cu13 suffix).
+    # They are NOT on the default dlopen search path:
+    # dlsep._preload_pip_cuda_libs() makes them loadable without
+    # LD_LIBRARY_PATH. Linux-only — Windows GPU users ride dl-directml.
+    "nvidia-cublas>=13.7; sys_platform == 'linux'",
+    "nvidia-cuda-runtime>=13.4; sys_platform == 'linux'",
+    "nvidia-cuda-nvrtc>=13.4; sys_platform == 'linux'",
+    "nvidia-cudnn-cu13>=9.10; sys_platform == 'linux'",
+    "nvidia-curand>=10.4; sys_platform == 'linux'",
+    "nvidia-cufft>=12.4; sys_platform == 'linux'",
 ]
 dl-directml = [
     "onnxruntime-directml>=1.17",

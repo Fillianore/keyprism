@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- 3.10.4 — CUDA 13 pip wheels + GPU activation fix:
+  - `[dl-cuda]` now ships the CUDA 13 runtime libraries as pip wheels
+    (`nvidia-cublas` / `nvidia-cuda-runtime` / `nvidia-cuda-nvrtc` /
+    `nvidia-cudnn-cu13` / `nvidia-curand` / `nvidia-cufft`, Linux) —
+    since ORT 1.23 the GPU build targets CUDA 13 and NVIDIA stopped
+    publishing a system toolkit path for WSL users
+  - `dlsep._preload_pip_cuda_libs()` calls `ort.preload_dlls()` before
+    every session build — with environment pre-checks: a COMPLETE
+    system CUDA install (every required soname already resolvable)
+    wins and is never shadowed (dlopen dedupes by soname, so preloads
+    can only fill gaps, never override), and without a CUDA-13-capable
+    NVIDIA driver (`cuDriverGetVersion` probe, WSL shim included) the
+    wheels are skipped as dead weight; the CUDA EP used to fail with
+    `libcublasLt.so.13: cannot open shared object file` and silently
+    degrade to CPU even on a working GPU (further guarded: no ORT /
+    pre-1.21 / probe or preload error → unchanged CPU fallback)
 - 3.10.3 — compact control strip + stop/restart:
   - The AI Separation panel's controls (method / quality / device
     selects, GPU badge, status) collapsed from stacked full-width rows
