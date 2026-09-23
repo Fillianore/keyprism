@@ -87,6 +87,10 @@ export const dict = {
     layerBlendCover: 'Cover',
     layerBlendTitle: '叠加 (screen blend) or 覆盖 (opaque replace)',
     layerOpacity: 'Layer opacity',
+    layerGainTitle:
+      'Intensity gain (dB) on the layer spectrum before blending — shifts which energies light up',
+    layerGammaTitle:
+      'Intensity γ on the layer colormap input — master highlight-γ semantics',
     layerVisible: 'Toggle layer visibility',
     layerRemove: 'Remove layer',
     layerReorderTip: 'Drag to reorder layers',
@@ -209,6 +213,8 @@ export const dict = {
     layerBlendCover: '覆盖',
     layerBlendTitle: '叠加 (screen 混合) 或 覆盖 (不透明替换)',
     layerOpacity: '图层不透明度',
+    layerGainTitle: '叠加前作用于图层频谱的强度增益 (dB) — 改变哪些能量点亮',
+    layerGammaTitle: '图层 colormap 输入的强度 γ — 同主图高光 γ 语义',
     layerVisible: '切换图层可见性',
     layerRemove: '移除图层',
     layerReorderTip: '拖动调整图层顺序',

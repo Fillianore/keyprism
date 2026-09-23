@@ -1,15 +1,20 @@
-/** Per-stem spectrogram client (Phase 3.9): ONE fetch+decode cache shared
- *  by every consumer (lane [Wave|Spec] views AND the master-plot overlay
- *  layers), keyed by `${method}/${stem}` — the backend disk-caches the
- *  quantized matrix, so this is a cheap one-time fetch per stem.
+/** Per-stem spectrogram client (Phase 3.9, revised 3.9.1): ONE fetch+decode
+ *  cache shared by every consumer (lane [Wave|Spec] views AND the master-
+ *  plot overlay layers), keyed by `${method}/${stem}` — the backend disk-
+ *  caches the quantized matrix, so this is a cheap one-time fetch per stem.
  *
  *  The 88-row semitone matrix (the SAME row space as the master heatmap's
  *  y axis — what makes lane views and overlay layers line up with the
- *  master) is rendered once into an offscreen canvas with row 0 = TOP =
- *  C8, tinted from near-black to a target rgb (the lane's own color), so
- *  a drawImage with a source rect is the whole view transform. Silence
- *  stays transparent: the lane/plot background shows through, exactly
- *  like the transparent columns of the waveform view.
+ *  master) is rendered into an offscreen canvas with row 0 = TOP = C8,
+ *  tinted from near-black to a target rgb (the lane's own color).
+ *
+ *  Intensity vs opacity (3.9.1 B): the stored matrix is the dB map
+ *  normalized over [-dbRange, 0] (q = 255·(dB + dbRange)/dbRange). The
+ *  per-layer INTENSITY controls act on that dB map BEFORE the tint —
+ *  `dB' = dB + gain_dB`, then `v' = v^gamma` on the colormap input —
+ *  exactly the master's color-floor/γ semantics, while opacity stays an
+ *  alpha mix on the composite. The raw q matrix is kept on the image
+ *  object so a slider move re-renders the small 88×nCols canvas in place.
  */
 
 const cache = new Map(); // `${method}/${stem}` -> Promise<spec body>
@@ -20,8 +25,10 @@ function b64ToU8(b64) {
 
 /** Fetch (or recall) the quantized spec of one stem. Rejects with the
  *  server's error message; the rejection is cached so a permanently
- *  unavailable stem does not re-flood the server. */
-export function getStemSpec(apiBase, method, stem) {
+ *  unavailable stem does not re-flood the server. `expect.dbRange`, when
+ *  given, must match the server's dB basis (the master payload's
+ *  dbRange) — a mismatch throws instead of rendering on a foreign scale. */
+export function getStemSpec(apiBase, method, stem, expect = {}) {
   const key = `${method}/${stem}`;
   if (!cache.has(key)) {
     cache.set(
@@ -34,6 +41,15 @@ export function getStemSpec(apiBase, method, stem) {
         if (!r.ok || body.error) {
           throw new Error(body.error || `HTTP ${r.status}`);
         }
+        if (!body.spec || !body.rows || !body.nCols || !body.hopSec) {
+          throw new Error('stem spec: malformed payload');
+        }
+        if (expect.dbRange !== undefined &&
+            Math.abs(body.dbRange - expect.dbRange) > 1e-6) {
+          throw new Error(
+            `stem spec: dbRange ${body.dbRange} != master ${expect.dbRange}`
+          );
+        }
         return body;
       })
     );
@@ -41,18 +57,41 @@ export function getStemSpec(apiBase, method, stem) {
   return cache.get(key);
 }
 
-/** Render the quantized matrix into an offscreen canvas tinted toward
- *  `tint` (css hex). Returns { cv, hopSec, rows, nCols }. */
-export function specToImage(spec, tint) {
-  const { rows, nCols, hopSec } = spec;
-  const q = b64ToU8(spec.spec);
-  const img = new ImageData(nCols, rows);
-  const px = img.data;
+/** Decode + render the quantized matrix into an offscreen canvas tinted
+ *  toward `tint` (css hex) at gain 0 dB / γ 1. The returned object carries
+ *  the raw q matrix + basis so intensity re-renders stay cheap. */
+export function createSpecImage(spec, tint) {
+  const { rows, nCols, hopSec, dbRange } = spec;
+  const img = {
+    cv: document.createElement('canvas'),
+    q: b64ToU8(spec.spec),
+    rows,
+    nCols,
+    hopSec,
+    dbRange: dbRange || 70,
+  };
+  img.cv.width = nCols;
+  img.cv.height = rows;
+  img.idata = new ImageData(nCols, rows); // reused by every re-render
+  renderSpecInto(img, tint, 0, 1);
+  return img;
+}
+
+/** Re-render the tinted image IN PLACE from the raw q matrix with the
+ *  given intensity: dB' = dB + gainDb (a shift in q space of
+ *  255·gain/dbRange, clamped at both ends — the master's color-floor
+ *  semantics), then v' = v^gamma on the colormap input (the master's
+ *  highlight-γ semantics). Fully independent of any opacity mixing. */
+export function renderSpecInto(img, tint, gainDb, gamma) {
+  const { q, rows, nCols, dbRange, idata } = img;
+  const shift = gainDb / dbRange; // q-space shift (normalized units)
+  const g = Math.max(0.01, gamma);
+  const px = idata.data;
   const v = parseInt(tint.slice(1), 16);
   const tr = (v >> 16) & 255;
   const tg = (v >> 8) & 255;
   const tb = v & 255;
-  // near-black base = the lane/plot background the image composites onto
+  // near-black base = the background the image composites onto
   const br = 10;
   const bg = 10;
   const bb = 13;
@@ -61,21 +100,21 @@ export function specToImage(spec, tint) {
     const src = (rows - 1 - row) * nCols;
     const dst = row * nCols * 4;
     for (let c = 0; c < nCols; c++) {
-      const t = q[src + c] / 255;
+      let t = q[src + c] / 255 + shift;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      t = Math.pow(t, g);
       const o = dst + c * 4;
       px[o] = br + (tr - br) * t;
       px[o + 1] = bg + (tg - bg) * t;
       px[o + 2] = bb + (tb - bb) * t;
       px[o + 3] = 255;
     }
-    // NOTE: fully opaque on purpose — silence stays near-black, which is
-    // a no-op under the additive 'screen' blend AND occludes the base in
-    // replace ('normal') mode, while looking identical to the lane
-    // background in the lane view.
   }
-  const cv = document.createElement('canvas');
-  cv.width = nCols;
-  cv.height = rows;
-  cv.getContext('2d').putImageData(img, 0, 0);
-  return { cv, hopSec, rows, nCols };
+  // NOTE: fully opaque on purpose — silence stays near-black, which is a
+  // no-op under the additive 'screen' blend AND occludes the base in
+  // replace ('normal') mode, while looking identical to the lane
+  // background in the lane view.
+  const g2 = img.cv.getContext('2d');
+  g2.clearRect(0, 0, nCols, rows);
+  g2.putImageData(idata, 0, 0);
 }

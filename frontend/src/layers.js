@@ -28,12 +28,17 @@
 import { t, onChange } from './i18n.js';
 import { EPOCH_MS, pMs } from './spectrogram.js';
 import { PLOT_LEFT_PX, PLOT_RIGHT_PX } from './geometry.js';
-import { getStemSpec, specToImage } from './stemspec.js';
+import { getStemSpec, createSpecImage, renderSpecInto } from './stemspec.js';
 import { showToast } from './toast.js';
 import { throttled } from './util.js';
 
-/** Default opacity for a new additive layer (visible but not blinding) */
+/** Default intensity/opacity for a new additive layer: unity gain, master
+ *  γ semantics, opacity high enough to read but not blind. */
 const DEFAULT_OPACITY = 0.85;
+const GAIN_MIN = -24;
+const GAIN_MAX = 24;
+const GAMMA_MIN = 0.3;
+const GAMMA_MAX = 3;
 
 let nextLayerId = 1;
 
@@ -150,10 +155,29 @@ export function initLayers({ gd, apiBase, getSub, getPitchLoHi }) {
       layer.rowOp.disabled = false;
     }
     paintFill(layer.rowOp);
+    // intensity controls (independent of opacity): values + readouts
+    layer.rowGain.value = String(layer.gainDb);
+    layer.rowGamma.value = String(layer.gamma);
+    layer.rowGainVal.textContent = fmtGain(layer.gainDb);
+    layer.rowGammaVal.textContent = layer.gamma.toFixed(2);
+    paintFill(layer.rowGain);
+    paintFill(layer.rowGamma);
     layer.canvas.style.display = layer.visible ? 'block' : 'none';
     layer.rowEye.textContent = layer.visible ? '◉' : '◌';
     layer.rowEye.classList.toggle('off', !layer.visible);
     layer.rowEl.classList.toggle('hidden-layer', !layer.visible);
+  }
+
+  const fmtGain = (db) => `${db > 0 ? '+' : ''}${db}`;
+
+  /** INTENSITY (3.9.1 B): re-render the layer's tinted image from the raw
+   *  q matrix with dB' = dB + gain and v' = v^gamma, then repaint. This
+   *  shifts WHICH energies light up (spectral redistribution); opacity
+   *  only alpha-mixes the whole result — visibly different controls. */
+  function applyIntensity(layer) {
+    if (!layer.img) return;
+    renderSpecInto(layer.img, layer.color, layer.gainDb, layer.gamma);
+    drawLayer(layer);
   }
 
   function paintFill(el) {
@@ -197,6 +221,10 @@ export function initLayers({ gd, apiBase, getSub, getPitchLoHi }) {
   function buildRow(layer) {
     const row = document.createElement('div');
     row.className = 'layer-row';
+
+    // line 1: grip | dot | name | blend | eye | remove
+    const top = document.createElement('div');
+    top.className = 'layer-row-top';
     const grip = document.createElement('button');
     grip.type = 'button';
     grip.className = 'layer-grip';
@@ -208,7 +236,7 @@ export function initLayers({ gd, apiBase, getSub, getPitchLoHi }) {
     const name = document.createElement('span');
     name.className = 'layer-name';
     name.textContent = t(layer.labelKey);
-    row.append(grip, dot, name);
+    top.append(grip, dot, name);
 
     const blend = document.createElement('div');
     blend.className = 'layer-blend';
@@ -220,8 +248,10 @@ export function initLayers({ gd, apiBase, getSub, getPitchLoHi }) {
     bNormal.textContent = t('layerBlendCover');
     blend.title = t('layerBlendTitle');
     blend.append(bScreen, bNormal);
-    row.appendChild(blend);
+    top.appendChild(blend);
 
+    // opacity: alpha-mix on the composited layer — NOT intensity; kept on
+    // the top line so the two controls read as different things
     const op = document.createElement('input');
     op.type = 'range';
     op.className = 'layer-op';
@@ -229,7 +259,7 @@ export function initLayers({ gd, apiBase, getSub, getPitchLoHi }) {
     op.max = '1';
     op.step = '0.01';
     op.title = t('layerOpacity');
-    row.appendChild(op);
+    top.appendChild(op);
 
     const eye = document.createElement('button');
     eye.type = 'button';
@@ -240,7 +270,39 @@ export function initLayers({ gd, apiBase, getSub, getPitchLoHi }) {
     rm.className = 'layer-x';
     rm.textContent = '×';
     rm.title = t('layerRemove');
-    row.append(eye, rm);
+    top.append(eye, rm);
+    row.appendChild(top);
+
+    // line 2: INTENSITY — gain(dB) + γ on the layer's dB matrix before the
+    // tint (master color-floor/γ semantics); orthogonal to opacity
+    const fx = document.createElement('div');
+    fx.className = 'layer-row-fx';
+    const gainLab = document.createElement('span');
+    gainLab.className = 'fx-lab';
+    gainLab.textContent = 'dB';
+    const gain = document.createElement('input');
+    gain.type = 'range';
+    gain.className = 'layer-fx-slider';
+    gain.min = String(GAIN_MIN);
+    gain.max = String(GAIN_MAX);
+    gain.step = '1';
+    gain.title = t('layerGainTitle');
+    const gainVal = document.createElement('span');
+    gainVal.className = 'fx-val';
+    const gammaLab = document.createElement('span');
+    gammaLab.className = 'fx-lab';
+    gammaLab.textContent = 'γ';
+    const gamma = document.createElement('input');
+    gamma.type = 'range';
+    gamma.className = 'layer-fx-slider';
+    gamma.min = String(GAMMA_MIN);
+    gamma.max = String(GAMMA_MAX);
+    gamma.step = '0.05';
+    gamma.title = t('layerGammaTitle');
+    const gammaVal = document.createElement('span');
+    gammaVal.className = 'fx-val';
+    fx.append(gainLab, gain, gainVal, gammaLab, gamma, gammaVal);
+    row.appendChild(fx);
 
     // keep the widget references the painter needs
     layer.rowEl = row;
@@ -248,6 +310,10 @@ export function initLayers({ gd, apiBase, getSub, getPitchLoHi }) {
     layer.rowEye = eye;
     layer.rowBlend = blend;
     layer.rowBlendScreen = bScreen;
+    layer.rowGain = gain;
+    layer.rowGainVal = gainVal;
+    layer.rowGamma = gamma;
+    layer.rowGammaVal = gammaVal;
 
     grip.addEventListener('pointerdown', (ev) => beginReorder(layer, ev));
     bScreen.addEventListener('click', () => {
@@ -264,6 +330,22 @@ export function initLayers({ gd, apiBase, getSub, getPitchLoHi }) {
         layer.canvas.style.opacity = String(layer.opacity);
       }
       paintFill(op);
+    });
+    gain.addEventListener('input', () => {
+      layer.gainDb = Math.min(
+        GAIN_MAX,
+        Math.max(GAIN_MIN, Math.round(parseFloat(gain.value)))
+      );
+      applyIntensity(layer);
+      paintLayerRow(layer);
+    });
+    gamma.addEventListener('input', () => {
+      layer.gamma = Math.min(
+        GAMMA_MAX,
+        Math.max(GAMMA_MIN, parseFloat(gamma.value) || 1)
+      );
+      applyIntensity(layer);
+      paintLayerRow(layer);
     });
     eye.addEventListener('click', () => {
       layer.visible = !layer.visible;
@@ -366,6 +448,8 @@ export function initLayers({ gd, apiBase, getSub, getPitchLoHi }) {
       labelKey: info.labelKey,
       opacity: DEFAULT_OPACITY,
       blend: 'screen', // 叠加 default; 覆盖 is one click away
+      gainDb: 0, // INTENSITY (3.9.1 B): dB shift before the tint
+      gamma: 1, // INTENSITY: colormap-input exponent (master γ semantics)
       visible: true,
       img: null,
       canvas: document.createElement('canvas'),
@@ -377,7 +461,7 @@ export function initLayers({ gd, apiBase, getSub, getPitchLoHi }) {
     redraw();
     try {
       const spec = await getStemSpec(apiBase, layer.method, layer.stem);
-      layer.img = specToImage(spec, layer.color);
+      layer.img = createSpecImage(spec, layer.color);
     } catch (e) {
       showToast(t('laneSpecFailed', { msg: e?.message || String(e) }));
       removeLayer(layer);
@@ -385,7 +469,7 @@ export function initLayers({ gd, apiBase, getSub, getPitchLoHi }) {
     }
     // a layer removed while loading must not paint into a detached canvas
     if (layers.includes(layer)) {
-      drawLayer(layer);
+      applyIntensity(layer); // re-render under the current gain/γ, then draw
       renderManager();
     }
   }

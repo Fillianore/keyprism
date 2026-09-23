@@ -94,7 +94,7 @@ import { MixerState, bufferPeak, makeupDb } from './mixer.js';
 import { trackRow, wireMuteSolo } from './controls.js';
 import { showToast } from './toast.js';
 import { WaveLod } from './wavelod.js';
-import { getStemSpec, specToImage } from './stemspec.js';
+import { getStemSpec, createSpecImage } from './stemspec.js';
 import { throttled } from './util.js';
 
 const START_LEAD = 0.06; // keep identical to player.js START_LEAD
@@ -488,7 +488,7 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
     scheduleDraw(); // show the loading placeholder
     try {
       const spec = await getStemSpec(apiBase, state.method, lane.key);
-      lane.specImg = specToImage(spec, lane.color);
+      lane.specImg = createSpecImage(spec, lane.color);
       lane.specState = 'ready';
     } catch (e) {
       lane.specState = 'failed';

@@ -1044,7 +1044,7 @@ input[type='range']:active::-moz-range-thumb {
   top: 44px;
   right: 8px;
   z-index: 6;
-  width: 268px;
+  width: 300px;
   max-height: calc(100% - 60px);
   overflow-y: auto;
   padding: 6px;
@@ -1072,15 +1072,54 @@ input[type='range']:active::-moz-range-thumb {
   gap: 4px;
 }
 
+/* one layer = two lines: [grip dot name blend opacity eye x] and the
+   INTENSITY line [dB slider γ slider] — visually separate from opacity */
 .layer-row {
-  display: grid;
-  grid-template-columns: 18px 10px 44px 64px 58px 18px 18px;
-  align-items: center;
-  gap: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   padding: 3px 4px;
   background: rgba(10, 10, 13, 0.6);
   border: 1px solid #26262c;
   border-radius: 6px;
+}
+
+.layer-row-top {
+  display: grid;
+  grid-template-columns: 18px 10px 44px 64px 54px 18px 18px;
+  align-items: center;
+  gap: 4px;
+}
+
+.layer-row-fx {
+  display: grid;
+  grid-template-columns: 14px 1fr 26px 10px 1fr 26px;
+  align-items: center;
+  gap: 3px;
+  border-top: 1px dotted rgba(152, 145, 127, 0.25);
+  padding-top: 2px;
+}
+
+.fx-lab {
+  color: var(--muted);
+  font-size: 9px;
+  text-align: center;
+  line-height: 1;
+}
+
+.fx-val {
+  color: var(--text);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.layer-row .layer-fx-slider {
+  width: 100%;
+  min-width: 0;
+  height: 14px;
 }
 
 .layer-row.hidden-layer .layer-name {
