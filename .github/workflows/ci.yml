@@ -57,5 +57,8 @@ jobs:
       - name: Shared pitch->pixel geometry test (<=1 px alignment)
         run: npm run test:geometry
 
+      - name: Layer intensity direction test (gamma matches master)
+        run: npm run test:intensity
+
       - name: Production build
         run: npm run build

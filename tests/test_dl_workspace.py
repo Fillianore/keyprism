@@ -685,6 +685,33 @@ def test_shared_pitch_mapping_contract():
     assert "npm run test:geometry" in ci
 
 
+def test_layer_intensity_direction_contract():
+    """3.9.1 gamma-direction fix: the layer intensity transform lives in
+    ONE pure function (stemspec.js intensityValue) applying the MASTER's
+    highlight-γ direction (v^(1/γ) — bigger γ = brighter, because the
+    master warps colorscale anchors by p^γ). The direction is locked by a
+    Node test (test:intensity) wired into npm + CI."""
+    stemspec = strip_js_comments(
+        (FRONTEND / "stemspec.js").read_text(encoding="utf-8"))
+    assert "export function intensityValue" in stemspec
+    assert "Math.pow(t, 1 / Math.max(0.01, gamma))" in stemspec
+    # the naive v^γ (direction-inverted vs the master) must not survive
+    assert "Math.pow(t, g)" not in stemspec
+    script = FRONTEND.parent / "scripts" / "test-intensity.mjs"
+    assert script.is_file()
+    src = script.read_text(encoding="utf-8")
+    assert "bigger γ" in src and "intensityValue" in src
+    pkg = json.loads((FRONTEND.parent / "package.json").read_text(
+        encoding="utf-8"))
+    assert pkg["scripts"]["test:intensity"] == \
+        "node scripts/test-intensity.mjs"
+    assert "npm run test:intensity" in pkg["scripts"]["test"]
+    repo = Path(__file__).resolve().parent.parent
+    ci = (repo / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8")
+    assert "npm run test:intensity" in ci
+
+
 def test_stem_spec_shared_basis_contract():
     """3.9.1 C frontend side: the stem-spec client asserts the master's
     dB basis (getStemSpec expect.dbRange), and both consumers — the lane

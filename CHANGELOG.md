@@ -61,9 +61,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Layer INTENSITY controls: opacity is alpha-mixing, so per-layer
     gain_dB (−24…+24 dB, default 0) and γ (0.3…3.0, default 1) now act
     on the layer's dB matrix BEFORE the tint (dB' = dB + gain, then
-    v' = v^γ — the master's color-floor/highlight-γ semantics), on a
-    second line of each layer-manager row; gain shifts WHICH energies
-    light up, opacity only fades the whole layer
+    v' = v^(1/γ) — the master's highlight-γ direction: the master warps
+    colorscale anchors by p^γ, so a BIGGER γ reads BRIGHTER; the naive
+    v^γ would invert the slider), on a second line of each layer-manager
+    row; gain shifts WHICH energies light up, opacity only fades the
+    whole layer. Direction locked by `npm run test:intensity` (Node,
+    wired into CI)
   - Stem-spec normalization rebased onto the MASTER's mix joint peak
     (`peak_ref` + `basis: "mix_joint_peak"` in the payload; frontend
     asserts the master's dbRange): at gain 0 / opacity 1 / screen an

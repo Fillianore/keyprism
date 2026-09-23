@@ -460,10 +460,14 @@ Decisions that are easy to "simplify" into regressions:
   [m·sub−0.5, (m+1)·sub−0.5] in [lo·sub−0.5, (hi+1)·sub−0.5]. Per-layer
   INTENSITY (3.9.1 B) is separate from opacity: `gain_dB` shifts the dB
   matrix and `gamma` re-shapes the colormap input (`stemspec.js
-  renderSpecInto`, master color-floor/γ semantics) — opacity only
-  alpha-mixes the result. Overlays redraw ONLY on view-range/geometry
-  change (throttled) — never per frame; the playhead lives on its own
-  DOM layer above the stack so playback is free.
+  intensityValue`, master color-floor/γ semantics) — opacity only
+  alpha-mixes the result. γ DIRECTION (3.9.1 fix): the master warps
+  colorscale ANCHORS by p^γ, which equals warping the data by v^(1/γ) —
+  so the layer applies v^(1/γ) and a BIGGER γ reads BRIGHTER, matching
+  the master's slider; the naive v^γ inverts it (locked by
+  `npm run test:intensity`, wired into CI). Overlays redraw ONLY on
+  view-range/geometry change (throttled) — never per frame; the playhead
+  lives on its own DOM layer above the stack so playback is free.
 
 ## Known Boundaries & Pitfalls (must read before changing)
 

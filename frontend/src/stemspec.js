@@ -11,7 +11,8 @@
  *  Intensity vs opacity (3.9.1 B): the stored matrix is the dB map
  *  normalized over [-dbRange, 0] (q = 255·(dB + dbRange)/dbRange). The
  *  per-layer INTENSITY controls act on that dB map BEFORE the tint —
- *  `dB' = dB + gain_dB`, then `v' = v^gamma` on the colormap input —
+ *  `dB' = dB + gain_dB`, then the γ warp of the colormap input with the
+ *  MASTER's highlight-γ direction (`v^(1/γ)`, see intensityValue) —
  *  exactly the master's color-floor/γ semantics, while opacity stays an
  *  alpha mix on the composite. The raw q matrix is kept on the image
  *  object so a slider move re-renders the small 88×nCols canvas in place.
@@ -77,15 +78,25 @@ export function createSpecImage(spec, tint) {
   return img;
 }
 
+/** The per-pixel INTENSITY transform (pure, Node-testable — see
+ *  scripts/test-intensity.mjs): a dB shift (the master's color-floor
+ *  semantics, clamped at both ends) followed by the γ warp of the
+ *  colormap input. γ direction (3.9.1 fix): the MASTER's highlight-γ
+ *  (main.js applyGamma) warps the colorscale ANCHORS by p^γ, which is
+ *  equivalent to warping the data by v^(1/γ) — so a BIGGER γ reads
+ *  BRIGHTER, exactly like the master's slider. (The naive v^γ would
+ *  invert the direction: bigger γ = darker.) */
+export function intensityValue(q01, gainDb, dbRange, gamma) {
+  let t = q01 + gainDb / dbRange;
+  t = t < 0 ? 0 : t > 1 ? 1 : t;
+  return Math.pow(t, 1 / Math.max(0.01, gamma));
+}
+
 /** Re-render the tinted image IN PLACE from the raw q matrix with the
- *  given intensity: dB' = dB + gainDb (a shift in q space of
- *  255·gain/dbRange, clamped at both ends — the master's color-floor
- *  semantics), then v' = v^gamma on the colormap input (the master's
- *  highlight-γ semantics). Fully independent of any opacity mixing. */
+ *  given intensity (see intensityValue). Fully independent of any
+ *  opacity mixing. */
 export function renderSpecInto(img, tint, gainDb, gamma) {
   const { q, rows, nCols, dbRange, idata } = img;
-  const shift = gainDb / dbRange; // q-space shift (normalized units)
-  const g = Math.max(0.01, gamma);
   const px = idata.data;
   const v = parseInt(tint.slice(1), 16);
   const tr = (v >> 16) & 255;
@@ -100,9 +111,7 @@ export function renderSpecInto(img, tint, gainDb, gamma) {
     const src = (rows - 1 - row) * nCols;
     const dst = row * nCols * 4;
     for (let c = 0; c < nCols; c++) {
-      let t = q[src + c] / 255 + shift;
-      t = t < 0 ? 0 : t > 1 ? 1 : t;
-      t = Math.pow(t, g);
+      const t = intensityValue(q[src + c] / 255, gainDb, dbRange, gamma);
       const o = dst + c * 4;
       px[o] = br + (tr - br) * t;
       px[o + 1] = bg + (tg - bg) * t;
