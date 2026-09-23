@@ -480,14 +480,18 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
   }
 
   /** Fetch + decode the stem spec once per lane (shared module cache in
-   *  stemspec.js makes repeat lanes/layers free). A failure toasts the
-   *  precise reason and degrades the lane back to Wave. */
+   *  stemspec.js makes repeat lanes/layers free; the master payload's
+   *  dbRange is asserted so lane/overlay views share the master's dB
+   *  basis — 3.9.1 C). A failure toasts the precise reason and degrades
+   *  the lane back to Wave. */
   async function ensureSpec(lane) {
     if (lane.specState === 'loading' || lane.specState === 'ready') return;
     lane.specState = 'loading';
     scheduleDraw(); // show the loading placeholder
     try {
-      const spec = await getStemSpec(apiBase, state.method, lane.key);
+      const spec = await getStemSpec(apiBase, state.method, lane.key, {
+        dbRange: data.dbRange,
+      });
       lane.specImg = createSpecImage(spec, lane.color);
       lane.specState = 'ready';
     } catch (e) {

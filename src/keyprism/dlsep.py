@@ -666,15 +666,19 @@ def dl_spec_path(entry: Path, method: str, key: str) -> Path:
 
 
 def get_stem_spec(entry: Path, method: str, key: str, *, window: int,
-                  db_range: float, rate: int = 30, lock=None) -> dict:
+                  db_range: float, peak_ref: float, rate: int = 30,
+                  lock=None) -> dict:
     """Quantized semitone spectrogram of one DL stem WAV (Phase 3.9),
     disk-cached as ``spec_<stem>.json`` (same layout as stems.py's twin).
 
-    Needs only the cached WAV — no onnxruntime — so the lane [Wave|Spec]
-    view and overlay layers keep working in any environment where the
-    stems were computed. A missing WAV raises FileNotFoundError which the
-    server maps to 404 with the request hint. Compute runs under ``lock``
-    with the usual double-check."""
+    Normalization basis (3.9.1 C): the MASTER's mix joint peak
+    (``peak_ref``), not the stem's own peak; cached bodies carry the
+    ``basis`` tag and pre-3.9.1 own-peak files recompute. Needs only the
+    cached WAV — no onnxruntime — so the lane [Wave|Spec] view and overlay
+    layers keep working in any environment where the stems were computed.
+    A missing WAV raises FileNotFoundError which the server maps to 404
+    with the request hint. Compute runs under ``lock`` with the usual
+    double-check."""
     _check_method(method)
     if key not in STEM_SPECS[method]:
         raise KeyError(f"未知 stem: {method}/{key}")
@@ -696,7 +700,7 @@ def get_stem_spec(entry: Path, method: str, key: str, *, window: int,
         x, sr = sf.read(str(wav), dtype="float64", always_2d=True)
         mono = x.mean(axis=1)
         spec = payload.stem_spec_payload(mono, sr, window, db_range,
-                                         rate=rate)
+                                         peak_ref, rate=rate)
         body = {"method": method, "stem": key,
                 "duration": round(float(x.shape[0] / sr), 6), **spec,
                 "version": DL_STEMS_VERSION}
@@ -709,14 +713,15 @@ def get_stem_spec(entry: Path, method: str, key: str, *, window: int,
 
 def _load_spec_cache(cache: Path, method: str, key: str, rate: int) -> dict | None:
     """Valid cached spec body or None (same guard as stems.py: version +
-    stem identity + request rate; window/db_range are constant per
-    analysis entry)."""
+    stem identity + request rate + the master-joint-peak ``basis`` tag;
+    window/db_range are constant per analysis entry)."""
     try:
         body = json.loads(cache.read_text(encoding="utf-8"))
     except (OSError, ValueError, json.JSONDecodeError):
         return None
     if body.get("version") == DL_STEMS_VERSION and \
             body.get("method") == method and body.get("stem") == key and \
-            body.get("rate") == int(rate):
+            body.get("rate") == int(rate) and \
+            body.get("basis") == "mix_joint_peak":
         return {**body, "cached": True}
     return None

@@ -1,6 +1,11 @@
 import Plotly from 'plotly.js-dist-min';
 import { t } from './i18n.js';
-import { PLOT_LEFT_PX, PLOT_RIGHT_PX } from './geometry.js';
+import {
+  PLOT_LEFT_PX,
+  PLOT_RIGHT_PX,
+  keyRangeUnits,
+  rowCenterUnit,
+} from './geometry.js';
 
 export const EPOCH_MS = Date.UTC(2020, 0, 1);
 export const N_ROWS = 88;
@@ -173,8 +178,10 @@ let gridState = null;
 let pitchRange = [0, N_ROWS - 1]; // semitone range
 let sub = 1; // subbands per semitone (row count = N_ROWS * sub)
 
-/** y-axis semitone ticks: the center row of semitone m = m*sub + (sub-1)/2 */
-const rowOf = (m) => m * sub + (sub - 1) / 2;
+/** y-axis semitone row of semitone m's center — the shared geometry
+ *  mapping (geometry.js, 3.9.1 D: ONE pitch→pixel definition serves the
+ *  master axis AND the overlay canvases) */
+const rowOf = (m) => rowCenterUnit(m, sub);
 
 /** Pitch labels (C-note names) live in the left margin as ANNOTATIONS:
  *  plotly axis tick labels can only hug the axis edge, but the labels must
@@ -209,7 +216,7 @@ function pitchLabelAnnotations() {
 function yaxisConfig() {
   const [lo, hi] = pitchRange;
   return {
-    range: [lo * sub - 0.5, (hi + 1) * sub - 0.5],
+    range: keyRangeUnits(sub, lo, hi),
     fixedrange: true,
     // pitch labels are annotations in the margin (pitchLabelAnnotations)
     showticklabels: false,

@@ -305,15 +305,21 @@ def stem_spec_path(entry: Path, method: str, key: str) -> Path:
 
 
 def get_stem_spec(entry: Path, method: str, key: str, *, window: int,
-                  db_range: float, rate: int = 30, lock=None) -> dict:
+                  db_range: float, peak_ref: float, rate: int = 30,
+                  lock=None) -> dict:
     """Quantized semitone spectrogram of one stem WAV (Phase 3.9), disk-
     cached as ``spec_<stem>.json`` inside the stems dir.
 
-    The stem must already be computed (the lanes/stems panels only offer
-    the view after separation ran); a missing WAV raises FileNotFoundError
-    which the server maps to 404 with the request hint. Compute runs under
-    ``lock`` with the usual double-check so concurrent requests share one
-    STFT pass."""
+    Normalization basis (3.9.1 C): the MASTER's mix joint peak
+    (``peak_ref``, computed by the server from the loaded track) — NOT
+    the stem's own peak, so overlay/lane brightness matches the master
+    spectrum's scale. Cached bodies carry the ``basis`` tag; anything
+    without it (pre-3.9.1 own-peak files) is treated as stale and
+    recomputed. The stem must already be computed (the lanes/stems panels
+    only offer the view after separation ran); a missing WAV raises
+    FileNotFoundError which the server maps to 404 with the request hint.
+    Compute runs under ``lock`` with the usual double-check so concurrent
+    requests share one STFT pass."""
     _check_method(method)
     if key not in STEM_SPECS[method]:
         raise KeyError(f"未知 stem: {method}/{key}")
@@ -331,7 +337,8 @@ def get_stem_spec(entry: Path, method: str, key: str, *, window: int,
                 f"{method} 分轨尚未计算: 先请求 /api/stems?method={method}")
         x, sr = sf.read(str(wav), dtype="float64", always_2d=True)
         mono = x.mean(axis=1)
-        spec = payload.stem_spec_payload(mono, sr, window, db_range, rate=rate)
+        spec = payload.stem_spec_payload(mono, sr, window, db_range,
+                                         peak_ref, rate=rate)
         body = {"method": method, "stem": key,
                 "duration": round(float(x.shape[0] / sr), 6), **spec,
                 "version": STEMS_VERSION}
@@ -345,14 +352,17 @@ def get_stem_spec(entry: Path, method: str, key: str, *, window: int,
 def _load_spec_cache(cache: Path, method: str, key: str, rate: int) -> dict | None:
     """Valid cached spec body or None; the version+stem identity guard
     keys the file to the stems that produced it, ``rate`` to the request
-    (window/db_range are constant per analysis entry, so they need no
-    separate check)."""
+    and ``basis`` to the master-joint-peak normalization (3.9.1 C) —
+    pre-3.9.1 own-peak caches fail the basis check and recompute.
+    window/db_range are constant per analysis entry, so they need no
+    separate check."""
     try:
         body = json.loads(cache.read_text(encoding="utf-8"))
     except (OSError, ValueError, json.JSONDecodeError):
         return None
     if body.get("version") == STEMS_VERSION and \
             body.get("method") == method and body.get("stem") == key and \
-            body.get("rate") == int(rate):
+            body.get("rate") == int(rate) and \
+            body.get("basis") == "mix_joint_peak":
         return {**body, "cached": True}
     return None

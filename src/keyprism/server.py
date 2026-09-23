@@ -47,7 +47,7 @@ from pathlib import Path
 
 from . import audio_io, dlsep, poly_transcribe, stems, transcribe
 from .analyze import run_analysis
-from .payload import compute_specs
+from .payload import compute_specs, joint_spec_peak
 from .tracks import TRACK_QUERY_VALUES
 
 #: Graceful-degradation flags (Phase 3): the DL dependencies are
@@ -248,6 +248,21 @@ def make_server(path: Path, port: int, host: str, start: float,
             return transcribe.locate_entry(
                 cur, window=window, db_range=db_range, rate=cur["rate"],
                 sub=cur["sub"], start=start, end=end)
+
+        def _master_peak(self, cur):
+            """The master spectrogram's normalization basis (3.9.1 C): the
+            joint mix/left/right peak of the semitone power matrices at the
+            track's payload resolution — the exact value data.json was
+            quantized against. Computed once per track (lazily, on the
+            first stem-spec request) and cached in the track state, so
+            every stem spec shares the master's dB scale."""
+            p = cur.get("spec_peak")
+            if p is None:
+                max_cols = max(60, int(round(cur["rate"] * cur["dur"])))
+                p = joint_spec_peak(cur["data2d"], cur["sr"], window,
+                                    max_cols, cur["sub"])
+                cur["spec_peak"] = p
+            return p
 
         def _poly_notes(self, u, q):
             """GET /api/notes?track=piano|guitar|other&method=poly[&source=]
@@ -572,9 +587,14 @@ def make_server(path: Path, port: int, host: str, start: float,
 
             Reuses the Phase 0 aggregate pipeline (``spec_matrix``, sub=1
             -> 88 piano semitone rows, the same row space as the master
-            heatmap's y axis) compressed to dB and base64-quantized. Needs
-            only the stem WAV from the cache — no onnxruntime — and 404s
-            with the compute hint when the separation has not run yet."""
+            heatmap's y axis). Normalization basis (3.9.1 C): the master's
+            mix joint peak (``_master_peak``), so overlay brightness
+            matches the bass/energy share seen in the master spectrum
+            instead of being inflated to the stem's own full scale; the
+            response carries ``peak_ref`` + ``basis`` for the frontend to
+            assert. Needs only the stem WAV from the cache — no
+            onnxruntime — and 404s with the compute hint when the
+            separation has not run yet."""
             cur = state["cur"]
             if cur is None:
                 self._json(409, {"error": "暂无已加载的曲目"})
@@ -598,7 +618,9 @@ def make_server(path: Path, port: int, host: str, start: float,
             lock = state["dl_lock"] if is_dl else state["stems_lock"]
             try:
                 body = fn(entry, method, name, window=window,
-                          db_range=db_range, rate=rate, lock=lock)
+                          db_range=db_range,
+                          peak_ref=self._master_peak(cur), rate=rate,
+                          lock=lock)
             except FileNotFoundError as e:
                 self._json(404, {"error": str(e)})
                 return

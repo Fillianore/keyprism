@@ -27,7 +27,11 @@
 
 import { t, onChange } from './i18n.js';
 import { EPOCH_MS, pMs } from './spectrogram.js';
-import { PLOT_LEFT_PX, PLOT_RIGHT_PX } from './geometry.js';
+import {
+  PLOT_LEFT_PX,
+  PLOT_RIGHT_PX,
+  unitToPlotFraction,
+} from './geometry.js';
 import { getStemSpec, createSpecImage, renderSpecInto } from './stemspec.js';
 import { showToast } from './toast.js';
 import { throttled } from './util.js';
@@ -42,7 +46,7 @@ const GAMMA_MAX = 3;
 
 let nextLayerId = 1;
 
-export function initLayers({ gd, apiBase, getSub, getPitchLoHi }) {
+export function initLayers({ gd, data, apiBase, getSub, getPitchLoHi }) {
   // static mode: layers need the backend stem_spec endpoint
   if (!apiBase) return {};
 
@@ -82,11 +86,6 @@ export function initLayers({ gd, apiBase, getSub, getPitchLoHi }) {
     stack.style.bottom = `${mb}px`;
   }
 
-  /** Master y range -> canvas y of a row-unit value (top-down) */
-  function yOfUnit(r, h, ylo, yhi) {
-    return (h * (yhi - r)) / (yhi - ylo);
-  }
-
   // ---- drawing ---------------------------------------------------------
   function drawLayer(layer) {
     const g = fitCanvas(layer.canvas);
@@ -115,14 +114,16 @@ export function initLayers({ gd, apiBase, getSub, getPitchLoHi }) {
     // source transparently, matching the lanes' blank margins)
     const sx = aSec / hopSec;
     const sw = span / hopSec;
-    // y: the master heatmap's key range (semitone indices [lo, hi] on a
-    // sub-band row grid) -> the 88-row spec's band
+    // y: the master heatmap's key range via the SHARED pitch->pixel
+    // mapping (geometry.js unitToPlotFraction — the same function the
+    // master's yaxis range is built from, so a semitone band in the
+    // overlay sits exactly on the same rows as the master heatmap)
     const sub = Math.max(1, getSub ? getSub() : 1);
     const [lo, hi] = getPitchLoHi ? getPitchLoHi() : [0, rows - 1];
-    const ylo = lo * sub - 0.5;
-    const yhi = (hi + 1) * sub - 0.5;
-    const yTop = yOfUnit((hi + 1) * sub - 0.5, h, ylo, yhi);
-    const yH = yOfUnit(lo * sub - 0.5, h, ylo, yhi) - yTop;
+    const fTop = unitToPlotFraction((hi + 1) * sub - 0.5, sub, lo, hi);
+    const fBot = unitToPlotFraction(lo * sub - 0.5, sub, lo, hi);
+    const yTop = fTop * h;
+    const yH = (fBot - fTop) * h;
     const sy = Math.max(0, rows - 1 - hi); // image row 0 = top = C8
     const sh = Math.min(rows - sy, hi - lo + 1);
     g.imageSmoothingEnabled = false; // honest cells, like the master
@@ -460,7 +461,10 @@ export function initLayers({ gd, apiBase, getSub, getPitchLoHi }) {
     renderManager();
     redraw();
     try {
-      const spec = await getStemSpec(apiBase, layer.method, layer.stem);
+      // assert the stem spec shares the master's normalization basis
+      const spec = await getStemSpec(apiBase, layer.method, layer.stem, {
+        dbRange: data.dbRange,
+      });
       layer.img = createSpecImage(spec, layer.color);
     } catch (e) {
       showToast(t('laneSpecFailed', { msg: e?.message || String(e) }));

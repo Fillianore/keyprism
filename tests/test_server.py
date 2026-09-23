@@ -114,6 +114,12 @@ def test_stem_spec_serves_quantized_matrix(srv):
     raw = base64.b64decode(body["spec"])
     assert len(raw) == body["rows"] * body["nCols"]
     assert max(raw) > 0  # a click-track fixture has visible energy
+    # 3.9.1 C: the global normalization basis is present and asserted —
+    # every stem spec is dB-normalized by the MASTER's mix joint peak, not
+    # the stem's own peak
+    assert body["basis"] == "mix_joint_peak"
+    assert body["peak_ref"] > 0
+    assert body["dbRange"] == 70.0
     # repeat request: cache hit, byte-identical payload (minus the flag)
     code, again = get(url)
     assert code == 200 and again["cached"] is True

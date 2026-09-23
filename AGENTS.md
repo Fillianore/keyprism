@@ -400,6 +400,22 @@ Decisions that are easy to "simplify" into regressions:
   real border (it is an inset box-shadow precisely so the canvas box
   stays exact), and the keyboard strip paper fractions must be re-pinned
   on resize (`applyPlotShapes` in the main.js resize observer).
+- **plotly 'paper' coordinates span the PLOTTING AREA INSIDE the margins**
+  (3.9.1 root cause): the margin zone [0, PLOT_LEFT_PX) is NEGATIVE paper
+  territory. The keyboard strip ([40, PLOT_LEFT_PX−4], hugging the plot
+  edge) and the pitch labels (left-anchored ANNOTATIONS at ~10px — plotly
+  tick labels cannot leave the axis edge) both live there; the plot area
+  contains only spectrum. Rebuild both together wherever
+  `currentShapes()` is relayouted (buildFigure / applyPitchRange /
+  applyPlotShapes); annotation y stays in data coords so setSub moves it
+  automatically.
+- **Pitch→pixel mapping has ONE definition** (`geometry.js`
+  `keyRangeUnits` / `rowCenterUnit` / `unitToPlotFraction`, 3.9.1 D).
+  The master yaxis range and the overlay band mapping both derive from
+  it — do not re-derive `m*sub + (sub-1)/2` in another module. The
+  ≤1 px overlay-vs-master row alignment is locked by
+  `npm run test:geometry` (pure-Node, geometry.js is DOM-import-safe by
+  a guard, wired into CI).
 - **Lane playheads ride the master cursor's frame loop**
   (`player.onFrame`, fired from `reposition()` — the same function the
   playback rAF loop and every seek/relayout call repaint through). One
@@ -420,11 +436,17 @@ Decisions that are easy to "simplify" into regressions:
   stem_spec_payload` → `spec_matrix`, sub=1 → 88 semitone rows). That row
   identity is what makes lane mini-spectrograms and overlay layers line
   up with the master heatmap's y axis — do not "fix" it to linear Hz
-  bands. dB is compressed against the STEM's OWN peak (quiet stems stay
-  readable); disk cache is `spec_<stem>.json` inside the version-tagged
-  stems dir (bumping `STEMS_VERSION`/`DL_STEMS_VERSION` invalidates specs
-  with their stems); compute needs only the cached WAV (no onnxruntime)
-  and 404s with the compute hint when separation has not run.
+  bands. Normalization basis (3.9.1 C): the MASTER's mix joint peak
+  (`payload.joint_spec_peak` — the exact value data.json is quantized
+  against, computed once per track in `server._master_peak`), NOT the
+  stem's own peak; the response carries `peak_ref` + `basis` and the
+  frontend asserts the master's `dbRange`. Disk cache is
+  `spec_<stem>.json` inside the version-tagged stems dir — cached bodies
+  must carry the `basis` tag, so pre-3.9.1 own-peak caches recompute
+  without touching the WAVs (bumping `STEMS_VERSION`/`DL_STEMS_VERSION`
+  would needlessly invalidate the stems themselves); compute needs only
+  the cached WAV (no onnxruntime) and 404s with the compute hint when
+  separation has not run.
 - **Overlay layers blend with CSS, not pixels** (`frontend/src/layers.js`).
   叠加 = `mix-blend-mode: screen` + per-layer opacity (dark spec pixels
   are no-ops under screen); 覆盖 = `normal` + opacity 1 (the spec image
@@ -433,11 +455,15 @@ Decisions that are easy to "simplify" into regressions:
   context and then the canvases could only blend against the stack, never
   against the heatmap painted beneath it (the canvases carry the
   z-index themselves). Layer y-mapping follows the master's LIVE
-  sub/pitch-range state (`getSub`/`getPitchLoHi` getters in main.js) —
-  semitone m spans row units [m·sub−0.5, (m+1)·sub−0.5] in
-  [lo·sub−0.5, (hi+1)·sub−0.5]. Overlays redraw ONLY on
-  view-range/geometry change (throttled) — never per frame; the playhead
-  lives on its own DOM layer above the stack so playback is free.
+  sub/pitch-range state (`getSub`/`getPitchLoHi` getters in main.js)
+  through the shared `unitToPlotFraction` — semitone m spans row units
+  [m·sub−0.5, (m+1)·sub−0.5] in [lo·sub−0.5, (hi+1)·sub−0.5]. Per-layer
+  INTENSITY (3.9.1 B) is separate from opacity: `gain_dB` shifts the dB
+  matrix and `gamma` re-shapes the colormap input (`stemspec.js
+  renderSpecInto`, master color-floor/γ semantics) — opacity only
+  alpha-mixes the result. Overlays redraw ONLY on view-range/geometry
+  change (throttled) — never per frame; the playhead lives on its own
+  DOM layer above the stack so playback is free.
 
 ## Known Boundaries & Pitfalls (must read before changing)
 

@@ -162,6 +162,7 @@ async function main() {
   // master heatmap's y range. ----
   const layers = initLayers({
     gd,
+    data,
     apiBase: data.apiBase,
     getSub: () => curSub,
     getPitchLoHi: () => pitchLoHi,

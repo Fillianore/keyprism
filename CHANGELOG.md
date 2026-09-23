@@ -47,6 +47,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   grid columns are derived from the same CSS variables (the lane scope's
   1px border became an inset box-shadow to keep the canvas box exact)
 
+### Fixed
+
+- 3.9.1 hotfix (three defects):
+  - Keyboard strip relocated INTO the left margin: plotly 'paper' shape
+    coordinates span the plotting area inside the margins, so 3.9's
+    fractions drew the keyboard INSIDE the plot area (~280–480px,
+    occluding the spectrum) while the left margin sat empty. The pitch
+    labels (C-note names) are now left-anchored annotations at ~10px —
+    leftmost — and the keyboard spans [40, PLOT_LEFT_PX−4] hugging the
+    plot edge; the plot area contains only spectrum. Resize re-pinning
+    (applyPlotShapes) now re-pins shapes AND annotations
+  - Layer INTENSITY controls: opacity is alpha-mixing, so per-layer
+    gain_dB (−24…+24 dB, default 0) and γ (0.3…3.0, default 1) now act
+    on the layer's dB matrix BEFORE the tint (dB' = dB + gain, then
+    v' = v^γ — the master's color-floor/highlight-γ semantics), on a
+    second line of each layer-manager row; gain shifts WHICH energies
+    light up, opacity only fades the whole layer
+  - Stem-spec normalization rebased onto the MASTER's mix joint peak
+    (`peak_ref` + `basis: "mix_joint_peak"` in the payload; frontend
+    asserts the master's dbRange): at gain 0 / opacity 1 / screen an
+    overlaid stem's brightness now equals its true share of the mix
+    instead of being inflated to its own full scale (pre-3.9.1 caches
+    fail the basis check and recompute). Pitch→pixel mapping extracted
+    into ONE shared definition (geometry.js `keyRangeUnits` /
+    `rowCenterUnit` / `unitToPlotFraction`) used by both the master
+    heatmap axis and the overlay canvases; a new `npm run test:geometry`
+    (Node, wired into CI) locks overlay-vs-master row alignment to
+    ≤ 1 px (measured worst |Δ| = 0.000000 px over 108 cases)
+
 ## [0.6.2] - 2026-09-23
 
 ### Added
