@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- 3.10.3 — compact control strip + stop/restart:
+  - The AI Separation panel's controls (method / quality / device
+    selects, GPU badge, status) collapsed from stacked full-width rows
+    into ONE horizontal wrapped control strip living in the Mix row's
+    right cell (the empty dashed lane placeholder is gone); the Mix row
+    renders in every state so the controls stay reachable mid-task
+  - Stop (⏹) & Restart (↻) buttons: `POST /api/task/{id}/cancel` flips
+    a per-task cooperative cancel flag — the model download checks it
+    per byte-chunk and inference per chunk / per shift pass (ort
+    `run()` is uninterruptible; the stop lands at the next boundary,
+    ≤ one ~7.8 s model segment later) — the task ends `cancelled`,
+    partial `.part` downloads are removed and no stem cache is written;
+    Restart cancels any running task and re-submits with `force=1`
+    (`POST /api/stems&force=1` bypasses the stems cache and recomputes)
 - Phase 3.10 — 6-stem auto-download, GPU providers, quality tiers:
   - `demucs_6` now auto-downloads the REAL 6-stem ONNX export
     (`StemSplitio/htdemucs-6s-onnx`, MIT) — the Phase 3.5 conclusion

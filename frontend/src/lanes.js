@@ -198,6 +198,15 @@ class PolyUnavailable extends Error {
   }
 }
 
+/** Marks an unwound separation (user stop, restart, method/panel
+ *  switch): the load() catch path goes back to IDLE silently instead of
+ *  showing a failure (3.10.3). */
+function cancelledError() {
+  const e = new Error('cancelled');
+  e.cancelled = true;
+  return e;
+}
+
 export function initLanes({ gd, data, player, apiBase, layers }) {
   const toggle = document.getElementById('lanesToggle');
   const panel = document.getElementById('lanesPanel');
@@ -248,6 +257,9 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
     savedMix: null,
     rows: [], // {model, row, vol, mute, solo} mirrors for repaint
     lanes: [], // mixer strips + canvas fields (peaks, idx, waveCv, noteCv)
+    taskId: null, // /api/task/{id} of the in-flight separation (3.10.3)
+    taskState: 'idle', // idle | running | downloading | done | error | cancelled
+    abortLoad: false, // restart asks the in-flight load to unwind
     view: {
       aMs: EPOCH_MS,
       bMs: EPOCH_MS + Math.round(data.durationSec * 1000),
@@ -756,26 +768,54 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
   /** POST starts the separation task, then poll /api/task/{id} until
    *  done — a cached method short-circuits to its stem list at once.
    *  Two-phase progress (3.8 D3): `downloading` reports model-download
-   *  bytes/speed, `running` reports inference progress. */
-  async function requestStems(method) {
+   *  bytes/speed, `running` reports inference progress. `force`
+   *  (3.10.3 restart) bypasses the stems cache server-side. The
+   *  cooperative cancel (3.10.3): `cancelled` task status unwinds the
+   *  poll with a cancelled error (no cache was written). */
+  async function requestStems(method, force = false) {
     const r = await fetch(
       `${apiBase}/api/stems?method=${method}&quality=${state.quality}` +
-        `&device=${state.device}`,
+        `&device=${state.device}${force ? '&force=1' : ''}`,
       {
         method: 'POST',
       });
     const body = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
-    if (body.cached || !body.task_id) return body;
+    if (body.cached || !body.task_id) {
+      // cache hit: no task was created — the strip goes straight to done
+      state.taskState = 'done';
+      paintStripButtons();
+      return body;
+    }
+    state.taskId = body.task_id;
+    state.taskState = 'running';
+    paintStripButtons();
     const taskUrl = `${apiBase}${body.status_url}`;
     for (;;) {
-      if (!state.enabled || state.method !== method) {
-        throw new Error('cancelled');
+      if (!state.enabled || state.method !== method || state.abortLoad) {
+        throw cancelledError();
       }
       const res = await fetch(taskUrl);
       const tb = await res.json();
-      if (tb.status === 'done') return tb;
-      if (tb.status === 'error') throw new Error(tb.error || 'task failed');
+      if (tb.status === 'done') {
+        state.taskState = 'done';
+        paintStripButtons();
+        return tb;
+      }
+      if (tb.status === 'cancelled') {
+        state.taskState = 'cancelled';
+        paintStripButtons();
+        throw cancelledError();
+      }
+      if (tb.status === 'error') {
+        state.taskState = 'error';
+        paintStripButtons();
+        throw new Error(tb.error || 'task failed');
+      }
+      state.taskState = tb.status === 'downloading'
+        ? 'downloading'
+        : 'running';
+      paintStripButtons();
       if (tb.status === 'downloading') {
         const mb = (n) => (n / 1e6).toFixed(1);
         setStatus(
@@ -1093,7 +1133,26 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
     });
     const status = document.createElement('span');
     status.className = 'lanes-status stems-status';
-    mix.scope.append(title, methodSel, qualitySel, deviceSel, status);
+    // Stop & Restart (3.10.3 D2): state machine — stop enabled only
+    // while a task is downloading/running (cancellation lands at the
+    // next chunk/pass boundary); restart enabled when idle/done/error/
+    // cancelled and re-submits with force=1 (cache bypassed).
+    const stopBtn = document.createElement('button');
+    stopBtn.type = 'button';
+    stopBtn.className = 'strip-btn';
+    stopBtn.textContent = '⏹';
+    stopBtn.setAttribute('aria-label', t('stopSep'));
+    stopBtn.title = t('stopTip');
+    stopBtn.addEventListener('click', () => stopSeparation());
+    const restartBtn = document.createElement('button');
+    restartBtn.type = 'button';
+    restartBtn.className = 'strip-btn';
+    restartBtn.textContent = '↻';
+    restartBtn.setAttribute('aria-label', t('restartSep'));
+    restartBtn.title = t('restartTip');
+    restartBtn.addEventListener('click', () => restartSeparation());
+    mix.scope.append(title, methodSel, qualitySel, deviceSel, stopBtn,
+      restartBtn, status);
     const badge = providerBadge();
     if (badge) {
       const el = document.createElement('span');
@@ -1101,8 +1160,11 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
         'provider-badge' + (badge.gpu ? ' provider-badge-gpu' : '');
       el.textContent = badge.text;
       el.title = badge.tip;
-      mix.scope.insertBefore(el, status);
+      mix.scope.insertBefore(el, stopBtn);
     }
+    state.stopBtn = stopBtn;
+    state.restartBtn = restartBtn;
+    paintStripButtons();
     // Mix lane: the player's own playback, ridden by the master gain.
     const { syncFader: mixSync } = wireMuteSolo({
       mixer,
@@ -1138,11 +1200,66 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
     state.lanes = [];
   }
 
-  async function load(method) {
+  /** Button state machine (3.10.3 D2): stop enabled ONLY while a task
+   *  is downloading/running; restart enabled when idle/done/error/
+   *  cancelled (it cancels any running task, then re-submits with
+   *  force=1). Both stay dead without the DL extra. */
+  function paintStripButtons() {
+    const active =
+      state.taskState === 'running' || state.taskState === 'downloading';
+    if (state.stopBtn) {
+      state.stopBtn.disabled = !active;
+    }
+    if (state.restartBtn) {
+      state.restartBtn.disabled =
+        state.loading || active || !state.caps || !state.caps.dl;
+    }
+  }
+
+  /** Stop: POST /api/task/{id}/cancel — the server flips the task's
+   *  cooperative cancel flag and the job aborts at the next chunk/pass
+   *  boundary (ort run() is uninterruptible; bounded by one ~7.8 s
+   *  model segment). The poll loop sees status "cancelled" and unwinds
+   *  the load; the UI returns to idle and no stem cache is written. */
+  async function stopSeparation() {
+    if (!state.taskId || state.abortLoad) return;
+    const id = state.taskId;
+    try {
+      await fetch(`${apiBase}/api/task/${id}/cancel`, {
+        method: 'POST',
+      });
+    } catch {
+      /* network hiccup: the poll still reports the outcome */
+    }
+    setStatus(t('lanesCancelling'), true);
+  }
+
+  /** Restart: cancel any running task, wait for the in-flight load to
+   *  unwind, then re-submit with force=1 — the server bypasses the
+   *  stems cache and recomputes from zero. */
+  async function restartSeparation() {
+    if (state.loading) {
+      state.abortLoad = true;
+      if (state.taskId) {
+        fetch(`${apiBase}/api/task/${state.taskId}/cancel`, {
+          method: 'POST',
+        }).catch(() => {});
+      }
+      while (state.loading) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      state.abortLoad = false;
+    }
+    load(state.method, true);
+  }
+
+  async function load(method, force = false) {
     if (state.loading) return;
     state.loading = true;
     state.method = method;
     state.ready = false;
+    state.taskId = null;
+    state.taskState = 'running';
     // spinner on the On button immediately (3.8 D2): a click is never
     // visually dead while the task starts up
     toggle
@@ -1153,7 +1270,7 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
     setStatus(t('lanesSeparating', { pct: 0 }), true);
     let lanes = [];
     try {
-      const list = await requestStems(method);
+      const list = await requestStems(method, force);
       // Strict DL stem contract: exactly the fixed registry keys, in
       // order, for every file length — a server that answers
       // chunk-count-dependent stems fails loudly instead of rendering
@@ -1240,8 +1357,16 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
         stopAll();
         state.lanes = [];
         state.loading = false; // same ordering rule: render enabled
-        renderShell();
-        setStatus(t('lanesFailed', { msg: e.message }));
+        if (e.cancelled) {
+          // user stop / restart unwind: back to IDLE, no failure text
+          state.taskState = state.abortLoad ? 'cancelled' : state.taskState;
+          renderShell();
+          setStatus('');
+        } else {
+          if (state.taskState !== 'error') state.taskState = 'error';
+          renderShell();
+          setStatus(t('lanesFailed', { msg: e.message }));
+        }
       }
     } finally {
       // a failed/partial load leaves no gain nodes wired anywhere
@@ -1265,6 +1390,9 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
     teardownLanes();
     state.ready = false;
     state.loading = false;
+    state.taskId = null;
+    state.taskState = 'idle';
+    state.abortLoad = false;
     toggle
       .querySelector('button[data-lanes="on"]')
       ?.classList.remove('loading');

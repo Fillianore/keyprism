@@ -227,7 +227,7 @@ __all__ = [
     "SEGMENT_SEC", "SEGMENT_SAMPLES",
     "QUALITY_SHIFTS", "DEFAULT_QUALITY",
     "CPU_PROVIDER", "ORT_AVAILABLE", "HF_AVAILABLE",
-    "DLMissingError",
+    "DLMissingError", "TaskCancelled",
     "plan_chunks", "chunk_windows", "hann_cola", "resample",
     "ola_separate", "shift_passes", "shifts_for_quality",
     "provider_chain", "ort_available_providers", "active_providers",
@@ -311,6 +311,17 @@ class DLMissingError(RuntimeError):
     pass
 
 
+#: Raised inside a background job when its cooperative cancel flag was
+#: observed (download loop: per byte-chunk; inference: per chunk /
+#: per shift pass). The server maps it to task status "cancelled" —
+#: partial .part downloads are removed and no stem cache is written.
+#: NOTE: ort ``session.run()`` itself is uninterruptible; cancellation
+#: takes effect at the NEXT chunk/pass boundary (at most one fixed
+#: model segment, ~7.8 s, later).
+class TaskCancelled(RuntimeError):
+    pass
+
+
 def model_dir() -> Path:
     """DL model directory under the (runtime) workspace."""
     return audio_io.KEYPRISM_HOME / "models" / "demucs"
@@ -324,7 +335,8 @@ def _hf_endpoint() -> str:
 
 
 def _download_to(url: str, dest: Path, progress=None,
-                 urlopen=None, meta: dict | None = None) -> Path:
+                 urlopen=None, meta: dict | None = None,
+                 cancelled=None) -> Path:
     """Stream ``url`` to ``dest`` via a ``<dest>.part`` temp file.
 
     Byte progress is reported as ``progress(bytes_done, bytes_total,
@@ -338,7 +350,9 @@ def _download_to(url: str, dest: Path, progress=None,
     the downloader dependency-free. When ``meta`` is given, the
     response's provenance headers (``ETag``, ``X-Repo-Commit`` — both
     set by the HF resolve endpoint) are recorded into it for the model
-    provenance metadata."""
+    provenance metadata. ``cancelled`` is the cooperative cancel probe
+    (3.10.3): checked per byte-chunk, raising :class:`TaskCancelled`
+    (the ``.part`` file is removed by the existing cleanup path)."""
     opener = urlopen or urllib.request.urlopen
     part = dest.with_name(dest.name + ".part")
     part.parent.mkdir(parents=True, exist_ok=True)
@@ -358,6 +372,9 @@ def _download_to(url: str, dest: Path, progress=None,
                               "X-Repo-Commit": "commit"}[h]] = v
             done = 0
             while True:
+                if cancelled is not None and cancelled():
+                    raise TaskCancelled(
+                        "模型下载已取消: " + url)
                 chunk = resp.read(1 << 20)
                 if not chunk:
                     break
@@ -501,13 +518,17 @@ def resample(x: np.ndarray, sr_in: int, sr_out: int) -> np.ndarray:
 
 def ola_separate(pcm: np.ndarray, infer, *, chunk_sec: float = 10.0,
                  overlap_sec: float = 1.0, sr: int = TARGET_SR,
-                 progress=None) -> dict:
+                 progress=None, cancelled=None) -> dict:
     """Chunked inference + Hann overlap-add blending (pure numpy).
 
     ``pcm`` is mono float32 at ``sr``; ``infer(x: (T,) float32)`` must
     return either ``(n_stems, T)`` or ``(n_stems, 1, T)``-like model
     output for the SAME samples it received (this is the injection seam
     the tests use instead of a real ONNX session).
+
+    ``cancelled`` (3.10.3) is the cooperative cancel probe: checked
+    before each chunk, raising :class:`TaskCancelled`. ort ``run()`` is
+    uninterruptible, so this bounds the abort latency at one chunk.
 
     Blending math (the anti-click core):
       - each chunk output y_k is weighted by ``w = hann_cola(chunk)``
@@ -533,6 +554,9 @@ def ola_separate(pcm: np.ndarray, infer, *, chunk_sec: float = 10.0,
     wsum = np.zeros(x.shape[0], dtype=np.float32)
     total = len(chunks)
     for done, (a, b) in enumerate(chunks, start=1):
+        if cancelled is not None and cancelled():
+            raise TaskCancelled(
+                f"分离已取消 (chunk {done}/{total})")
         y = np.asarray(infer(x[a:b]), dtype=np.float32)
         if y.ndim == 3:  # (S, C, T) -> mono downmix
             y = y.mean(axis=1, dtype=np.float32)
@@ -637,7 +661,8 @@ class DemucsSeparator:
     def __init__(self, variant: str = "demucs_4", infer=None,
                  threads: int | None = None,
                  download_progress=None,
-                 device_providers: list | None = None):
+                 device_providers: list | None = None,
+                 cancelled=None):
         if variant not in STEM_SPECS:
             raise ValueError(
                 f"未知 DL 分离方法: {variant} (可用: {', '.join(DL_METHODS)})")
@@ -656,6 +681,9 @@ class DemucsSeparator:
         # providers_for_device (None = auto / probe chain)
         self._device_providers = \
             list(device_providers) if device_providers else None
+        # Cooperative cancel probe (3.10.3): checked per byte-chunk of a
+        # model download and handed to separate() for the inference loops
+        self._cancelled = cancelled
         self._path = None
         self._threads = threads
         if infer is None:
@@ -663,7 +691,8 @@ class DemucsSeparator:
                 raise DLMissingError(
                     "onnxruntime 未安装: 请安装 DL 依赖 (uv sync --extra dl)")
             path = self._resolve_model_file(
-                download_progress=download_progress)
+                download_progress=download_progress,
+                cancelled=cancelled)
             self._path = path
             self._session = _load_session(path, threads,
                                           providers=self._device_providers)
@@ -701,7 +730,8 @@ class DemucsSeparator:
         except OSError:
             pass
 
-    def _resolve_model_file(self, download_progress=None) -> Path:
+    def _resolve_model_file(self, download_progress=None,
+                            cancelled=None) -> Path:
         d = model_dir()
         spec = _VARIANTS[self.variant]
         explicit = self._env("FILE")
@@ -734,8 +764,11 @@ class DemucsSeparator:
             meta: dict = {}
             try:
                 dest = _download_to(url, d / spec["file"],
-                                    progress=download_progress, meta=meta)
+                                    progress=download_progress, meta=meta,
+                                    cancelled=cancelled)
             except Exception as e:  # noqa: BLE001 - network/404/... degrade
+                if isinstance(e, TaskCancelled):
+                    raise
                 last_err = e
             else:
                 self._record(dest, source="auto-download", spec=spec,
@@ -840,7 +873,7 @@ class DemucsSeparator:
 
     def separate(self, pcm: np.ndarray, sr: int, chunk_sec: float | None = None,
                  overlap_sec: float | None = None, *, shifts: int | None = None,
-                 progress=None) -> dict:
+                 progress=None, cancelled=None) -> dict:
         """Mono PCM in, ``{stem: ndarray}`` out at :data:`TARGET_SR`.
 
         Resamples to 44.1 kHz (model rate) when needed, then streams
@@ -859,7 +892,11 @@ class DemucsSeparator:
         default), 1 (balanced) or 2 (best); see :func:`shift_passes`.
         The wrapping is external to the per-chunk infer — chunking/OLA
         math is untouched — and the progress denominator scales with the
-        pass count (per-pass updates)."""
+        pass count (per-pass updates).
+
+        ``cancelled`` (3.10.3): cooperative cancel probe, checked per
+        shift pass and per chunk (see :func:`ola_separate` — ort
+        ``run()`` itself is uninterruptible)."""
         x = np.asarray(pcm, dtype=np.float32).reshape(-1)
         if x.shape[0] == 0:
             return {k: np.zeros(0) for k in self.stems}
@@ -891,6 +928,9 @@ class DemucsSeparator:
             def infer(cx: np.ndarray) -> np.ndarray:
                 def on_pass(_p: int, _t: int) -> None:
                     counter["done"] += 1
+                    if cancelled is not None and cancelled():
+                        raise TaskCancelled(
+                            f"分离已取消 (pass {_p}/{_t})")
                     if progress is not None:
                         progress(counter["done"], total_units)
 
@@ -898,11 +938,11 @@ class DemucsSeparator:
 
             out = ola_separate(
                 x, infer, chunk_sec=chunk_sec, overlap_sec=overlap_sec,
-                sr=TARGET_SR)
+                sr=TARGET_SR, cancelled=cancelled)
         else:
             out = ola_separate(
                 x, base, chunk_sec=chunk_sec, overlap_sec=overlap_sec,
-                sr=TARGET_SR, progress=progress)
+                sr=TARGET_SR, progress=progress, cancelled=cancelled)
         missing = [i for i in range(len(self.stems))
                    if f"stem{i}" not in out]
         if missing:
@@ -1025,7 +1065,8 @@ def _session_io(sess):
 def get_separator(variant: str = "demucs_4", *, infer=None,
                   threads: int | None = None,
                   download_progress=None,
-                  device_providers: list | None = None) -> DemucsSeparator:
+                  device_providers: list | None = None,
+                  cancelled=None) -> DemucsSeparator:
     """Separator factory (session singleton lives inside the class).
 
     ``download_progress(bytes_done, bytes_total, speed_mbps)`` is only
@@ -1033,10 +1074,13 @@ def get_separator(variant: str = "demucs_4", *, infer=None,
     still need downloading — the server forwards it into the task
     registry's ``downloading`` phase (3.8 D3). ``device_providers`` is
     the Device-selector routing (3.10.2): a forced provider list from
-    :func:`providers_for_device` (None = auto / probe chain)."""
+    :func:`providers_for_device` (None = auto / probe chain).
+    ``cancelled`` is the cooperative cancel probe (3.10.3) used by the
+    model download and handed to :meth:`DemucsSeparator.separate`."""
     return DemucsSeparator(variant, infer=infer, threads=threads,
                            download_progress=download_progress,
-                           device_providers=device_providers)
+                           device_providers=device_providers,
+                           cancelled=cancelled)
 
 
 # ----------------------------------------------------------- stem cache

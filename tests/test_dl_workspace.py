@@ -364,7 +364,8 @@ def test_demucs6_download_records_provenance(tmp_path, monkeypatch):
     monkeypatch.delenv("KEYPRISM_DEMUCS6_REPO", raising=False)
     seen = {}
 
-    def fake_download_to(url, dest, progress=None, urlopen=None, meta=None):
+    def fake_download_to(url, dest, progress=None, urlopen=None, meta=None,
+                         cancelled=None):
         seen["url"] = url
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(b"FAKEONNX")
@@ -419,7 +420,8 @@ def test_glob_fallback_cannot_hijack_variant_download(
     d.mkdir(parents=True)
     (d / "htdemucs.onnx").write_bytes(b"OLD4STEM")
 
-    def fake_download_to(url, dest, progress=None, urlopen=None, meta=None):
+    def fake_download_to(url, dest, progress=None, urlopen=None, meta=None,
+                         cancelled=None):
         seen["url"] = url
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(b"NEW6STEM")
@@ -504,6 +506,188 @@ def test_control_strip_inline_contract():
     assert "gap: 8px" in strip and "align-items: center" in strip
     assert ".mix-controls .stems-method" in css
     assert "lane-scope-empty" not in css
+
+
+# --------------------------------------- cooperative cancel (3.10.3)
+
+def test_download_to_cancelled_removes_part(tmp_path):
+    """The download loop honours the cooperative cancel probe per byte
+    chunk: TaskCancelled is raised, the .part file is removed and no
+    destination ever appears (retry cannot serve a truncated ONNX)."""
+    dest = tmp_path / "models" / "demucs" / "htdemucs.onnx"
+    cell = {"n": 0}
+
+    def cancelled():  # flips after the first streamed chunk
+        cell["n"] += 1
+        return cell["n"] > 1
+
+    with pytest.raises(dlsep.TaskCancelled):
+        dlsep._download_to(
+            "https://example.test/x.onnx", dest,
+            urlopen=lambda req, timeout: _FakeResp([b"A" * 50] * 4, 200),
+            cancelled=cancelled)
+    assert not dest.exists()
+    assert not dest.with_name(dest.name + ".part").exists()
+
+
+def test_ola_cancelled_per_chunk_boundary():
+    """Cancel granularity in the inference loop: the probe is checked
+    BEFORE each chunk, so an already-started chunk runs to completion
+    and the abort lands at the next chunk boundary."""
+    sr = 8000
+    x = np.zeros(35 * sr, dtype=np.float32)  # 4 chunks @ 10s/1s
+    calls = {"n": 0}
+
+    def infer(chunk):
+        calls["n"] += 1
+        return np.stack([chunk, chunk])[0:2] * 1.0
+
+    state = {"cancel_after": 2}
+
+    def cancelled():
+        return calls["n"] >= state["cancel_after"]
+
+    with pytest.raises(dlsep.TaskCancelled):
+        dlsep.ola_separate(x, infer, chunk_sec=10.0, overlap_sec=1.0,
+                           sr=sr, cancelled=cancelled)
+    assert calls["n"] == 2  # chunk 3 never started
+
+
+def test_separate_cancelled_per_pass_boundary():
+    """With shifts, the cancel probe is additionally checked per pass:
+    the abort lands at the next pass boundary inside the current chunk
+    (before its second pass runs)."""
+    sr = dlsep.TARGET_SR
+    x = np.zeros(int(2.0 * sr), dtype=np.float32)  # 1 chunk
+    calls = {"pass": 0}
+
+    def infer(chunk):
+        calls["pass"] += 1
+        return np.stack([chunk] * 4)
+
+    sep = dlsep.DemucsSeparator("demucs_4", infer=infer)
+    with pytest.raises(dlsep.TaskCancelled):
+        sep.separate(x, sr, chunk_sec=1.0, overlap_sec=0.1, shifts=1,
+                     cancelled=lambda: calls["pass"] >= 1)
+    assert calls["pass"] == 1  # pass 0 done, pass 1 never started
+
+
+class _CancellingSeparator:
+    """Fake separator that honours the cooperative cancel probe, for
+    the end-to-end stop flow through the task registry."""
+
+    def __init__(self, variant, download_progress=None,
+                 device_providers=None, cancelled=None):
+        self.variant = variant
+        self.stems = dlsep.STEM_SPECS[variant]
+        self._cancelled = cancelled
+
+    def separate(self, pcm, sr, chunk_sec=10.0, overlap_sec=1.0,
+                 shifts=0, progress=None, cancelled=None):
+        check = cancelled or self._cancelled
+        for i in range(100):
+            if check and check():
+                raise dlsep.TaskCancelled(f"cancelled at step {i}")
+            time.sleep(0.02)
+            if progress is not None:
+                progress(i + 1, 100)
+        return {k: np.zeros(10) for k in self.stems}
+
+
+def test_task_cancel_endpoint_and_no_cache(srv, monkeypatch):
+    """POST /api/task/{id}/cancel flips the flag; the job aborts at the
+    next boundary, the task reports status "cancelled", nothing is
+    written to the stem cache, and a second (already-finished) cancel is
+    a harmless no-op. Unknown ids 404."""
+    monkeypatch.setattr(server_mod, "DL_AVAILABLE", True)
+    monkeypatch.setattr(server_mod, "POLY_AVAILABLE", True)
+    monkeypatch.setattr(dlsep, "get_separator", _CancellingSeparator)
+
+    code, body = post(f"{srv['base']}/api/stems?method=demucs_4")
+    assert code == 200 and body["status"] == "started"
+    task_id = body["task_id"]
+    wait_running = 5.0
+    deadline = time.time() + wait_running
+    while time.time() < deadline:  # wait until the job is in its loop
+        _, tb = get(f"{srv['base']}/api/task/{task_id}")
+        if tb["progress"] > 0:
+            break
+        time.sleep(0.02)
+
+    code, body = post(f"{srv['base']}/api/task/{task_id}/cancel")
+    assert code == 200 and body["cancelling"] is True
+
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        _, tb = get(f"{srv['base']}/api/task/{task_id}")
+        if tb["status"] == "cancelled":
+            break
+        time.sleep(0.02)
+    assert tb["status"] == "cancelled"
+    assert "error" not in tb or not tb.get("error")
+    # no stem cache was written
+    assert not list((audio_io.KEYPRISM_HOME / "cache").rglob("dl_v1"))
+
+    # cancelling again is a no-op answered with the final status
+    code, body = post(f"{srv['base']}/api/task/{task_id}/cancel")
+    assert code == 200 and body["status"] == "cancelled"
+
+    # unknown task id: 404
+    code, body = post(f"{srv['base']}/api/task/deadbeef/cancel")
+    assert code == 404
+
+
+def test_force_recompute_bypasses_cache(srv, monkeypatch):
+    """POST /api/stems&force=1 recomputes even when a valid cache
+    exists (the restart button's contract); write_stems atomically
+    replaces the entry and the task completes with the fresh stems."""
+    monkeypatch.setattr(server_mod, "DL_AVAILABLE", True)
+    monkeypatch.setattr(server_mod, "POLY_AVAILABLE", True)
+    monkeypatch.setattr(dlsep, "get_separator", FakeSeparator)
+    FakeSeparator.shifts_seen.clear()
+    FakeSeparator.devices_seen.clear()
+
+    code, body = post(f"{srv['base']}/api/stems?method=demucs_4")
+    assert code == 200
+    wait_task(srv["base"], body["task_id"])
+
+    # without force: cache hit, no new task
+    code, body = post(f"{srv['base']}/api/stems?method=demucs_4")
+    assert code == 200 and body.get("cached") is True
+
+    # with force=1: recompute (new task), cache atomically replaced
+    code, body = post(f"{srv['base']}/api/stems?method=demucs_4&force=1")
+    assert code == 200 and body.get("cached") is None
+    assert body["status"] == "started"
+    done = wait_task(srv["base"], body["task_id"])
+    assert done["status"] == "done"
+    code, got = get(f"{srv['base']}/api/stems?method=demucs_4")
+    assert code == 200 and got["cached"] is True
+
+    # force=0 / force=false do NOT bypass
+    code, body = post(f"{srv['base']}/api/stems?method=demucs_4&force=0")
+    assert code == 200 and body.get("cached") is True
+
+
+def test_stop_restart_frontend_contract():
+    """3.10.3 D2 frontend contract: stop/restart buttons live in the
+    control strip with the full state machine (stop enabled only while
+    a task runs; restart cancels then re-submits with force=1); the
+    poll unwinds cancelled tasks to idle; i18n in both dicts."""
+    lanes = strip_js_comments(
+        (FRONTEND / "lanes.js").read_text(encoding="utf-8"))
+    assert "stopSeparation" in lanes and "restartSeparation" in lanes
+    assert "/api/task/${state.taskId}/cancel" in lanes
+    assert "paintStripButtons" in lanes
+    assert "'&force=1'" in lanes
+    assert "state.abortLoad" in lanes
+    assert "'cancelled'" in lanes  # poll handles the server status
+    assert "e.cancelled" in lanes  # idle unwind, no failure text
+    i18n = strip_js_comments(
+        (FRONTEND / "i18n.js").read_text(encoding="utf-8"))
+    for key in ("stopSep", "stopTip", "restartSep", "restartTip",
+                "lanesCancelling"):
+        assert i18n.count(f"{key}:") >= 2
 
 
 def test_unified_method_selector_contract():
@@ -609,12 +793,12 @@ def test_task_reports_downloading_phase(srv, monkeypatch):
 
     class DownloadingSeparator:
         def __init__(self, variant, download_progress=None,
-                     device_providers=None):
+                     device_providers=None, cancelled=None):
             self.stems = dlsep.STEM_SPECS[variant]
             self._dl = download_progress
 
         def separate(self, pcm, sr, chunk_sec=10.0, overlap_sec=1.0,
-                     shifts=0, progress=None):
+                     shifts=0, progress=None, cancelled=None):
             if self._dl is not None:
                 self._dl(1_000_000, 4_000_000, 2.5)
                 release.wait(timeout=5.0)
@@ -1240,10 +1424,9 @@ def test_quality_tier_frontend_contract():
     lanes = strip_js_comments(
         (FRONTEND / "lanes.js").read_text(encoding="utf-8"))
     assert "'fast', 'balanced', 'best'" in lanes
-    assert (
-      "`${apiBase}/api/stems?method=${method}&quality=${state.quality}` +\n"
-      "        `&device=${state.device}`"
-    ) in lanes
+    assert "`${apiBase}/api/stems?method=${method}&quality=${state.quality}`" \
+        in lanes
+    assert "&device=${state.device}" in lanes
     assert "qualityTip" in lanes
     assert "QUALITY_PASSES" in lanes
     assert "passes: QUALITY_PASSES[state.quality] || 1" in lanes
@@ -1338,14 +1521,14 @@ class FakeSeparator:
     devices_seen: list = []
 
     def __init__(self, variant, download_progress=None,
-                 device_providers=None):
+                 device_providers=None, cancelled=None):
         self.variant = variant
         self.stems = dlsep.STEM_SPECS[variant]
         FakeSeparator.devices_seen.append(
             list(device_providers) if device_providers else None)
 
     def separate(self, pcm, sr, chunk_sec=10.0, overlap_sec=1.0,
-                 shifts=0, progress=None):
+                 shifts=0, progress=None, cancelled=None):
         FakeSeparator.shifts_seen.append(shifts)
         n = int(len(pcm) * dlsep.TARGET_SR / sr)
         out = {}

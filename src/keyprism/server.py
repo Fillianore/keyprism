@@ -136,14 +136,18 @@ def make_server(path: Path, port: int, host: str, start: float,
     def start_task(fn) -> dict:
         """Register a background task and run ``fn(task)`` on the
         single-worker executor (one heavy DL job at a time). The task
-        dict carries status/progress/result; finished tasks are pruned
-        to the newest 32 so the registry cannot grow unbounded."""
+        dict carries status/progress/result plus a cooperative
+        ``cancel_flag`` (3.10.3): POST /api/task/{id}/cancel flips it
+        and the job aborts at the next chunk/pass/download boundary by
+        raising ``dlsep.TaskCancelled`` → status "cancelled" (no stem
+        cache written). Finished tasks are pruned to the newest 32 so
+        the registry cannot grow unbounded."""
         task_id = uuid.uuid4().hex
         task = {"id": task_id, "status": "running", "progress": 0.0,
-                "result": None, "error": None}
+                "result": None, "error": None, "cancel_flag": False}
         with state["tasks_lock"]:
             for k in [k for k, v in state["tasks"].items()
-                      if v["status"] in ("done", "error")][:-32]:
+                      if v["status"] in ("done", "error", "cancelled")][:-32]:
                 state["tasks"].pop(k, None)
             state["tasks"][task_id] = task
 
@@ -151,6 +155,10 @@ def make_server(path: Path, port: int, host: str, start: float,
             try:
                 task["result"] = fn(task)
                 task["status"] = "done"
+            except dlsep.TaskCancelled as e:  # cooperative stop (3.10.3)
+                task["status"] = "cancelled"
+                task["error"] = None
+                print(f"[任务] {task_id[:8]} 已取消: {e}")
             except Exception as e:  # noqa: BLE001 - surfaced verbatim
                 task["status"] = "error"
                 task["error"] = str(e)
@@ -347,6 +355,25 @@ def make_server(path: Path, port: int, host: str, start: float,
                     body["error"] = task["error"]
             self._json(200, body)
 
+        def _cancel_task(self, u):
+            """POST /api/task/{id}/cancel (3.10.3): flip the task's
+            cooperative cancel flag; the job aborts at the next
+            chunk/pass/download boundary and reports status
+            "cancelled" (ort ``run()`` is uninterruptible, so the stop
+            is bounded by one model segment, ~7.8 s). Cancelling an
+            already-finished task is a harmless no-op answered with its
+            final status."""
+            task_id = u.path[len("/api/task/"):-len("/cancel")]
+            with state["tasks_lock"]:
+                task = state["tasks"].get(task_id)
+                if task is None:
+                    self._json(404, {"error": "未知任务"})
+                    return
+                task["cancel_flag"] = True
+                status = task["status"]
+            self._json(200, {"id": task_id, "status": status,
+                             "cancelling": True})
+
         def _stem_urls(self, method: str, keys) -> list:
             """Canonical /api/stems entry list: exactly one URL per
             registered stem key, in registry order."""
@@ -520,8 +547,12 @@ def make_server(path: Path, port: int, host: str, start: float,
             except ValueError as e:
                 self._json(400, {"error": str(e)})
                 return
+            # 3.10.3 Restart: force=1 bypasses the stems cache and
+            # recomputes (write_stems atomically overwrites the entry)
+            force = (q.get("force", ["0"])[0] or "").strip() in \
+                ("1", "true")
             entry = self._notes_entry(cur)
-            cached = dlsep.load_status(entry, method)
+            cached = None if force else dlsep.load_status(entry, method)
             if cached is not None and \
                     cached.get("quality", dlsep.DEFAULT_QUALITY) == quality:
                 self._json(200, {
@@ -553,14 +584,21 @@ def make_server(path: Path, port: int, host: str, start: float,
                     task["progress"] = done / float(total)
 
                 started = time.time()
+                # cooperative cancel probe (3.10.3): the download loop
+                # checks it per byte-chunk, inference per chunk/pass
+                def cancelled():
+                    return bool(task.get("cancel_flag"))
+
                 sep = dlsep.get_separator(
                     method, download_progress=download_progress,
-                    device_providers=device_providers)
+                    device_providers=device_providers,
+                    cancelled=cancelled)
                 task["status"] = "running"
                 # 3.10 quality tier -> demucs shifts (per-pass progress;
                 # the denominator already includes every pass)
                 out = sep.separate(mono, cur["sr"], shifts=shifts,
-                                   progress=progress)
+                                   progress=progress,
+                                   cancelled=cancelled)
                 status = dlsep.write_stems(
                     entry, method, out, dlsep.TARGET_SR, cur["dur"],
                     time.time() - started, quality=quality)
@@ -674,6 +712,10 @@ def make_server(path: Path, port: int, host: str, start: float,
             u = urllib.parse.urlparse(self.path)
             if u.path == "/api/stems":
                 self._start_dl_stems(u)
+                return
+            if u.path.startswith("/api/task/") and \
+                    u.path.endswith("/cancel"):
+                self._cancel_task(u)
                 return
             if u.path != "/api/upload":
                 self.send_error(404)

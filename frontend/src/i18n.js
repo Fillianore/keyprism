@@ -56,6 +56,7 @@ export const dict = {
     methodClassic: 'Classic',
     methodAI: 'AI (Demucs)',
     lanesSeparating: 'DL separating… {pct}% ({passes} passes)',
+    lanesCancelling: 'Cancelling… (lands at the next chunk boundary)',
     lanesDownloading:
       'Downloading model {done} / {total} MB ({speed} MB/s)',
     lanesFailed: 'Lanes failed: {msg}',
@@ -74,6 +75,11 @@ export const dict = {
     deviceTip:
       'Compute device: Auto probes CUDA/DirectML/CoreML with CPU fallback; GPU forces the GPU; CPU avoids it',
     deviceNoGpu: 'No GPU execution provider available in this onnxruntime build',
+    stopSep: 'Stop',
+    stopTip:
+      'Cancel the running separation — takes effect at the next chunk boundary',
+    restartSep: 'Restart',
+    restartTip: 'Cancel any running task, discard the cache and recompute',
     laneMix: 'Mix',
     laneVocals: 'Vocals',
     laneDrums: 'Drums',
@@ -201,6 +207,7 @@ export const dict = {
     methodClassic: '传统',
     methodAI: 'AI 分离 (Demucs)',
     lanesSeparating: 'DL 分离中… {pct}% ({passes} 遍)',
+    lanesCancelling: '正在取消… (下一个分块边界生效)',
     lanesDownloading: '下载模型 {done} / {total} MB ({speed} MB/s)',
     lanesFailed: '多轨失败: {msg}',
     dlNeedsExtra: '需要 uv sync --extra dl (onnxruntime)',
@@ -216,6 +223,10 @@ export const dict = {
     deviceCpu: '设备: CPU',
     deviceTip: '计算设备: 自动探测 CUDA/DirectML/CoreML 并以 CPU 兜底; GPU 强制走 GPU; CPU 不使用 GPU',
     deviceNoGpu: '当前 onnxruntime 构建中没有可用的 GPU 执行提供者',
+    stopSep: '停止',
+    stopTip: '取消正在进行的分离 — 在下一个分块边界生效',
+    restartSep: '重新计算',
+    restartTip: '取消当前任务, 忽略缓存并重新计算',
     laneMix: '混音',
     laneVocals: '人声',
     laneDrums: '鼓',
