@@ -4,6 +4,7 @@ import {
   buildFigure,
   applyPitchRange,
   applyGrid,
+  applyPlotShapes,
   setSub,
   applyHoverLang,
   EPOCH_MS,
@@ -475,6 +476,10 @@ async function main() {
   let resizeT = 0;
   new ResizeObserver(() => {
     sync();
+    // Phase 3.9: the keyboard strip is pinned to fixed pixel geometry, but
+    // plotly shapes are fractional — after a paper-width change one cheap
+    // shapes-only relayout re-pins it (see applyPlotShapes)
+    applyPlotShapes(gd);
     // Row pooling budget follows the plot height: rebuild the rows when it
     // changed enough to move the pooling factor (debounced)
     clearTimeout(resizeT);

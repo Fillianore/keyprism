@@ -60,6 +60,19 @@
  *  - note drawing uses a SPATIAL INDEX (starts sorted ascending +
  *    binary search bounded by the longest note) so a zoom only touches
  *    the visible window's notes, never the whole track.
+ *
+ *  Phase 3.9 lane visualization engine:
+ *  - SHARED PLOT GEOMETRY (geometry.js): the master spectrogram's plot
+ *    area and every lane canvas span the identical pixel boundaries
+ *    [PLOT_LEFT_PX, W - PLOT_RIGHT_PX] — the lane grid columns are
+ *    derived from the same CSS custom properties the master margins are
+ *    written from, so a drum hit lands on the same vertical line in
+ *    both. Lanes redraw from the master's plotly_relayout with the same
+ *    time→pixel mapping (xOf below);
+ *  - lane PLAYHEADS are thin DOM hairlines (same technique as the
+ *    master cursor), moved by the master cursor's own repaint path via
+ *    player.onFrame — ONE time source (ctx.currentTime), zero drift,
+ *    and playback never repaints a single canvas pixel.
  */
 
 import { t, onChange } from './i18n.js';
@@ -191,6 +204,31 @@ export function initLanes({ gd, data, player, apiBase }) {
     return ((EPOCH_MS + tSec * 1000 - aMs) / (bMs - aMs)) * w;
   }
 
+  /** Lane playheads (Phase 3.9): one thin DOM hairline per lane, moved by
+   *  the master cursor's own repaint path (player.onFrame -> reposition
+   *  runs in the playback rAF loop AND on every seek/relayout/resize).
+   *  Same clock (player.currentTime -> ctx.currentTime), same view range
+   *  and same time→pixel mapping as the waveform canvases — the playhead
+   *  is in lockstep with the master cursor by construction, and playback
+   *  never repaints a canvas. */
+  function updatePlayheads() {
+    if (!state.enabled || !state.ready) return;
+    const t = player.currentTime();
+    for (const lane of state.lanes) {
+      const ph = lane.phEl;
+      if (!ph || !ph.parentElement) continue;
+      const w = ph.parentElement.clientWidth;
+      if (!w) continue;
+      const x = xOf(t, state.view.aMs, state.view.bMs, w);
+      if (x < -1 || x > w + 1) {
+        ph.style.display = 'none';
+      } else {
+        ph.style.display = 'block';
+        ph.style.transform = `translateX(${x.toFixed(1)}px)`;
+      }
+    }
+  }
+
   /** Canvas backing store sized for the device pixels; the 2D context
    *  transform (ctx.setTransform = scale+translate) is the whole
    *  zoom/pan sync — data coords are mapped per draw from the applied
@@ -228,6 +266,9 @@ export function initLanes({ gd, data, player, apiBase }) {
     state.view.aMs = pMs(r[0]);
     state.view.bMs = pMs(r[1]);
     scheduleDraw();
+    // the view moved under the playhead: re-pin it against the fresh
+    // range immediately (player's own relayout handler may not have run yet)
+    updatePlayheads();
   }
 
   let drawRaf = 0;
@@ -596,7 +637,12 @@ export function initLanes({ gd, data, player, apiBase }) {
     const noteCv = document.createElement('canvas');
     noteCv.className = 'lane-notes';
     noteCv.setAttribute('aria-hidden', 'true');
-    scope.append(wave, noteCv);
+    // Phase 3.9: per-lane playhead hairline (DOM, above the canvases)
+    const phEl = document.createElement('div');
+    phEl.className = 'lane-playhead';
+    phEl.setAttribute('aria-hidden', 'true');
+    scope.append(wave, noteCv, phEl);
+    lane.phEl = phEl;
     // Notes (扒谱): uniform on every poly-eligible lane (D4); a compact
     // chip overlaid on the lane's own scope — the controls cell stays
     // one tidy [fader M S] line at the fixed grid widths
@@ -734,6 +780,7 @@ export function initLanes({ gd, data, player, apiBase }) {
           waveCv: null,
           noteCv: null,
           notesBtn: null,
+          phEl: null,
           decodeFailed: false,
         });
         lanes.push(lane);
@@ -765,6 +812,7 @@ export function initLanes({ gd, data, player, apiBase }) {
       renderShell();
       mixer.apply();
       drawAll(); // waveforms visible immediately, before Play (D2)
+      updatePlayheads(); // pin the lane playheads to the current position
       if (player.isPlaying()) {
         // jump in synced at the current position (short 60 ms handover)
         startAll(player.currentTime(), ctx.currentTime + START_LEAD);
@@ -869,6 +917,8 @@ export function initLanes({ gd, data, player, apiBase }) {
 
   // ---- keep the lanes glued to the main spectrogram's time axis ----
   gd.on('plotly_relayout', syncFromPlot);
+  // lane playheads ride the master cursor's frame loop (single time source)
+  player.onFrame(updatePlayheads);
   new ResizeObserver(throttled(() => scheduleDraw())).observe(panel);
 
   // Live language switch: rebuild the panel (state is kept in models)

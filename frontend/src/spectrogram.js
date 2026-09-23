@@ -1,11 +1,17 @@
 import Plotly from 'plotly.js-dist-min';
 import { t } from './i18n.js';
+import { PLOT_LEFT_PX, PLOT_RIGHT_PX } from './geometry.js';
 
 export const EPOCH_MS = Date.UTC(2020, 0, 1);
 export const N_ROWS = 88;
 
-// Keyboard strip geometry constants (paper / y-axis domain fractions)
-const KEY_STRIP = [0.004, 0.048];
+// Keyboard strip: the virtual piano sits INSIDE the fixed left plot
+// margin [PLOT_LEFT_PX]. Its paper fractions are derived from the pixel
+// geometry at draw time (see keyStripFrac) so the keys end right before
+// the y-axis tick-label zone at every window width; rebuilding on resize
+// is done by applyPlotShapes (main.js resize observer).
+const KEY_LEFT_PX = 16; // keyboard strip left edge (px)
+const KEY_GAP_PX = 44; // keyboard -> plot area gap (y tick labels live here)
 const KEY_BLACK_W = 0.62; // black key length (horizontal), like a real piano
 const KEY_BLACK_H = 1.0; // black key width (vertical): full row, same as white keys
 const KEY_WHITE_FILL = '#F4EFE2';
@@ -14,6 +20,19 @@ const KEY_LINE_LIGHT = '#CFC8B4';
 const KEY_LINE_STRONG = '#928A72';
 const KEY_PC0 = 9; // row 0 is A0 (MIDI 21): pitch class of row m = (m + 9) % 12
 const pcOf = (m) => (m + KEY_PC0) % 12;
+
+/** Current paper width in px (set by buildFigure / applyPlotShapes);
+ *  keyboard paper fractions are computed against it. */
+let paperW = 0;
+
+/** Keyboard strip [left, right] as paper fractions for the current
+ *  paper width: pinned to the pixel geometry [KEY_LEFT_PX,
+ *  PLOT_LEFT_PX - KEY_GAP_PX]. */
+function keyStripFrac() {
+  const w = paperW > 0 ? paperW : 1280;
+  const l = KEY_LEFT_PX / w;
+  return [l, Math.max(l + 0.02, (PLOT_LEFT_PX - KEY_GAP_PX) / w)];
+}
 
 export function iso(ms) {
   return new Date(ms).toISOString();
@@ -52,7 +71,7 @@ export function fmtRel(ms) {
  *  the slivers above/below).
  *  lo/hi are the visible semitone row range; fractions are relative to it */
 function keyboardShapes(lo = 0, hi = N_ROWS - 1) {
-  const [l, r] = KEY_STRIP;
+  const [l, r] = keyStripFrac();
   const bw = (r - l) * KEY_BLACK_W;
   const n = hi - lo + 1;
   const shapes = [
@@ -215,6 +234,18 @@ function currentShapes() {
   ];
 }
 
+/** Re-pin the pixel-anchored shapes (keyboard strip) after a paper-width
+ *  change: plotly shapes are fractional, so a window resize rescales them;
+ *  one cheap shapes-only relayout keeps the keyboard glued to the fixed
+ *  [KEY_LEFT_PX, PLOT_LEFT_PX - KEY_GAP_PX] pixel geometry. No-op when the
+ *  width did not change. */
+export function applyPlotShapes(gd) {
+  const w = gd.clientWidth;
+  if (!w || w === paperW) return;
+  paperW = w;
+  Plotly.relayout(gd, { shapes: currentShapes() });
+}
+
 /** Apply the measure grid (BPM / offset in ms / beats per measure) */
 export function applyGrid(gd, opts) {
   gridState = opts;
@@ -266,16 +297,27 @@ export function buildFigure(el, data, spec) {
   ];
 
   const tickStyle = { color: '#9a9282', size: 10 };
+  paperW = el.clientWidth || 0;
   const layout = {
     dragmode: 'pan', // drag = pan, no box-select zoom
     font: { family: 'Microsoft YaHei, sans-serif', color: '#d3ccbd' },
     paper_bgcolor: 'rgba(0,0,0,0)',
     plot_bgcolor: 'rgba(0,0,0,0)',
-    margin: { l: 20, r: 20, t: 16, b: 40 },
+    // Phase 3.9 shared geometry: fixed pixel margins + full-domain axis so
+    // the plot area is EXACTLY [PLOT_LEFT_PX, W - PLOT_RIGHT_PX] — the
+    // identical boundaries every lane canvas maps time onto (geometry.js).
+    // autoexpand off: nothing may grow the margins and break the pinning.
+    margin: {
+      l: PLOT_LEFT_PX,
+      r: PLOT_RIGHT_PX,
+      t: 16,
+      b: 40,
+      autoexpand: false,
+    },
     shapes: currentShapes(),
     xaxis: {
       type: 'date',
-      domain: [0.062, 1.0],
+      domain: [0.0, 1.0],
       range: [spec.xs[0], iso(EPOCH_MS + initViewMs)],
       tickformat: '%M:%S',
       dtick: pickDtickMs(initViewMs),

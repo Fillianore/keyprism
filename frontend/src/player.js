@@ -307,6 +307,22 @@ export function createPlayer(container, gd, opts) {
   }
 
   // ---- Controls ----
+  // Per-frame subscribers (Phase 3.9 lane playheads): fired from the SAME
+  // repaint path as the master cursor (reposition runs in the playback
+  // rAF loop and on every seek/relayout/resize) — one time source
+  // (curTime -> ctx.currentTime), zero drift between master and lanes.
+  const frameSubs = new Set();
+
+  function emitFrame() {
+    frameSubs.forEach((fn) => {
+      try {
+        fn();
+      } catch {
+        /* a broken subscriber must not kill the transport */
+      }
+    });
+  }
+
   btn.addEventListener('click', () => {
     if (playing) pause();
     else play(Math.max(savedOffset, OFFSET));
@@ -399,6 +415,7 @@ export function createPlayer(container, gd, opts) {
       seek.value = String(Math.max(curTime(), OFFSET));
     }
     paintFill(seek);
+    emitFrame();
   }
 
   gd.on('plotly_relayout', reposition);
@@ -458,6 +475,13 @@ export function createPlayer(container, gd, opts) {
     onTransport: (fn) => {
       transportSubs.add(fn);
       return () => transportSubs.delete(fn);
+    },
+    /** Subscribe to per-frame cursor repaints (Phase 3.9 lane playheads):
+     *  fired on the master cursor's own rAF loop and on every
+     *  seek/relayout/resize; returns an unsubscribe fn */
+    onFrame: (fn) => {
+      frameSubs.add(fn);
+      return () => frameSubs.delete(fn);
     },
     /** Master gain control for the stems panel Mix row (0..1) */
     setMixGain: (norm, opts) => setGainNorm(norm, opts),

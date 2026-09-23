@@ -40,6 +40,24 @@
   --panel: var(--panel-mid);
   --border: #2c2b2e;
   --accent: var(--gold);
+
+  /* ---------- Shared plot geometry (Phase 3.9) ----------
+     The master spectrogram plot area and EVERY lane canvas plot area use
+     IDENTICAL left/right pixel boundaries (a drum hit lands on the same
+     vertical line in both). --plot-left / --plot-right are overwritten at
+     runtime from the exported JS consts in src/geometry.js (single source
+     of truth); the lane grid below is DERIVED from them, so the 1fr scope
+     column — the lane canvas — starts at PLOT_LEFT_PX and ends at
+     W - PLOT_RIGHT_PX by construction. plot-left = 16+96+8+152+8 = 280px. */
+  --panel-pad: 16px;
+  --lane-label-w: 96px;
+  --lane-ctl-w: 152px;
+  --lane-gap: 8px;
+  --plot-left: calc(
+    var(--panel-pad) + var(--lane-label-w) + var(--lane-gap) +
+    var(--lane-ctl-w) + var(--lane-gap)
+  );
+  --plot-right: var(--panel-pad);
 }
 
 html,
@@ -667,16 +685,19 @@ input[type='range']:active::-moz-range-thumb {
  *  lanes (Mix + Demucs stems). Phase 3.7 compact grid: [label 96px]
  *  [controls 152px][lane 1fr], column-gap 8px, 80 px rows — the label
  *  and the M/S keys sit one tight line apart instead of the old
- *  140/200 px columns that left a wide dead gap. Each lane is a
- *  waveform canvas with a dedicated notes-overlay canvas absolutely
- *  positioned on top (notes are NEVER layout.shapes: 6 poly tracks
- *  would melt SVG). Canvases are redrawn from the main chart's
- *  xaxis.range on plotly_relayout ---------- */
+ *  140/200 px columns that left a wide dead gap. Phase 3.9: the grid is
+ *  DERIVED from the shared plot geometry vars (--plot-left /
+ *  --plot-right, written from geometry.js) so every lane canvas plot
+ *  area spans EXACTLY the master spectrogram's plot-area pixel
+ *  boundaries. Each lane is a waveform canvas with a dedicated
+ *  notes-overlay canvas absolutely positioned on top (notes are NEVER
+ *  layout.shapes: 6 poly tracks would melt SVG). Canvases are redrawn
+ *  from the main chart's xaxis.range on plotly_relayout ---------- */
 .lanes-panel {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 6px 16px 8px;
+  padding: 6px var(--plot-right, 16px) 8px var(--panel-pad, 16px);
   background: linear-gradient(180deg, #101014, #0d0d10);
   border-top: 1px solid var(--edge-lo);
   box-shadow: inset 0 1px 0 var(--edge-hi);
@@ -690,9 +711,12 @@ input[type='range']:active::-moz-range-thumb {
 
 .lane-row {
   display: grid;
-  grid-template-columns: 96px 152px 1fr;
+  grid-template-columns:
+    calc(var(--plot-left, 280px) - var(--panel-pad, 16px) -
+      var(--lane-gap, 8px) - var(--lane-ctl-w, 152px) - var(--lane-gap, 8px))
+    var(--lane-ctl-w, 152px) 1fr;
   align-items: center;
-  column-gap: 8px;
+  column-gap: var(--lane-gap, 8px);
   height: 80px;
 }
 
@@ -718,8 +742,11 @@ input[type='range']:active::-moz-range-thumb {
   position: relative;
   height: 100%;
   min-height: 56px;
-  border: 1px solid #232329;
+  /* Phase 3.9: an inset box-shadow instead of a real border — a border
+     would shrink the canvas box by 1px per side and break the exact
+     pixel-boundary alignment with the master plot area */
   border-radius: 6px;
+  box-shadow: inset 0 0 0 1px #232329;
   background:
     repeating-linear-gradient(
       90deg,
@@ -741,6 +768,25 @@ input[type='range']:active::-moz-range-thumb {
 
 .lane-notes {
   pointer-events: none; /* clicks fall through to the waveform */
+}
+
+/* Phase 3.9 lane playhead: one gold hairline per lane, moved by the master
+   cursor's own repaint path (player.onFrame) — single time source, zero
+   drift, and playback never repaints a lane canvas. */
+.lane-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 2px;
+  margin-left: -1px; /* center the 2px line on the sample column */
+  background: linear-gradient(180deg, #f4e2b0, #d8b26a);
+  box-shadow:
+    0 0 6px rgba(230, 201, 138, 0.75),
+    0 0 2px rgba(0, 0, 0, 0.7);
+  pointer-events: none;
+  z-index: 1;
+  will-change: transform;
 }
 
 /* ---------- Stem player panel (Phase 2): bottom strip between the plot
