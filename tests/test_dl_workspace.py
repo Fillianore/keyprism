@@ -501,7 +501,7 @@ def test_task_reports_downloading_phase(srv, monkeypatch):
             self._dl = download_progress
 
         def separate(self, pcm, sr, chunk_sec=10.0, overlap_sec=1.0,
-                     progress=None):
+                     shifts=0, progress=None):
             if self._dl is not None:
                 self._dl(1_000_000, 4_000_000, 2.5)
                 release.wait(timeout=5.0)
@@ -650,6 +650,9 @@ def test_load_session_selects_providers_and_reads_back_active(
                     available=["CUDAExecutionProvider",
                                "CPUExecutionProvider"])
     monkeypatch.setattr(dlsep, "ort", fake)
+    # same convention as the rest of the suite: the availability flag is
+    # monkeypatched explicitly so this runs in BOTH environments
+    monkeypatch.setattr(dlsep, "ORT_AVAILABLE", True)
     monkeypatch.setattr(dlsep, "_ACTIVE_PROVIDERS", [])
     monkeypatch.delenv("KEYPRISM_ORT_PROVIDERS", raising=False)
     model = tmp_path / "m.onnx"
@@ -671,6 +674,7 @@ def test_load_session_silent_cpu_fallback_when_gpu_unusable(
                                "CPUExecutionProvider"],
                     fail_on={"CUDAExecutionProvider"})
     monkeypatch.setattr(dlsep, "ort", fake)
+    monkeypatch.setattr(dlsep, "ORT_AVAILABLE", True)
     monkeypatch.setattr(dlsep, "_ACTIVE_PROVIDERS", [])
     monkeypatch.delenv("KEYPRISM_ORT_PROVIDERS", raising=False)
     model = tmp_path / "m2.onnx"
@@ -729,6 +733,171 @@ def test_provider_badge_contract():
     i18n = strip_js_comments(
         (FRONTEND / "i18n.js").read_text(encoding="utf-8"))
     for key in ("providerGpu", "providerCpu", "providerTip"):
+        assert i18n.count(f"{key}:") >= 2
+
+
+# ------------------------------------------------- quality tiers (3.10)
+
+def test_shifts_for_quality_mapping():
+    assert dlsep.QUALITY_SHIFTS == {"fast": 0, "balanced": 1, "best": 2}
+    assert dlsep.DEFAULT_QUALITY == "balanced"
+    assert dlsep.shifts_for_quality("fast") == 0
+    assert dlsep.shifts_for_quality("balanced") == 1
+    assert dlsep.shifts_for_quality("best") == 2
+    with pytest.raises(ValueError):
+        dlsep.shifts_for_quality("ultra")
+
+
+def test_shift_passes_averages_shifted_passes():
+    """shift_passes semantics: pass s infers the circularly shifted
+    input and shifts the output back; the result is the MEAN of the
+    shifted-back passes; progress fires per pass."""
+    n = 40
+    x = np.arange(n, dtype=np.float32)
+    seen = []
+
+    def infer(chunk):  # deliberately NON-linear: mean semantics must
+        seen.append(np.array(chunk))   # hold regardless of the backend
+        return np.stack([chunk, np.zeros_like(chunk)])
+
+    progress = []
+    out = dlsep.shift_passes(infer, x, passes=2,
+                             on_pass=lambda p, t: progress.append((p, t)))
+    k = (n * 1) // 2
+    np.testing.assert_allclose(seen[0], x)               # pass 0: no shift
+    np.testing.assert_allclose(seen[1], np.roll(x, -k))  # pass 1: n/2 roll
+    expect = (np.stack([x, np.zeros_like(x)]) +
+              np.stack([np.roll(np.roll(x, -k), k),
+                        np.zeros_like(x)])) / 2.0
+    np.testing.assert_allclose(out, expect, atol=1e-6)
+    assert progress == [(1, 2), (2, 2)]
+
+    # passes=1 is the plain single call (fast tier)
+    seen.clear()
+    out1 = dlsep.shift_passes(infer, x, passes=1)
+    np.testing.assert_allclose(seen[0], x)
+    np.testing.assert_allclose(out1, np.stack([x, np.zeros_like(x)]))
+
+
+def test_shifts_linear_infer_equivalence():
+    """With a LINEAR, shift-equivariant infer (circular convolution),
+    every shifted pass reproduces the single-pass output, so the
+    shifts=1 average equals the fast output exactly (fp tolerance) —
+    the equivalence the tier implementation rests on."""
+    sr = dlsep.TARGET_SR
+    rng = np.random.default_rng(7)
+    x = (rng.standard_normal(int(3.0 * sr)).astype(np.float32) * 0.1)
+    taps = (1.0, 0.5, -0.25, 0.125)
+
+    def infer(chunk):
+        y = np.zeros_like(chunk)
+        for i, c in enumerate(taps):  # linear + shift-equivariant
+            y += c * np.roll(chunk, i, axis=-1)
+        return np.stack([y, -y, 0.5 * y, np.zeros_like(y)])
+
+    sep = dlsep.DemucsSeparator("demucs_4", infer=infer)
+    fast = sep.separate(x, sr, chunk_sec=1.0, overlap_sec=0.1, shifts=0)
+    balanced = sep.separate(x, sr, chunk_sec=1.0, overlap_sec=0.1,
+                            shifts=1)
+    best = sep.separate(x, sr, chunk_sec=1.0, overlap_sec=0.1, shifts=2)
+    assert list(fast) == list(dlsep.STEM_SPECS["demucs_4"])
+    for key in fast:
+        np.testing.assert_allclose(balanced[key], fast[key], atol=1e-5)
+        np.testing.assert_allclose(best[key], fast[key], atol=1e-5)
+
+
+def test_shifts_scale_progress_denominator():
+    """Progress denominator = chunks * passes, advanced per completed
+    pass; shifts=0 keeps the exact pre-3.10 chunk granularity."""
+    sr = dlsep.TARGET_SR
+    x = np.zeros(int(25 * sr), dtype=np.float32)  # 3 chunks @ 10s/1s
+    assert len(dlsep.chunk_windows(x.shape[0], 10.0, 1.0, sr)) == 3
+
+    def infer(chunk):
+        return np.stack([chunk, -chunk, chunk * 0.5, np.zeros_like(chunk)])
+
+    sep = dlsep.DemucsSeparator("demucs_4", infer=infer)
+    seen = []
+    sep.separate(x, sr, progress=lambda d, t: seen.append((d, t)))
+    assert seen[-1] == (3, 3)
+    seen.clear()
+    sep.separate(x, sr, shifts=1,
+                 progress=lambda d, t: seen.append((d, t)))
+    assert seen[-1] == (6, 6)                       # 3 chunks x 2 passes
+    assert [d for d, _ in seen] == list(range(1, 7))  # per-pass updates
+    seen.clear()
+    sep.separate(x, sr, shifts=2,
+                 progress=lambda d, t: seen.append((d, t)))
+    assert seen[-1] == (9, 9)                       # 3 chunks x 3 passes
+    with pytest.raises(ValueError):
+        sep.separate(x, sr, shifts=-1)
+
+
+def test_quality_tier_server_flow(srv, monkeypatch):
+    """/api/stems?quality=...: default balanced; tier-aware cache (same
+    tier -> cache hit, tier switch -> recompute with the mapped shifts);
+    unknown tier -> 400, never a task; status.json records the tier."""
+    monkeypatch.setattr(server_mod, "DL_AVAILABLE", True)
+    monkeypatch.setattr(server_mod, "POLY_AVAILABLE", True)
+    monkeypatch.setattr(dlsep, "get_separator", FakeSeparator)
+    FakeSeparator.shifts_seen.clear()
+
+    # default tier = balanced -> shifts 1
+    code, body = post(f"{srv['base']}/api/stems?method=demucs_4")
+    assert code == 200 and body["status"] == "started"
+    done = wait_task(srv["base"], body["task_id"])
+    assert done["status"] == "done" and done["quality"] == "balanced"
+    assert FakeSeparator.shifts_seen == [1]
+
+    # same tier again: cache hit, no recompute
+    code, body = post(f"{srv['base']}/api/stems?method=demucs_4")
+    assert code == 200 and body["cached"] is True
+    assert body["quality"] == "balanced"
+    assert FakeSeparator.shifts_seen == [1]
+    statuses = list((audio_io.KEYPRISM_HOME / "cache").rglob(
+        "dl_v1/demucs_4/status.json"))
+    assert statuses and json.loads(
+        statuses[0].read_text(encoding="utf-8"))["quality"] == "balanced"
+
+    # tier switch -> recompute with the new shifts
+    code, body = post(
+        f"{srv['base']}/api/stems?method=demucs_4&quality=fast")
+    assert code == 200 and body.get("cached") is None
+    done = wait_task(srv["base"], body["task_id"])
+    assert done["quality"] == "fast"
+    assert FakeSeparator.shifts_seen == [1, 0]
+    code, body = post(
+        f"{srv['base']}/api/stems?method=demucs_4&quality=fast")
+    assert code == 200 and body["cached"] is True
+    assert FakeSeparator.shifts_seen == [1, 0]
+
+    # best tier -> third compute with shifts 2
+    code, body = post(
+        f"{srv['base']}/api/stems?method=demucs_4&quality=best")
+    assert code == 200 and body["status"] == "started"
+    wait_task(srv["base"], body["task_id"])
+    assert FakeSeparator.shifts_seen == [1, 0, 2]
+
+    # unknown tier: 400 before anything is started
+    code, body = post(
+        f"{srv['base']}/api/stems?method=demucs_4&quality=ultra")
+    assert code == 400 and "质量" in body["error"]
+    assert FakeSeparator.shifts_seen == [1, 0, 2]
+
+
+def test_quality_tier_frontend_contract():
+    """Frontend source contract: a quality dropdown (fast/balanced/
+    best) beside the method select, POSTed as &quality=, with i18n in
+    both dicts."""
+    lanes = strip_js_comments(
+        (FRONTEND / "lanes.js").read_text(encoding="utf-8"))
+    assert "'fast', 'balanced', 'best'" in lanes
+    assert "&quality=${state.quality}" in lanes
+    assert "qualityTip" in lanes
+    i18n = strip_js_comments(
+        (FRONTEND / "i18n.js").read_text(encoding="utf-8"))
+    for key in ("qualityFast", "qualityBalanced", "qualityBest",
+                "qualityTip"):
         assert i18n.count(f"{key}:") >= 2
 
 
@@ -804,14 +973,19 @@ def test_convert_raw_accepts_library_shapes():
 # ------------------------------------------- background task + DL cache
 
 class FakeSeparator:
-    """Stands in for the ONNX DemucsSeparator (no weights needed)."""
+    """Stands in for the ONNX DemucsSeparator (no weights needed).
+    Records the shifts each separate() call received (3.10 quality
+    tier -> shifts plumbing assertion seam)."""
+
+    shifts_seen: list = []
 
     def __init__(self, variant, download_progress=None):
         self.variant = variant
         self.stems = dlsep.STEM_SPECS[variant]
 
     def separate(self, pcm, sr, chunk_sec=10.0, overlap_sec=1.0,
-                 progress=None):
+                 shifts=0, progress=None):
+        FakeSeparator.shifts_seen.append(shifts)
         n = int(len(pcm) * dlsep.TARGET_SR / sr)
         out = {}
         for i, key in enumerate(self.stems):

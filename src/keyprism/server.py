@@ -474,10 +474,12 @@ def make_server(path: Path, port: int, host: str, start: float,
             })
 
         def _start_dl_stems(self, u):
-            """POST /api/stems?method=demucs|demucs_4|demucs_6: start DL
-            separation as a background task (501 without the optional
-            [dl] dependencies, 200 with the cached list when already
-            computed)."""
+            """POST /api/stems?method=demucs|demucs_4|demucs_6
+            [&quality=fast|balanced|best]: start DL separation as a
+            background task (501 without the optional [dl] dependencies,
+            200 with the cached list when already computed AT the
+            requested quality tier — a tier switch recomputes instead of
+            serving a mismatched cached render)."""
             if not DL_AVAILABLE:
                 self._json(501, {"code": "dl_not_installed",
                                  "error": _DL_NOT_INSTALLED})
@@ -493,11 +495,21 @@ def make_server(path: Path, port: int, host: str, start: float,
                     "error": f"未知 DL 分离方法: {method} "
                              f"(可用: {', '.join(dlsep.DL_METHODS)})"})
                 return
+            quality = (q.get("quality", [dlsep.DEFAULT_QUALITY])[0] or
+                       dlsep.DEFAULT_QUALITY).strip()
+            try:
+                shifts = dlsep.shifts_for_quality(quality)
+            except ValueError as e:
+                self._json(400, {"error": str(e)})
+                return
             entry = self._notes_entry(cur)
             cached = dlsep.load_status(entry, method)
-            if cached is not None:
+            if cached is not None and \
+                    cached.get("quality", dlsep.DEFAULT_QUALITY) == quality:
                 self._json(200, {
                     "method": method, "cached": True,
+                    "quality": cached.get("quality",
+                                          dlsep.DEFAULT_QUALITY),
                     "duration": cached.get("duration"),
                     "sample_rate": cached.get("sr"),
                     "stems": self._dl_stems_urls(method, cached)})
@@ -526,12 +538,17 @@ def make_server(path: Path, port: int, host: str, start: float,
                 sep = dlsep.get_separator(
                     method, download_progress=download_progress)
                 task["status"] = "running"
-                out = sep.separate(mono, cur["sr"], progress=progress)
+                # 3.10 quality tier -> demucs shifts (per-pass progress;
+                # the denominator already includes every pass)
+                out = sep.separate(mono, cur["sr"], shifts=shifts,
+                                   progress=progress)
                 status = dlsep.write_stems(
                     entry, method, out, dlsep.TARGET_SR, cur["dur"],
-                    time.time() - started)
+                    time.time() - started, quality=quality)
                 return {
                     "method": method,
+                    "quality": status.get("quality",
+                                          dlsep.DEFAULT_QUALITY),
                     "duration": status.get("duration"),
                     "sample_rate": status.get("sr"),
                     "stems": self._dl_stems_urls(method, status),

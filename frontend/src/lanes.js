@@ -100,6 +100,17 @@ import { throttled } from './util.js';
 const START_LEAD = 0.06; // keep identical to player.js START_LEAD
 const POLL_MS = 700;
 
+/** Inference quality tiers (3.10): server-side demucs shifts —
+ *  fast = 1 pass, balanced = 2, best = 3 (compute ~linear in passes).
+ *  Mirrors keyprism.dlsep.QUALITY_SHIFTS. */
+const QUALITY_TIERS = ['fast', 'balanced', 'best'];
+const QUALITY_LABEL_KEYS = {
+  fast: 'qualityFast',
+  balanced: 'qualityBalanced',
+  best: 'qualityBest',
+};
+const QUALITY_KEY = 'keyprism-quality';
+
 /** LOD waveforms (Phase 3.9): windows at or below this span switch from
  *  the ~1024-column overview envelope to per-pixel-column min/max
  *  computed in the worker. */
@@ -188,6 +199,17 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
     loading: false,
     ready: false,
     method: 'demucs_4',
+    quality: (() => {
+      // persisted quality tier (default balanced); unknown values fall
+      // back instead of poisoning every POST
+      try {
+        const q = localStorage.getItem(QUALITY_KEY);
+        if (QUALITY_TIERS.includes(q)) return q;
+      } catch {
+        /* localStorage unavailable: keep default */
+      }
+      return 'balanced';
+    })(),
     savedMix: null,
     rows: [], // {model, row, vol, mute, solo} mirrors for repaint
     lanes: [], // mixer strips + canvas fields (peaks, idx, waveCv, noteCv)
@@ -701,9 +723,11 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
    *  Two-phase progress (3.8 D3): `downloading` reports model-download
    *  bytes/speed, `running` reports inference progress. */
   async function requestStems(method) {
-    const r = await fetch(`${apiBase}/api/stems?method=${method}`, {
-      method: 'POST',
-    });
+    const r = await fetch(
+      `${apiBase}/api/stems?method=${method}&quality=${state.quality}`,
+      {
+        method: 'POST',
+      });
     const body = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
     if (body.cached || !body.task_id) return body;
@@ -918,6 +942,30 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
         load(methodSel.value);
       }
     });
+    // Inference quality tier (3.10): demucs shifts — fast = 1 pass,
+    // balanced = 2, best = 3. Persisted; a switch re-POSTs, and the
+    // server recomputes when the cached render used a different tier.
+    const qualitySel = document.createElement('select');
+    qualitySel.className = 'stems-method stems-quality';
+    qualitySel.title = t('qualityTip');
+    for (const q of QUALITY_TIERS) {
+      const o = document.createElement('option');
+      o.value = q;
+      o.textContent = t(QUALITY_LABEL_KEYS[q]);
+      if (q === state.quality) o.selected = true;
+      qualitySel.appendChild(o);
+    }
+    qualitySel.disabled = state.loading || !dlOk;
+    qualitySel.addEventListener('change', () => {
+      if (qualitySel.disabled || qualitySel.value === state.quality) return;
+      state.quality = qualitySel.value;
+      try {
+        localStorage.setItem(QUALITY_KEY, state.quality);
+      } catch {
+        /* storage failure: keep the session value */
+      }
+      load(state.method);
+    });
     const status = document.createElement('span');
     status.className = 'lanes-status stems-status';
     const badge = providerBadge();
@@ -927,9 +975,9 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
         'provider-badge' + (badge.gpu ? ' provider-badge-gpu' : '');
       el.textContent = badge.text;
       el.title = badge.tip;
-      panel.append(title, methodSel, el, status);
+      panel.append(title, methodSel, qualitySel, el, status);
     } else {
-      panel.append(title, methodSel, status);
+      panel.append(title, methodSel, qualitySel, status);
     }
 
     if (!state.ready) return;

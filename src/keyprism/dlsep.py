@@ -187,8 +187,12 @@ from . import audio_io, payload
 __all__ = [
     "DL_STEMS_VERSION", "DL_METHODS", "STEM_SPECS", "TARGET_SR",
     "SEGMENT_SEC", "SEGMENT_SAMPLES",
-    "DLMissingError", "ORT_AVAILABLE", "HF_AVAILABLE",
-    "plan_chunks", "hann_cola", "resample", "ola_separate",
+    "QUALITY_SHIFTS", "DEFAULT_QUALITY",
+    "CPU_PROVIDER", "ORT_AVAILABLE", "HF_AVAILABLE",
+    "DLMissingError",
+    "plan_chunks", "chunk_windows", "hann_cola", "resample",
+    "ola_separate", "shift_passes", "shifts_for_quality",
+    "provider_chain", "ort_available_providers", "active_providers",
     "DemucsSeparator", "get_separator", "dl_stems_dir", "dl_status_path",
     "dl_stem_path", "load_status", "write_stems", "model_dir",
     "dl_spec_path", "get_stem_spec",
@@ -479,10 +483,7 @@ def ola_separate(pcm: np.ndarray, infer, *, chunk_sec: float = 10.0,
     length ``n`` — every sample of the input is covered, edges included.
     """
     x = np.asarray(pcm, dtype=np.float32).reshape(-1)
-    n = x.shape[0]
-    chunk = max(1, int(round(chunk_sec * sr)))
-    overlap = min(chunk - 1, max(0, int(round(overlap_sec * sr))))
-    chunks = plan_chunks(n, chunk, overlap)
+    chunks = chunk_windows(x.shape[0], chunk_sec, overlap_sec, sr)
     if not chunks:
         return {}
     stems = None
@@ -490,7 +491,7 @@ def ola_separate(pcm: np.ndarray, infer, *, chunk_sec: float = 10.0,
     # float32 accumulators: half the RAM of float64 for full-track OLA
     # (a 5-min 6-stem track holds ~300 MB here, not ~600); the blend
     # stays exact well inside the tests' 1e-5 reconstruction tolerance
-    wsum = np.zeros(n, dtype=np.float32)
+    wsum = np.zeros(x.shape[0], dtype=np.float32)
     total = len(chunks)
     for done, (a, b) in enumerate(chunks, start=1):
         y = np.asarray(infer(x[a:b]), dtype=np.float32)
@@ -499,7 +500,7 @@ def ola_separate(pcm: np.ndarray, infer, *, chunk_sec: float = 10.0,
         y = y.reshape(-1, b - a)
         if stems is None:  # first chunk fixes the stem count
             stems = [f"stem{i}" for i in range(y.shape[0])]
-            acc = {k: np.zeros(n, dtype=np.float32) for k in stems}
+            acc = {k: np.zeros(x.shape[0], dtype=np.float32) for k in stems}
         w = hann_cola(b - a).astype(np.float32)
         for k, row in zip(stems, y):
             acc[k][a:b] += w * row
@@ -510,6 +511,71 @@ def ola_separate(pcm: np.ndarray, infer, *, chunk_sec: float = 10.0,
     # no zeros), so plain division is safe; max() only guards empty tails
     return {k: acc[k] / np.maximum(wsum, np.float32(1e-30))
             for k in stems}
+
+
+def chunk_windows(n: int, chunk_sec: float, overlap_sec: float,
+                  sr: int) -> list:
+    """Sample-space chunk plan (``(start, end)`` windows): the ONE math
+    shared by :func:`ola_separate` and the shifts wrapper in
+    ``DemucsSeparator.separate`` (which needs the chunk count up front to
+    scale the progress denominator with the pass count). Identical to
+    what ola_separate computes internally — locked by the chunking
+    tests."""
+    chunk = max(1, int(round(chunk_sec * sr)))
+    overlap = min(chunk - 1, max(0, int(round(overlap_sec * sr))))
+    return plan_chunks(n, chunk, overlap)
+
+
+# ------------------------------------------------- quality tiers (3.10)
+
+#: Inference quality tiers: demucs' ``shifts`` augmentation applied
+#: EXTERNALLY around the per-chunk infer (the ONNX graph is untouched):
+#: for each extra pass the input chunk is circularly shifted, inferred,
+#: shifted back, and all passes are averaged. fast = 1 pass (no
+#: shifts), balanced = 2 passes, best = 3 — compute scales ~linearly
+#: with the pass count, chunking/OLA math is untouched.
+QUALITY_SHIFTS = {"fast": 0, "balanced": 1, "best": 2}
+
+DEFAULT_QUALITY = "balanced"
+
+
+def shifts_for_quality(quality: str) -> int:
+    """Quality tier name -> shift count (0/1/2 extra passes)."""
+    try:
+        return QUALITY_SHIFTS[quality]
+    except (KeyError, TypeError):
+        raise ValueError(
+            f"未知质量档位: {quality} "
+            f"(可用: {', '.join(QUALITY_SHIFTS)})") from None
+
+
+def shift_passes(infer, x: np.ndarray, passes: int,
+                 on_pass=None) -> np.ndarray:
+    """demucs ``shifts`` augmentation around ONE infer call.
+
+    For pass ``s`` the input is circularly shifted by an evenly spaced
+    offset (``s/passes`` of the length), inferred, shifted back, and the
+    passes are averaged (float32). The wrapping is external to the graph
+    (chunking/OLA untouched); a linear, shift-equivariant backend
+    returns its single-pass output unchanged, so the equivalence is
+    testable with an injected linear fake-infer. ``on_pass(p, t)`` fires
+    after each completed pass (per-pass progress)."""
+    x = np.asarray(x, dtype=np.float32)
+    n = x.shape[-1]
+    passes = int(passes)
+    outs = []
+    for s in range(passes):
+        k = (n * s) // passes
+        y = np.asarray(infer(np.roll(x, -k, axis=-1) if k else x),
+                       dtype=np.float32)
+        if k:
+            y = np.roll(y, k, axis=-1)
+        outs.append(y)
+        if on_pass is not None:
+            on_pass(s + 1, passes)
+    if len(outs) == 1:
+        return outs[0]
+    return np.mean(np.stack(outs, axis=0), axis=0, dtype=np.float32)
 
 
 # ------------------------------------------------------------ separator
@@ -674,7 +740,8 @@ class DemucsSeparator:
         return y[..., :valid] if valid else y
 
     def separate(self, pcm: np.ndarray, sr: int, chunk_sec: float | None = None,
-                 overlap_sec: float | None = None, *, progress=None) -> dict:
+                 overlap_sec: float | None = None, *, shifts: int | None = None,
+                 progress=None) -> dict:
         """Mono PCM in, ``{stem: ndarray}`` out at :data:`TARGET_SR`.
 
         Resamples to 44.1 kHz (model rate) when needed, then streams
@@ -687,7 +754,13 @@ class DemucsSeparator:
         (COLA-exact cross-fade) because the reference exports embed the
         STFT and only accept that input length; generic backends
         (injected ``infer``, flexible exports) keep the 10 s / 1 s
-        defaults. Explicit arguments always win."""
+        defaults. Explicit arguments always win.
+
+        ``shifts`` (demucs quality tiers, 3.10): 0 extra passes (fast,
+        default), 1 (balanced) or 2 (best); see :func:`shift_passes`.
+        The wrapping is external to the per-chunk infer — chunking/OLA
+        math is untouched — and the progress denominator scales with the
+        pass count (per-pass updates)."""
         x = np.asarray(pcm, dtype=np.float32).reshape(-1)
         if x.shape[0] == 0:
             return {k: np.zeros(0) for k in self.stems}
@@ -700,11 +773,37 @@ class DemucsSeparator:
             chunk_sec = d_chunk
         if overlap_sec is None:
             overlap_sec = d_overlap
+        if shifts is None:
+            shifts = 0
+        shifts = int(shifts)
+        if shifts < 0:
+            raise ValueError("shifts 必须 >= 0")
+        passes = shifts + 1
         x = resample(x, sr, TARGET_SR)
-        infer = self._infer if self._infer is not None else self._run_session
-        out = ola_separate(
-            x, infer, chunk_sec=chunk_sec, overlap_sec=overlap_sec,
-            sr=TARGET_SR, progress=progress)
+        base = self._infer if self._infer is not None else self._run_session
+        if passes > 1:
+            # shifts wrap the per-chunk infer (OLA untouched); the
+            # progress denominator scales with the pass count and every
+            # completed pass advances it (progress granularity = pass)
+            total_units = len(chunk_windows(
+                x.shape[0], chunk_sec, overlap_sec, TARGET_SR)) * passes
+            counter = {"done": 0}
+
+            def infer(cx: np.ndarray) -> np.ndarray:
+                def on_pass(_p: int, _t: int) -> None:
+                    counter["done"] += 1
+                    if progress is not None:
+                        progress(counter["done"], total_units)
+
+                return shift_passes(base, cx, passes, on_pass=on_pass)
+
+            out = ola_separate(
+                x, infer, chunk_sec=chunk_sec, overlap_sec=overlap_sec,
+                sr=TARGET_SR)
+        else:
+            out = ola_separate(
+                x, base, chunk_sec=chunk_sec, overlap_sec=overlap_sec,
+                sr=TARGET_SR, progress=progress)
         missing = [i for i in range(len(self.stems))
                    if f"stem{i}" not in out]
         if missing:
@@ -859,9 +958,14 @@ def load_status(entry: Path, method: str) -> dict | None:
 
 
 def write_stems(entry: Path, method: str, stems: dict, sr: int,
-                duration: float, elapsed_sec: float) -> dict:
+                duration: float, elapsed_sec: float,
+                quality: str | None = None) -> dict:
     """Write ``{key: mono float array}`` as PCM16 WAVs + status.json,
-    atomically (tmp dir -> os.replace, mirroring stems.py)."""
+    atomically (tmp dir -> os.replace, mirroring stems.py).
+
+    ``quality`` (3.10) is recorded in status.json — the server serves
+    the cache only when the requested quality tier matches (a tier
+    switch recomputes instead of serving a mismatched cached render)."""
     import soundfile as sf
 
     _check_method(method)
@@ -883,6 +987,7 @@ def write_stems(entry: Path, method: str, stems: dict, sr: int,
             "version": DL_STEMS_VERSION,
             "method": method,
             "stems": list(keys),
+            "quality": quality or DEFAULT_QUALITY,
             "sr": int(sr),
             "duration": round(float(duration), 6),
             "elapsed_sec": round(float(elapsed_sec), 3),

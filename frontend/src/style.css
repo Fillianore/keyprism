@@ -851,6 +851,12 @@ input[type='range']:active::-moz-range-thumb {
   border-color: #2d4a2b;
 }
 
+/* quality tier dropdown (3.10): reuses the method-select chrome, just
+ * a touch narrower so the header keeps one tidy line */
+.stems-quality {
+  min-width: 72px;
+}
+
 .stems-status {
   color: var(--muted);
   font-size: 11px;
