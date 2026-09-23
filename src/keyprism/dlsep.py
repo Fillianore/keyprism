@@ -56,6 +56,7 @@ float input and stems output is accepted; the I/O adapter normalizes
 3D/4D, batched or listed outputs to ``(n_stems, T)`` mono.
 """
 
+import ctypes
 import json
 import os
 import shutil
@@ -123,6 +124,103 @@ def ort_available_providers() -> list:
         return [str(p) for p in ort.get_available_providers()]
     except Exception:  # noqa: BLE001 - a broken install degrades to CPU
         return []
+
+
+_PIP_CUDA_PRELOADED = False
+
+#: Sonames the CUDA EP needs in-process: the DT_NEEDED list of
+#: ``libonnxruntime_providers_cuda.so`` (cublas/cudart/curand) plus the
+#: libraries ORT dlopens at runtime (cuDNN 9). cu13 wheels provide all
+#: of them; a complete system CUDA 13 + cuDNN 9 install also does.
+_CUDA13_SONAMES = (
+    "libcublasLt.so.13",
+    "libcublas.so.13",
+    "libcudart.so.13",
+    "libcurand.so.10",
+    "libcudnn.so.9",
+)
+
+#: Driver CUDA runtime API version the cu13 wheels require (13.0),
+#: as reported by ``cuDriverGetVersion`` (e.g. 13020 == "13.2").
+_CUDA13_MIN_DRIVER = 13000
+
+
+def _soname_loadable(soname: str) -> bool:
+    """True when ``soname`` already resolves in this process environment
+    (system CUDA / LD_LIBRARY_PATH / a previously loaded copy). Never
+    raises — a missing library is exactly the False answer."""
+    try:
+        ctypes.CDLL(soname)
+        return True
+    except OSError:
+        return False
+
+
+def _cuda13_driver_ok() -> bool:
+    """True when an NVIDIA driver is present and its CUDA runtime API
+    version satisfies the cu13 wheels (WSL included: ``libcuda.so.1``
+    is the host-driver shim there). Never raises — anything unusable
+    (no driver, init failure, probe mismatch) is a plain False, and the
+    caller then leaves the environment completely untouched."""
+    try:
+        lib = ctypes.CDLL("libcuda.so.1")
+        if lib.cuInit(0) != 0:
+            return False
+        ver = ctypes.c_int(0)
+        if lib.cuDriverGetVersion(ctypes.byref(ver)) != 0:
+            return False
+        return ver.value >= _CUDA13_MIN_DRIVER
+    except Exception:  # noqa: BLE001 - no driver / probe broke → False
+        return False
+
+
+def _preload_pip_cuda_libs() -> None:
+    """Fill missing CUDA/cuDNN runtime libraries from pip ``nvidia-*``
+    wheels — and ONLY then.
+
+    Since ORT 1.23 the GPU build targets CUDA 13, whose runtime
+    libraries ship as pip wheels (``nvidia-cublas`` /
+    ``nvidia-cuda-runtime`` / ``nvidia-curand`` / ``nvidia-cudnn-cu13``)
+    instead of a system toolkit. Those wheels are NOT on the default
+    dlopen search path: the CUDA EP's plugin then fails with
+    ``libcublasLt.so.13: cannot open shared object file`` and the
+    session silently degrades to CPU. ``ort.preload_dlls()`` (added in
+    1.21) dlopens them from site-packages by absolute path so every
+    later resolution — the plugin's DT_NEEDED list and the runtime
+    ``dlopen("libcudnn.so.9")`` — succeeds.
+
+    Pre-checks, in order (the answer to "don't clobber my environment"):
+
+    1. **System environment wins.** When every required soname already
+       resolves, nothing is preloaded at all — ORT keeps using the
+       system CUDA exactly as installed. (dlopen dedupes by soname: a
+       library already loaded can never be replaced, so preloading can
+       only ever FILL gaps, never override a resolvable system library.
+       With a partial system install the loaded system copies stay and
+       pip wheels supply the rest — ABI-stable within one soname.)
+    2. **Host must support CUDA 13.** Without an NVIDIA driver (or with
+       one older than 13.0) the cu13 wheels are dead weight either way:
+       skip the preload and leave the CPU fallback / any system CUDA 12
+       stack untouched.
+
+    Guarded throughout (no ORT / pre-1.21 ORT / any probe or preload
+    error): a missing GPU stack must degrade to CPU, never raise. Runs
+    once per process — probes and dlopens are cheap but pointless to
+    repeat, and the answer cannot change mid-process."""
+    global _PIP_CUDA_PRELOADED
+    if _PIP_CUDA_PRELOADED or not ORT_AVAILABLE:
+        return
+    _PIP_CUDA_PRELOADED = True
+    try:
+        if not hasattr(ort, "preload_dlls"):
+            return
+        if all(_soname_loadable(s) for s in _CUDA13_SONAMES):
+            return  # complete system CUDA: respect it, touch nothing
+        if not _cuda13_driver_ok():
+            return  # no / too-old NVIDIA driver: wheels would be dead weight
+        ort.preload_dlls()
+    except Exception:  # noqa: BLE001 - no CUDA deps → CPU fallback
+        pass
 
 
 def provider_chain(available: list | None = None,
@@ -1032,6 +1130,7 @@ def _load_session(path: Path, threads: int | None = None,
                 threads = int(os.environ.get("KEYPRISM_DL_THREADS", ""))
             except ValueError:
                 threads = 0
+        _preload_pip_cuda_libs()
         opts = ort.SessionOptions()
         opts.graph_optimization_level = \
             ort.GraphOptimizationLevel.ORT_ENABLE_ALL

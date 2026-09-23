@@ -963,6 +963,74 @@ def test_provider_chain_env_override(monkeypatch):
         override="CUDA") == ["CPUExecutionProvider"]
 
 
+# --------------------------------- pip CUDA wheel preload gating (3.10.4)
+
+class _PreloadSpyOrt:
+    """Minimal ort stand-in recording preload_dlls() calls."""
+
+    def __init__(self):
+        self.preload_calls = 0
+
+    def preload_dlls(self):
+        self.preload_calls += 1
+
+
+def _arm_preload(monkeypatch, ort_fake):
+    """Fresh once-per-process flag + ORT present for the gating tests;
+    the environment probes (_soname_loadable / _cuda13_driver_ok) stay
+    REAL unless a test monkeypatches them, so these run identically in
+    both the [dl] and [dl-cuda] environments."""
+    monkeypatch.setattr(dlsep, "_PIP_CUDA_PRELOADED", False)
+    monkeypatch.setattr(dlsep, "ORT_AVAILABLE", True)
+    monkeypatch.setattr(dlsep, "ort", ort_fake)
+
+
+def test_preload_skipped_when_system_cuda_complete(monkeypatch):
+    """A complete system CUDA 13 + cuDNN 9 install wins: every required
+    soname already resolves → preload_dlls is NEVER called, so the pip
+    wheels can never shadow the system environment."""
+    fake = _PreloadSpyOrt()
+    _arm_preload(monkeypatch, fake)
+    monkeypatch.setattr(dlsep, "_soname_loadable", lambda s: True)
+    monkeypatch.setattr(dlsep, "_cuda13_driver_ok", lambda: True)
+    dlsep._preload_pip_cuda_libs()
+    assert fake.preload_calls == 0
+
+
+def test_preload_skipped_without_cuda13_driver(monkeypatch):
+    """Gaps in the sonames but no usable CUDA-13 driver (no NVIDIA
+    driver / too old / WSL shim absent): the cu13 wheels would be dead
+    weight — the environment is left completely untouched."""
+    fake = _PreloadSpyOrt()
+    _arm_preload(monkeypatch, fake)
+    monkeypatch.setattr(dlsep, "_soname_loadable", lambda s: False)
+    monkeypatch.setattr(dlsep, "_cuda13_driver_ok", lambda: False)
+    dlsep._preload_pip_cuda_libs()
+    assert fake.preload_calls == 0
+
+
+def test_preload_fills_gaps_once(monkeypatch):
+    """Missing sonames + CUDA-13-capable driver → preload_dlls runs, and
+    the once-per-process flag keeps it at exactly one call even across
+    multiple session builds."""
+    fake = _PreloadSpyOrt()
+    _arm_preload(monkeypatch, fake)
+    monkeypatch.setattr(dlsep, "_soname_loadable", lambda s: False)
+    monkeypatch.setattr(dlsep, "_cuda13_driver_ok", lambda: True)
+    dlsep._preload_pip_cuda_libs()
+    dlsep._preload_pip_cuda_libs()
+    assert fake.preload_calls == 1
+
+
+def test_preload_tolerates_older_ort(monkeypatch):
+    """pre-1.21 ORT (no preload_dlls attribute): the gate degrades to a
+    no-op instead of raising — same contract as the rest of dlsep."""
+    _arm_preload(monkeypatch, object())  # ort without preload_dlls
+    monkeypatch.setattr(dlsep, "_soname_loadable", lambda s: False)
+    monkeypatch.setattr(dlsep, "_cuda13_driver_ok", lambda: True)
+    dlsep._preload_pip_cuda_libs()  # must not raise
+
+
 class _FakeOrt:
     """Stands in for the onnxruntime module inside _load_session:
     compiled-in provider list (get_available_providers) vs the ACTIVE
