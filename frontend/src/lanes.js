@@ -1012,8 +1012,11 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
       withLane: true,
       fader: 'norm',
     });
+    // 3.10.4 D2: the Mix cell is NOT a lane window — drop the .lane-scope
+    // chrome entirely so the right cell is ONLY the control strip (no
+    // canvas, no dashed placeholder, no lane box)
     mix.row.classList.add('lane-row-mix');
-    mix.scope.classList.add('mix-controls');
+    mix.scope.className = 'mix-controls';
     const title = document.createElement('span');
     title.className = 'stems-title';
     title.textContent = t('lanes');
@@ -1133,20 +1136,21 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
     });
     const status = document.createElement('span');
     status.className = 'lanes-status stems-status';
-    // Stop & Restart (3.10.3 D2): state machine — stop enabled only
-    // while a task is downloading/running (cancellation lands at the
-    // next chunk/pass boundary); restart enabled when idle/done/error/
+    // Stop & Restart (3.10.3 D2, restyled 3.10.4 D1): house 26px square
+    // icon-buttons (same chrome as the M/S keys; champagne active fill
+    // marks an in-flight task). State machine — stop enabled ONLY while
+    // a task is downloading/running; restart enabled when done/error/
     // cancelled and re-submits with force=1 (cache bypassed).
     const stopBtn = document.createElement('button');
     stopBtn.type = 'button';
-    stopBtn.className = 'strip-btn';
+    stopBtn.className = 'stem-btn';
     stopBtn.textContent = '⏹';
     stopBtn.setAttribute('aria-label', t('stopSep'));
     stopBtn.title = t('stopTip');
     stopBtn.addEventListener('click', () => stopSeparation());
     const restartBtn = document.createElement('button');
     restartBtn.type = 'button';
-    restartBtn.className = 'strip-btn';
+    restartBtn.className = 'stem-btn';
     restartBtn.textContent = '↻';
     restartBtn.setAttribute('aria-label', t('restartSep'));
     restartBtn.title = t('restartTip');

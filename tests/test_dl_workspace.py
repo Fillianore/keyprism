@@ -484,14 +484,15 @@ def test_dropdowns_not_born_disabled_contract():
 
 
 def test_control_strip_inline_contract():
-    """3.10.3 D1: the Mix row's right cell is the control strip —
+    """3.10.3/3.10.4: the Mix row's right cell is the control strip —
     method/quality/device selects + provider badge + status live INLINE
-    in .mix-controls (flex row, wrap, 28px selects), the dashed empty
-    Mix lane placeholder is gone, and the Mix row renders in every
-    state so the controls stay reachable while a task runs."""
+    in .mix-controls (flex row, wrap, 28px selects in the house .ctrl
+    chrome), the Mix cell is NOT a lane window (no .lane-scope, no
+    canvas), and the Mix row renders in every state so the controls stay
+    reachable while a task runs."""
     lanes = strip_js_comments(
         (FRONTEND / "lanes.js").read_text(encoding="utf-8"))
-    assert "mix.scope.classList.add('mix-controls')" in lanes
+    assert "mix.scope.className = 'mix-controls'" in lanes
     assert "mix.scope.append(title, methodSel, qualitySel, deviceSel" in lanes
     assert "lane-scope-empty" not in lanes
     # the strip exists BEFORE the ready gate: no `if (!state.ready)
@@ -499,12 +500,19 @@ def test_control_strip_inline_contract():
     shell = lanes[lanes.index("function renderShell"):]
     shell = shell[:shell.index("for (const lane of state.lanes)")]
     assert "if (!state.ready) return" not in shell
+    assert "lane-scope'" not in shell  # the Mix cell is not a lane window
     css = (FRONTEND / "style.css").read_text(encoding="utf-8")
     strip = css[css.index(".mix-controls {"):]
     strip = strip[:strip.index("}")]
     assert "flex-direction: row" in strip and "flex-wrap: wrap" in strip
     assert "gap: 8px" in strip and "align-items: center" in strip
-    assert ".mix-controls .stems-method" in css
+    assert ".mix-controls select" in css
+    # 3.10.4 D1: the strip reuses the top-bar .ctrl select chrome
+    assert ".ctrl select,\n.mix-controls select {" in css
+    assert ".ctrl select:hover,\n.mix-controls select:hover {" in css
+    # stop/restart reuse the M/S icon-button chrome (26px, champagne)
+    assert "stopBtn.className = 'stem-btn'" in lanes
+    assert "restartBtn.className = 'stem-btn'" in lanes
     assert "lane-scope-empty" not in css
 
 

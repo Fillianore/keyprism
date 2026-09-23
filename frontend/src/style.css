@@ -199,7 +199,8 @@ body,
     0 1px 2px rgba(0, 0, 0, 0.4);
 }
 
-.ctrl select {
+.ctrl select,
+.mix-controls select {
   appearance: none;
   -webkit-appearance: none;
   background-color: #0c0c0f;
@@ -215,18 +216,21 @@ body,
   transition: border-color var(--t), color var(--t), box-shadow var(--t);
 }
 
-.ctrl select:hover {
+.ctrl select:hover,
+.mix-controls select:hover {
   border-color: var(--gold-line);
   color: var(--ivory);
 }
 
-.ctrl select:focus-visible {
+.ctrl select:focus-visible,
+.mix-controls select:focus-visible {
   outline: none;
   border-color: var(--gold-dim);
   box-shadow: 0 0 0 2px rgba(216, 178, 106, 0.18);
 }
 
-.ctrl select:disabled {
+.ctrl select:disabled,
+.mix-controls select:disabled {
   opacity: 0.45;
   cursor: default;
 }
@@ -727,20 +731,18 @@ input[type='range']:active::-moz-range-thumb {
   min-height: 44px;
 }
 
-.lane-row-mix .lane-scope {
-  min-height: 0; /* keep the empty Mix lane genuinely 44 px tall */
-}
-
 .lane-row-mix .stem-name {
   color: var(--ivory);
   border-bottom: 1px dotted rgba(152, 145, 127, 0.55);
 }
 
-/* ---------- Control strip (3.10.3 D1): the Mix row's right cell.
- * One horizontal wrapped line carrying every separation control —
- * [title][method ▾][quality ▾][device ▾][GPU badge][stop][restart]
- * [status] — vertically centered, instead of stacked full-width rows
- * plus an empty dashed lane placeholder. */
+/* ---------- Control strip (3.10.3 D1, restyled 3.10.4 D1): the Mix
+ * row's right cell. One horizontal wrapped line carrying every
+ * separation control — [title][method ▾][quality ▾][device ▾][GPU
+ * badge][run][stop][restart][status] — vertically centered, in the
+ * SAME house chrome as the top bar (selects reuse .ctrl select;
+ * buttons reuse .stem-btn). The Mix cell is NOT a lane window: no
+ * canvas, no dashed placeholder, no lane box. */
 .mix-controls {
   display: flex;
   flex-direction: row;
@@ -749,11 +751,9 @@ input[type='range']:active::-moz-range-thumb {
   align-items: center;
   align-content: center;
   overflow: visible; /* native dropdown lists must not clip */
-  background: none;
-  box-shadow: none;
 }
 
-.mix-controls .stems-method {
+.mix-controls select {
   width: auto;
   height: 28px;
   flex: 0 0 auto;
@@ -866,13 +866,21 @@ input[type='range']:active::-moz-range-thumb {
   cursor: default;
 }
 
-/* ORT execution-provider badge (3.10): "GPU: CUDA" / "CPU" next to the
- * method select; the tooltip carries the full active EP chain */
+/* ORT execution-provider badge (3.10, chip-aligned 3.10.4 D1): "GPU:
+ * CUDA" / "CPU" in the control strip; the tooltip carries the full
+ * active EP chain. Same recessed chip family as the .ctrl modules at
+ * the uniform 28px strip height. */
 .provider-badge {
-  padding: 2px 8px;
-  border: 1px solid #26262c;
+  flex: 0 0 auto;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.055);
   border-radius: 6px;
-  background: #0c0c0f;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0) 42%),
+    linear-gradient(180deg, #17171c, #101014);
   color: var(--muted);
   font-size: 11px;
   white-space: nowrap;
