@@ -975,17 +975,25 @@ def test_quality_tier_server_flow(srv, monkeypatch):
 def test_quality_tier_frontend_contract():
     """Frontend source contract: a quality dropdown (fast/balanced/
     best) beside the method select, POSTed as &quality=, with i18n in
-    both dicts."""
+    both dicts; the progress status names the tier's pass count so the
+    chunks-x-passes denominator is visible while it runs (3.10.1 D3),
+    and a tier switch re-POSTs (server recomputes on mismatch)."""
     lanes = strip_js_comments(
         (FRONTEND / "lanes.js").read_text(encoding="utf-8"))
     assert "'fast', 'balanced', 'best'" in lanes
     assert "&quality=${state.quality}" in lanes
     assert "qualityTip" in lanes
+    assert "QUALITY_PASSES" in lanes
+    assert "passes: QUALITY_PASSES[state.quality] || 1" in lanes
+    # tier switch persists and re-loads through the same load() path
+    assert "localStorage.setItem(QUALITY_KEY" in lanes
     i18n = strip_js_comments(
         (FRONTEND / "i18n.js").read_text(encoding="utf-8"))
     for key in ("qualityFast", "qualityBalanced", "qualityBest",
                 "qualityTip"):
         assert i18n.count(f"{key}:") >= 2
+    assert i18n.count("lanesSeparating:") >= 2
+    assert "{passes}" in i18n  # both dicts carry the pass count
 
 
 # --------------------------------------------------------- note merging

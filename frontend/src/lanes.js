@@ -110,6 +110,10 @@ const QUALITY_LABEL_KEYS = {
   balanced: 'qualityBalanced',
   best: 'qualityBest',
 };
+/** Passes per tier (shifts + 1): the progress denominator is chunks x
+ *  passes server-side, and the status line names the pass count so the
+ *  scaling is visible while a tier runs (3.10.1 D3). */
+const QUALITY_PASSES = { fast: 1, balanced: 2, best: 3 };
 const QUALITY_KEY = 'keyprism-quality';
 
 /** LOD waveforms (Phase 3.9): windows at or below this span switch from
@@ -761,7 +765,10 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
         );
       } else {
         setStatus(
-          t('lanesSeparating', { pct: Math.round((tb.progress || 0) * 100) }),
+          t('lanesSeparating', {
+            pct: Math.round((tb.progress || 0) * 100),
+            passes: QUALITY_PASSES[state.quality] || 1,
+          }),
           true
         );
       }

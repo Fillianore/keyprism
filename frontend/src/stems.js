@@ -44,6 +44,21 @@ const START_LEAD = 0.06; // keep identical to player.js START_LEAD
 const METHODS = ['combined', 'hpss', 'rpca'];
 const POLL_MS = 700;
 
+/** Classic-handoff entry point (3.10.1 D1), registered by initStems and
+ *  dispatched by openWithMethod below — initStems may run before a
+ *  classic handoff is ever requested, and the closure it registers owns
+ *  the toggle/state/load bindings. */
+let classicEntry = null;
+
+/** Programmatic entry for the AI Separation panel's method dropdown:
+ *  reveal the classic stems panel (toggle visual state synced) and load
+ *  the requested classic method (hpss/rpca/combined). No classic
+ *  renderer is forked into lanes.js — this stays the ONE classic entry
+ *  point. A no-op until initStems has run (static mode / early calls). */
+export function openWithMethod(method) {
+  if (classicEntry) classicEntry(method);
+}
+
 /** Fixed stem contract per method (mirrors keyprism.stems.STEM_SPECS —
  *  the frontend never reads Python data). The /api/stems response MUST
  *  match EXACTLY this list, in this order, for every file length: a
@@ -364,13 +379,10 @@ export function initStems({ data, player, apiBase }) {
     load(state.method);
   }
 
-  /** Programmatic entry (3.10.1): the AI Separation panel's method
-   *  dropdown lists the FULL backend registry and hands classic
-   *  variants (hpss/rpca/combined) over here — reveal the panel (with
-   *  the toggle's visual state synced) and load the requested method.
-   *  No classic renderer is forked into lanes.js; the panels keep their
-   *  own pipelines and this stays the one classic entry point. */
-  export function openWithMethod(method) {
+  // 3.10.1 D1: the classic handoff entry the AI Separation panel's
+  // method dropdown calls (registered by initStems below — the toggle,
+  // state and load live in this init closure)
+  classicEntry = (method) => {
     const onBtn = toggle.querySelector('button[data-stems="on"]');
     if (!state.enabled) {
       toggle
@@ -380,7 +392,7 @@ export function initStems({ data, player, apiBase }) {
     } else if (method !== state.method && !state.loading) {
       load(method);
     }
-  }
+  };
 
   function disable() {
     state.enabled = false;

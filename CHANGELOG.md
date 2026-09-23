@@ -50,6 +50,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- 3.10.1 hotfix — dead dropdowns + 6-stem UI plumbing:
+  - The method/quality dropdowns in BOTH separation panels came up
+    permanently disabled: the post-load re-render ran while the loading
+    flag was still set (cleared only in `finally`, after the render),
+    and the selects are built with `disabled = state.loading` — so
+    demucs_6 was unreachable and every click died. Latent since 3.8;
+    the loading flag is now cleared BEFORE the final render on the
+    success and error paths of both panels (the 3.9 layer compositor
+    was NOT the cause: `.layer-stack` is z-auto + `pointer-events:
+    none` by design)
+  - The AI Separation panel's method dropdown exposes the FULL
+    separation registry in one place (classic hpss/rpca/combined
+    grouped, then demucs_4/demucs_6); a classic selection hands off to
+    the stems panel via the new `stems.openWithMethod()` entry point
+  - The DL progress status names the tier's pass count
+    ("{pct}% ({passes} passes)") so the chunks × passes scaling is
+    visible while a tier runs
 - DL model resolution order: the anonymous model-dir glob
   (`*.onnx`) is now consulted only AFTER the variant's auto-download —
   previously a foreign export already in the dir (e.g. a 4-stem
