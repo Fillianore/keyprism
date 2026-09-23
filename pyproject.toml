@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "keyprism"
-version = "0.6.3"
+version = "0.6.4"
 description = "KeyPrism — piano-key spectrogram player: resolve audio into a semitone-grid spectrum with synced interactive playback"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -34,6 +34,30 @@ dl = [
     "onnxruntime>=1.17",
     "basic-pitch>=0.4.0; python_version < '3.12'",
     "huggingface-hub>=0.23",
+]
+# GPU execution-provider builds (3.10): strictly optional on top of
+# [dl] — install AT MOST ONE of the onnxruntime builds (they conflict):
+#   uv sync --extra dl --extra dl-cuda       (NVIDIA CUDA)
+#   uv sync --extra dl --extra dl-directml   (Windows, any GPU)
+# A missing extra is a silent CPU fallback (dlsep.provider_chain);
+# KEYPRISM_ORT_PROVIDERS overrides the auto-detected preference chain.
+dl-cuda = [
+    "onnxruntime-gpu>=1.17",
+    # CUDA 13 runtime libraries as pip wheels — since ORT 1.23 the GPU
+    # build targets CUDA 13 and NVIDIA ships the runtime this way (short
+    # names are the CUDA-13-era packages; cuDNN kept the -cu13 suffix).
+    # They are NOT on the default dlopen search path:
+    # dlsep._preload_pip_cuda_libs() makes them loadable without
+    # LD_LIBRARY_PATH. Linux-only — Windows GPU users ride dl-directml.
+    "nvidia-cublas>=13.7; sys_platform == 'linux'",
+    "nvidia-cuda-runtime>=13.4; sys_platform == 'linux'",
+    "nvidia-cuda-nvrtc>=13.4; sys_platform == 'linux'",
+    "nvidia-cudnn-cu13>=9.10; sys_platform == 'linux'",
+    "nvidia-curand>=10.4; sys_platform == 'linux'",
+    "nvidia-cufft>=12.4; sys_platform == 'linux'",
+]
+dl-directml = [
+    "onnxruntime-directml>=1.17",
 ]
 
 [dependency-groups]

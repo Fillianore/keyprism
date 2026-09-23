@@ -9,6 +9,7 @@ same code paths.
 """
 
 import json
+import re
 import threading
 import time
 import urllib.error
@@ -271,6 +272,507 @@ def test_pad_segment_short_tail():
     assert valid3 == 0 and z.shape == (1000,)
 
 
+# ------------------------------------------------- 6-stem contract (3.10)
+
+def test_demucs_6_registry_matches_reference_export():
+    """3.10: demucs_6 resolves to the REAL 6-stem Hub export
+    (StemSplitio/htdemucs-6s-onnx — the 3.5 "none exists" conclusion was
+    wrong) and the registry mirrors its source order
+    drums/bass/other/vocals/guitar/piano, guitar BEFORE piano: the
+    separator zips model output rows with this list positionally."""
+    assert dlsep.STEM_SPECS["demucs_6"] == \
+        ("drums", "bass", "other", "vocals", "guitar", "piano")
+    spec = dlsep._VARIANTS["demucs_6"]
+    assert spec["repo"] == "StemSplitio/htdemucs-6s-onnx"
+    assert spec["file"] == "htdemucs_6s.onnx"
+    # provenance facts for the 3.11 license audit (weights stay on the
+    # Hub, never in-repo)
+    assert spec["license"] == "mit"
+    assert "StemSplitio/htdemucs-6s-onnx" in spec["license_url"]
+
+
+def test_demucs_6_separate_returns_six_registry_stems():
+    """Injected 6-row infer -> separate() keys EXACTLY the demucs_6
+    registry in order (guitar before piano)."""
+    sr = dlsep.TARGET_SR
+
+    def infer(chunk):
+        return np.stack([chunk * (i + 1) / 6.0 for i in range(6)])
+
+    out = dlsep.DemucsSeparator("demucs_6", infer=infer).separate(
+        np.zeros(int(3.0 * sr), dtype=np.float32), sr,
+        chunk_sec=1.0, overlap_sec=0.1)
+    assert list(out) == ["drums", "bass", "other", "vocals",
+                         "guitar", "piano"]
+    assert len(out) == 6
+
+
+class _FakeSession:
+    """The slice of ort.InferenceSession that _run_session/_session_io
+    use: one 'mix' [1, 2, T] input and a fixed-stem-count output."""
+
+    class _In:
+        name = "mix"
+        shape = [1, 2, "T"]
+
+    def __init__(self, stems, fail=False):
+        self._stems = stems
+        self._fail = fail
+
+    def get_inputs(self):
+        return [self._In()]
+
+    def run(self, out_names, feed):
+        if self._fail:
+            raise RuntimeError(
+                "[ONNXRuntimeError] Pad reflect pad width > input dim")
+        t = list(feed.values())[0]
+        return [np.zeros((1, self._stems, 2, t.shape[-1]),
+                         dtype=np.float32)]
+
+
+def test_zero_probe_fails_fast_on_mislabeled_export():
+    """The zero-probe contract check (segment length + stem count) is
+    kept at session load: a mislabelled 6-stem export (the smank
+    htdemucs_6s actually ships 4 sources) fails immediately with an
+    actionable message instead of failing a 40 s background job."""
+    sep = dlsep.DemucsSeparator(
+        "demucs_6", infer=lambda c: np.zeros((6, c.shape[0]),
+                                             dtype=np.float32))
+    sep._io = ("mix", 2)
+    sep._segment = dlsep.SEGMENT_SAMPLES
+
+    sep._session = _FakeSession(stems=4)  # mislabelled export
+    with pytest.raises(ValueError, match="4 个 stem"):
+        sep._probe()
+
+    sep._session = _FakeSession(stems=6, fail=True)  # wrong segment
+    with pytest.raises(ValueError, match="固定分段"):
+        sep._probe()
+
+    sep._session = _FakeSession(stems=6)  # correct export: probe passes
+    sep._probe()
+
+
+def test_demucs6_download_records_provenance(tmp_path, monkeypatch):
+    """Auto-download of the 6-stem model records provenance (repo id,
+    revision, commit, etag, license URL) into the model-cache metadata —
+    the 3.11 license audit reads this, and no weights land in-repo."""
+    monkeypatch.setattr(audio_io, "KEYPRISM_HOME", tmp_path / "home")
+    monkeypatch.setattr(dlsep, "HF_AVAILABLE", True)
+    monkeypatch.delenv("HF_ENDPOINT", raising=False)
+    monkeypatch.delenv("KEYPRISM_DEMUCS6_REPO", raising=False)
+    seen = {}
+
+    def fake_download_to(url, dest, progress=None, urlopen=None, meta=None,
+                         cancelled=None):
+        seen["url"] = url
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"FAKEONNX")
+        if meta is not None:
+            meta["etag"] = '"abc123"'
+            meta["commit"] = "49df9b6989cf2150840ea65b0bef77a2e471b678"
+        return dest
+
+    monkeypatch.setattr(dlsep, "_download_to", fake_download_to)
+    sep = dlsep.DemucsSeparator("demucs_6", infer=lambda c: c)
+    p = sep._resolve_model_file()
+    assert p.name == "htdemucs_6s.onnx"
+    assert seen["url"] == (
+        "https://huggingface.co/StemSplitio/htdemucs-6s-onnx/resolve/main/"
+        "htdemucs_6s.onnx")
+
+    body = json.loads(
+        (tmp_path / "home" / "models" / "demucs" / "provenance.json")
+        .read_text(encoding="utf-8"))
+    entry = body["htdemucs_6s.onnx"]
+    assert entry["variant"] == "demucs_6"
+    assert entry["repo"] == "StemSplitio/htdemucs-6s-onnx"
+    assert entry["revision"] == "main"
+    assert entry["commit"] == "49df9b6989cf2150840ea65b0bef77a2e471b678"
+    assert entry["license"] == "mit"
+    assert "StemSplitio/htdemucs-6s-onnx" in entry["license_url"]
+    assert entry["source"] == "auto-download"
+    assert "/StemSplitio/htdemucs-6s-onnx/resolve/main/" in entry["source_url"]
+    assert entry["bytes"] == 8
+
+    # resolving the cached file again preserves the original download
+    # facts (etag/commit/source_url) and only refreshes the timestamp
+    sep._resolve_model_file()
+    body = json.loads(
+        (tmp_path / "home" / "models" / "demucs" / "provenance.json")
+        .read_text(encoding="utf-8"))
+    again = body["htdemucs_6s.onnx"]
+    assert again["source"] == "cache"
+    assert again["commit"] == entry["commit"]
+    assert again["etag"] == entry["etag"]
+    assert again["source_url"] == entry["source_url"]
+
+
+def test_glob_fallback_cannot_hijack_variant_download(
+        tmp_path, monkeypatch):
+    """A foreign ONNX already in the model dir (e.g. a 4-stem
+    htdemucs.onnx from an earlier demucs_4 install) must NOT satisfy a
+    demucs_6 resolve: the variant download is attempted FIRST, and the
+    glob only serves as the manual/offline escape hatch."""
+    monkeypatch.setattr(audio_io, "KEYPRISM_HOME", tmp_path / "home")
+    d = tmp_path / "home" / "models" / "demucs"
+    d.mkdir(parents=True)
+    (d / "htdemucs.onnx").write_bytes(b"OLD4STEM")
+
+    def fake_download_to(url, dest, progress=None, urlopen=None, meta=None,
+                         cancelled=None):
+        seen["url"] = url
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"NEW6STEM")
+        return dest
+
+    seen = {}
+    monkeypatch.setattr(dlsep, "HF_AVAILABLE", True)
+    monkeypatch.setattr(dlsep, "_download_to", fake_download_to)
+    sep = dlsep.DemucsSeparator("demucs_6", infer=lambda c: c)
+    p = sep._resolve_model_file()
+    assert p.read_bytes() == b"NEW6STEM"          # the real model wins
+    assert "StemSplitio/htdemucs-6s-onnx" in seen["url"]
+
+    # offline (no huggingface_hub): the glob escape hatch still serves
+    monkeypatch.setattr(dlsep, "HF_AVAILABLE", False)
+    (d / "htdemucs_6s.onnx").unlink(missing_ok=True)
+    sep2 = dlsep.DemucsSeparator("demucs_6", infer=lambda c: c)
+    assert sep2._resolve_model_file().read_bytes() == b"OLD4STEM"
+
+
+def test_lanes_demucs_6_six_lane_contract():
+    """Frontend source contract: demucs_6 renders SIX lanes (registry
+    mirror in export source order) and the poly Notes chip stays on the
+    poly-capable lanes (piano/guitar/other)."""
+    lanes = strip_js_comments(
+        (FRONTEND / "lanes.js").read_text(encoding="utf-8"))
+    assert "'drums', 'bass', 'other', 'vocals', 'guitar', 'piano'" in lanes
+    assert "POLY_LANES.has(lane.key)" in lanes
+    # one lane row per registry stem (the render loop is registry-driven)
+    assert "for (const lane of state.lanes) buildLaneRow" in lanes
+
+
+def test_dropdowns_not_born_disabled_contract():
+    """3.10.1 D2 root cause (confirmed): the post-load re-render ran
+    while the loading flag was still set — the flag was cleared only in
+    finally, AFTER renderShell/renderPanel had rebuilt the method and
+    quality selects with disabled = state.loading — so every dropdown
+    came up permanently dead (listeners bound, but a disabled <select>
+    never fires and the handlers guard on disabled). Hypothesis A
+    (z-index/pointer-events interception) was disproven: .layer-stack
+    already sits at z-auto with pointer-events: none. Contract: the
+    loading flag is cleared BEFORE the final render on BOTH the success
+    and the error paths of both panels, and the layer-stack pass-through
+    stays pinned."""
+    for name, render in (("lanes.js", "renderShell"),
+                         ("stems.js", "renderPanel")):
+        src = strip_js_comments(
+            (FRONTEND / name).read_text(encoding="utf-8"))
+        hits = re.findall(
+            r"state\.loading = false;[\s\S]{0,200}?" + render + r"\(\);",
+            src)
+        assert len(hits) >= 2, \
+            f"{name}: loading flag not cleared before {render} on both paths"
+    css = (FRONTEND / "style.css").read_text(encoding="utf-8")
+    stack = css[css.index(".layer-stack {"):]
+    stack = stack[:stack.index("}")]
+    assert "position: absolute" in stack
+    assert "pointer-events: none" in stack
+    assert "z-index" not in stack  # z-auto: the 3.9.1 blend contract
+
+
+def test_control_strip_inline_contract():
+    """3.10.3/3.10.4: the Mix row's right cell is the control strip —
+    method/quality/device selects + provider badge + status live INLINE
+    in .mix-controls (flex row, wrap, 28px selects in the house .ctrl
+    chrome), the Mix cell is NOT a lane window (no .lane-scope, no
+    canvas), and the Mix row renders in every state so the controls stay
+    reachable while a task runs."""
+    lanes = strip_js_comments(
+        (FRONTEND / "lanes.js").read_text(encoding="utf-8"))
+    assert "mix.scope.className = 'mix-controls'" in lanes
+    assert "mix.scope.append(title, methodSel, qualitySel, deviceSel" in lanes
+    assert "lane-scope-empty" not in lanes
+    # the strip exists BEFORE the ready gate: no `if (!state.ready)
+    # return` may precede the mix-row construction in renderShell
+    shell = lanes[lanes.index("function renderShell"):]
+    shell = shell[:shell.index("for (const lane of state.lanes)")]
+    assert "if (!state.ready) return" not in shell
+    assert "lane-scope'" not in shell  # the Mix cell is not a lane window
+    css = (FRONTEND / "style.css").read_text(encoding="utf-8")
+    strip = css[css.index(".mix-controls {"):]
+    strip = strip[:strip.index("}")]
+    assert "flex-direction: row" in strip and "flex-wrap: wrap" in strip
+    assert "gap: 8px" in strip and "align-items: center" in strip
+    assert ".mix-controls select" in css
+    # 3.10.4 D1: the strip reuses the top-bar .ctrl select chrome
+    assert ".ctrl select,\n.mix-controls select {" in css
+    assert ".ctrl select:hover,\n.mix-controls select:hover {" in css
+    # stop/restart reuse the M/S icon-button chrome (26px, champagne)
+    assert "stopBtn.className = 'stem-btn'" in lanes
+    assert "restartBtn.className = 'stem-btn'" in lanes
+    assert "lane-scope-empty" not in css
+
+
+# --------------------------------------- cooperative cancel (3.10.3)
+
+def test_download_to_cancelled_removes_part(tmp_path):
+    """The download loop honours the cooperative cancel probe per byte
+    chunk: TaskCancelled is raised, the .part file is removed and no
+    destination ever appears (retry cannot serve a truncated ONNX)."""
+    dest = tmp_path / "models" / "demucs" / "htdemucs.onnx"
+    cell = {"n": 0}
+
+    def cancelled():  # flips after the first streamed chunk
+        cell["n"] += 1
+        return cell["n"] > 1
+
+    with pytest.raises(dlsep.TaskCancelled):
+        dlsep._download_to(
+            "https://example.test/x.onnx", dest,
+            urlopen=lambda req, timeout: _FakeResp([b"A" * 50] * 4, 200),
+            cancelled=cancelled)
+    assert not dest.exists()
+    assert not dest.with_name(dest.name + ".part").exists()
+
+
+def test_ola_cancelled_per_chunk_boundary():
+    """Cancel granularity in the inference loop: the probe is checked
+    BEFORE each chunk, so an already-started chunk runs to completion
+    and the abort lands at the next chunk boundary."""
+    sr = 8000
+    x = np.zeros(35 * sr, dtype=np.float32)  # 4 chunks @ 10s/1s
+    calls = {"n": 0}
+
+    def infer(chunk):
+        calls["n"] += 1
+        return np.stack([chunk, chunk])[0:2] * 1.0
+
+    state = {"cancel_after": 2}
+
+    def cancelled():
+        return calls["n"] >= state["cancel_after"]
+
+    with pytest.raises(dlsep.TaskCancelled):
+        dlsep.ola_separate(x, infer, chunk_sec=10.0, overlap_sec=1.0,
+                           sr=sr, cancelled=cancelled)
+    assert calls["n"] == 2  # chunk 3 never started
+
+
+def test_separate_cancelled_per_pass_boundary():
+    """With shifts, the cancel probe is additionally checked per pass:
+    the abort lands at the next pass boundary inside the current chunk
+    (before its second pass runs)."""
+    sr = dlsep.TARGET_SR
+    x = np.zeros(int(2.0 * sr), dtype=np.float32)  # 1 chunk
+    calls = {"pass": 0}
+
+    def infer(chunk):
+        calls["pass"] += 1
+        return np.stack([chunk] * 4)
+
+    sep = dlsep.DemucsSeparator("demucs_4", infer=infer)
+    with pytest.raises(dlsep.TaskCancelled):
+        sep.separate(x, sr, chunk_sec=1.0, overlap_sec=0.1, shifts=1,
+                     cancelled=lambda: calls["pass"] >= 1)
+    assert calls["pass"] == 1  # pass 0 done, pass 1 never started
+
+
+class _CancellingSeparator:
+    """Fake separator that honours the cooperative cancel probe, for
+    the end-to-end stop flow through the task registry."""
+
+    def __init__(self, variant, download_progress=None,
+                 device_providers=None, cancelled=None):
+        self.variant = variant
+        self.stems = dlsep.STEM_SPECS[variant]
+        self._cancelled = cancelled
+
+    def separate(self, pcm, sr, chunk_sec=10.0, overlap_sec=1.0,
+                 shifts=0, progress=None, cancelled=None):
+        check = cancelled or self._cancelled
+        for i in range(100):
+            if check and check():
+                raise dlsep.TaskCancelled(f"cancelled at step {i}")
+            time.sleep(0.02)
+            if progress is not None:
+                progress(i + 1, 100)
+        return {k: np.zeros(10) for k in self.stems}
+
+
+def test_task_cancel_endpoint_and_no_cache(srv, monkeypatch):
+    """POST /api/task/{id}/cancel flips the flag; the job aborts at the
+    next boundary, the task reports status "cancelled", nothing is
+    written to the stem cache, and a second (already-finished) cancel is
+    a harmless no-op. Unknown ids 404."""
+    monkeypatch.setattr(server_mod, "DL_AVAILABLE", True)
+    monkeypatch.setattr(server_mod, "POLY_AVAILABLE", True)
+    monkeypatch.setattr(dlsep, "get_separator", _CancellingSeparator)
+
+    code, body = post(f"{srv['base']}/api/stems?method=demucs_4")
+    assert code == 200 and body["status"] == "started"
+    task_id = body["task_id"]
+    wait_running = 5.0
+    deadline = time.time() + wait_running
+    while time.time() < deadline:  # wait until the job is in its loop
+        _, tb = get(f"{srv['base']}/api/task/{task_id}")
+        if tb["progress"] > 0:
+            break
+        time.sleep(0.02)
+
+    code, body = post(f"{srv['base']}/api/task/{task_id}/cancel")
+    assert code == 200 and body["cancelling"] is True
+
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        _, tb = get(f"{srv['base']}/api/task/{task_id}")
+        if tb["status"] == "cancelled":
+            break
+        time.sleep(0.02)
+    assert tb["status"] == "cancelled"
+    assert "error" not in tb or not tb.get("error")
+    # no stem cache was written
+    assert not list((audio_io.KEYPRISM_HOME / "cache").rglob("dl_v1"))
+
+    # cancelling again is a no-op answered with the final status
+    code, body = post(f"{srv['base']}/api/task/{task_id}/cancel")
+    assert code == 200 and body["status"] == "cancelled"
+
+    # unknown task id: 404
+    code, body = post(f"{srv['base']}/api/task/deadbeef/cancel")
+    assert code == 404
+
+
+def test_force_recompute_bypasses_cache(srv, monkeypatch):
+    """POST /api/stems&force=1 recomputes even when a valid cache
+    exists (the restart button's contract); write_stems atomically
+    replaces the entry and the task completes with the fresh stems."""
+    monkeypatch.setattr(server_mod, "DL_AVAILABLE", True)
+    monkeypatch.setattr(server_mod, "POLY_AVAILABLE", True)
+    monkeypatch.setattr(dlsep, "get_separator", FakeSeparator)
+    FakeSeparator.shifts_seen.clear()
+    FakeSeparator.devices_seen.clear()
+
+    code, body = post(f"{srv['base']}/api/stems?method=demucs_4")
+    assert code == 200
+    wait_task(srv["base"], body["task_id"])
+
+    # without force: cache hit, no new task
+    code, body = post(f"{srv['base']}/api/stems?method=demucs_4")
+    assert code == 200 and body.get("cached") is True
+
+    # with force=1: recompute (new task), cache atomically replaced
+    code, body = post(f"{srv['base']}/api/stems?method=demucs_4&force=1")
+    assert code == 200 and body.get("cached") is None
+    assert body["status"] == "started"
+    done = wait_task(srv["base"], body["task_id"])
+    assert done["status"] == "done"
+    code, got = get(f"{srv['base']}/api/stems?method=demucs_4")
+    assert code == 200 and got["cached"] is True
+
+    # force=0 / force=false do NOT bypass
+    code, body = post(f"{srv['base']}/api/stems?method=demucs_4&force=0")
+    assert code == 200 and body.get("cached") is True
+
+
+def test_stop_restart_frontend_contract():
+    """3.10.3 D2 frontend contract: stop/restart buttons live in the
+    control strip with the full state machine (stop enabled only while
+    a task runs; restart cancels then re-submits with force=1); the
+    poll unwinds cancelled tasks to idle; i18n in both dicts."""
+    lanes = strip_js_comments(
+        (FRONTEND / "lanes.js").read_text(encoding="utf-8"))
+    assert "stopSeparation" in lanes and "restartSeparation" in lanes
+    assert "/api/task/${state.taskId}/cancel" in lanes
+    assert "paintStripButtons" in lanes
+    assert "'&force=1'" in lanes
+    assert "state.abortLoad" in lanes
+    assert "'cancelled'" in lanes  # poll handles the server status
+    assert "e.cancelled" in lanes  # idle unwind, no failure text
+    i18n = strip_js_comments(
+        (FRONTEND / "i18n.js").read_text(encoding="utf-8"))
+    for key in ("stopSep", "stopTip", "restartSep", "restartTip",
+                "lanesCancelling"):
+        assert i18n.count(f"{key}:") >= 2
+
+
+def test_run_button_no_auto_analysis_contract():
+    """3.10.4 D5: an explicit ▶ Run button submits the separation;
+    opening the panel or changing method/quality/device NEVER triggers
+    analysis (enable() renders idle, parameter handlers only persist
+    state); Restart = cancel-if-running + Run with force=1; the strip
+    state machine is idle→Run, running→Stop, done/error/cancelled→
+    Run+Restart."""
+    lanes = strip_js_comments(
+        (FRONTEND / "lanes.js").read_text(encoding="utf-8"))
+    assert "runBtn.className = 'stem-btn'" in lanes
+    assert "runSeparation" not in lanes or "load(state.method, false)" in \
+        lanes
+    # enable() is IDLE: no load() call on panel entry
+    enable_src = lanes[lanes.index("function enable()"):]
+    enable_src = enable_src[:enable_src.index("function disable()")]
+    assert "load(" not in enable_src
+    assert "t('lanesIdle')" in enable_src
+    # parameter handlers persist without loading
+    method_blk = lanes[lanes.index("methodSel.addEventListener"):]
+    method_blk = method_blk[:method_blk.index("qualitySel.addEventListener")]
+    assert "state.method = m;" in method_blk and "load(m)" not in method_blk
+    qual_blk = lanes[lanes.index("qualitySel.addEventListener"):]
+    qual_blk = qual_blk[:qual_blk.index("const gpuAvailable")]
+    assert "load(" not in qual_blk
+    # the state machine: champagne .active marks the in-flight run
+    assert "state.runBtn.classList.toggle('active', active)" in lanes
+    assert "state.restartBtn.disabled = !dlOk || state.loading || active ||" \
+        in lanes
+    i18n = strip_js_comments(
+        (FRONTEND / "i18n.js").read_text(encoding="utf-8"))
+    for key in ("runSep", "runTip", "lanesIdle"):
+        assert i18n.count(f"{key}:") >= 2
+
+
+def test_master_toggle_collapse_contract():
+    """3.10.4 D6: the master AI Separation toggle off collapses the
+    panel (disable() sets panel.hidden + teardownLanes which stops all
+    stem sources) — and the global [hidden] rule makes the attribute
+    actually win over author display rules (the .lanes-panel flex rule
+    used to defeat it, so the panel never collapsed)."""
+    lanes = strip_js_comments(
+        (FRONTEND / "lanes.js").read_text(encoding="utf-8"))
+    disable_src = lanes[lanes.index("function disable()"):]
+    disable_src = disable_src[:disable_src.index("panel.hidden = true") + 60]
+    assert "panel.hidden = true" in disable_src
+    assert "teardownLanes()" in disable_src
+    css = (FRONTEND / "style.css").read_text(encoding="utf-8")
+    assert "[hidden] {" in css and "display: none !important;" in css
+
+
+def test_unified_method_selector_contract():
+    """3.10.1 D1: the AI Separation panel's method dropdown exposes the
+    FULL backend registry — classic hpss/rpca/combined (grouped) plus
+    demucs_4/demucs_6 — and a classic selection hands off to the stems
+    panel (openWithMethod) instead of forking a classic renderer into
+    the lanes pipeline. demucs_6 is POSTed explicitly (never rewritten
+    to demucs_4)."""
+    lanes = strip_js_comments(
+        (FRONTEND / "lanes.js").read_text(encoding="utf-8"))
+    assert "['hpss', 'rpca', 'combined']" in lanes
+    assert "demucs_6: ['drums', 'bass', 'other', 'vocals', 'guitar', 'piano']" \
+        in lanes
+    assert "optgroup" in lanes
+    assert "openWithMethod" in lanes
+    assert "`${apiBase}/api/stems?method=${method}&quality=${state.quality}`" \
+        in lanes
+    stems = strip_js_comments(
+        (FRONTEND / "stems.js").read_text(encoding="utf-8"))
+    assert "export function openWithMethod" in stems
+    i18n = strip_js_comments(
+        (FRONTEND / "i18n.js").read_text(encoding="utf-8"))
+    for key in ("methodClassic", "methodAI"):
+        assert i18n.count(f"{key}:") >= 2
+
+
 # ------------------------------------------------- model download (3.8)
 
 class _FakeResp:
@@ -348,12 +850,13 @@ def test_task_reports_downloading_phase(srv, monkeypatch):
     release = threading.Event()
 
     class DownloadingSeparator:
-        def __init__(self, variant, download_progress=None):
+        def __init__(self, variant, download_progress=None,
+                     device_providers=None, cancelled=None):
             self.stems = dlsep.STEM_SPECS[variant]
             self._dl = download_progress
 
         def separate(self, pcm, sr, chunk_sec=10.0, overlap_sec=1.0,
-                     progress=None):
+                     shifts=0, progress=None, cancelled=None):
             if self._dl is not None:
                 self._dl(1_000_000, 4_000_000, 2.5)
                 release.wait(timeout=5.0)
@@ -387,6 +890,706 @@ def test_task_reports_downloading_phase(srv, monkeypatch):
     done = wait_task(srv["base"], body["task_id"])
     assert done["status"] == "done"
     assert "bytes_done" not in done  # download fields leave with the phase
+
+
+# -------------------------------------------- execution providers (3.10)
+
+def test_provider_chain_prefers_gpu(monkeypatch):
+    """Probe order CUDA -> DirectML -> CoreML, and CPUExecutionProvider
+    ALWAYS last (3.10.2 D1: with CPU in the list ORT runs ops that lack
+    a GPU kernel on CPU instead of failing the session with CUDA error
+    9 / NOT_IMPLEMENTED). A plain [dl] install (CPU-only build)
+    silently falls back to CPU, never an error."""
+    monkeypatch.delenv("KEYPRISM_ORT_PROVIDERS", raising=False)
+    pc = dlsep.provider_chain
+    assert pc(available=["CUDAExecutionProvider",
+                         "CPUExecutionProvider"]) == \
+        ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    assert pc(available=["DmlExecutionProvider",
+                         "CPUExecutionProvider"]) == \
+        ["DmlExecutionProvider", "CPUExecutionProvider"]
+    assert pc(available=["CoreMLExecutionProvider",
+                         "CPUExecutionProvider"]) == \
+        ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+    assert pc(available=["CPUExecutionProvider"]) == ["CPUExecutionProvider"]
+    assert pc(available=[]) == ["CPUExecutionProvider"]
+    # CPU stays last even when the build does not list it (every real
+    # build ships it; this pins the ALWAYS-appended contract)
+    assert pc(available=["CUDAExecutionProvider"]) == \
+        ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    # several GPUs compiled in: the first entry of the preference wins
+    assert pc(available=["CoreMLExecutionProvider",
+                         "CUDAExecutionProvider",
+                         "CPUExecutionProvider"])[0] == \
+        "CUDAExecutionProvider"
+
+
+def test_provider_chain_env_override(monkeypatch):
+    """KEYPRISM_ORT_PROVIDERS="CUDA,CPU" overrides the preference
+    (comma list, order = preference, aliases accepted); EPs the build
+    lacks are silently dropped."""
+    av = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    monkeypatch.setenv("KEYPRISM_ORT_PROVIDERS", "CUDA,CPU")
+    assert dlsep.provider_chain(available=av) == \
+        ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    # order = preference: CPU first is honored verbatim
+    monkeypatch.setenv("KEYPRISM_ORT_PROVIDERS", "CPU,CUDA")
+    assert dlsep.provider_chain(available=av) == \
+        ["CPUExecutionProvider", "CUDAExecutionProvider"]
+    # requested-but-missing EP: silently dropped -> CPU
+    monkeypatch.setenv("KEYPRISM_ORT_PROVIDERS", "CUDA")
+    assert dlsep.provider_chain(
+        available=["CPUExecutionProvider"]) == ["CPUExecutionProvider"]
+    # short alias
+    monkeypatch.setenv("KEYPRISM_ORT_PROVIDERS", "DirectML")
+    assert dlsep.provider_chain(
+        available=["DmlExecutionProvider", "CPUExecutionProvider"]) == \
+        ["DmlExecutionProvider", "CPUExecutionProvider"]
+    # override= beats the env var (test seam)
+    monkeypatch.setenv("KEYPRISM_ORT_PROVIDERS", "CUDA")
+    assert dlsep.provider_chain(
+        available=["CoreMLExecutionProvider", "CPUExecutionProvider"],
+        override="coreml") == \
+        ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+    # the override replaces the default probe entirely: an unlisted-but-
+    # available GPU is NOT picked (user preference wins); CPU appended
+    monkeypatch.setenv("KEYPRISM_ORT_PROVIDERS", "CUDA,DirectML")
+    assert dlsep.provider_chain(
+        available=["CoreMLExecutionProvider",
+                   "CPUExecutionProvider"]) == ["CPUExecutionProvider"]
+    # an all-unknown override degrades to the mandatory CPU tail
+    assert dlsep.provider_chain(
+        available=["CoreMLExecutionProvider"],
+        override="CUDA") == ["CPUExecutionProvider"]
+
+
+# --------------------------------- pip CUDA wheel preload gating (3.10.4)
+
+class _PreloadSpyOrt:
+    """Minimal ort stand-in recording preload_dlls() calls."""
+
+    def __init__(self):
+        self.preload_calls = 0
+
+    def preload_dlls(self):
+        self.preload_calls += 1
+
+
+def _arm_preload(monkeypatch, ort_fake):
+    """Fresh once-per-process flag + ORT present for the gating tests;
+    the environment probes (_soname_loadable / _cuda13_driver_ok) stay
+    REAL unless a test monkeypatches them, so these run identically in
+    both the [dl] and [dl-cuda] environments."""
+    monkeypatch.setattr(dlsep, "_PIP_CUDA_PRELOADED", False)
+    monkeypatch.setattr(dlsep, "ORT_AVAILABLE", True)
+    monkeypatch.setattr(dlsep, "ort", ort_fake)
+
+
+def test_preload_skipped_when_system_cuda_complete(monkeypatch):
+    """A complete system CUDA 13 + cuDNN 9 install wins: every required
+    soname already resolves → preload_dlls is NEVER called, so the pip
+    wheels can never shadow the system environment."""
+    fake = _PreloadSpyOrt()
+    _arm_preload(monkeypatch, fake)
+    monkeypatch.setattr(dlsep, "_soname_loadable", lambda s: True)
+    monkeypatch.setattr(dlsep, "_cuda13_driver_ok", lambda: True)
+    dlsep._preload_pip_cuda_libs()
+    assert fake.preload_calls == 0
+
+
+def test_preload_skipped_without_cuda13_driver(monkeypatch):
+    """Gaps in the sonames but no usable CUDA-13 driver (no NVIDIA
+    driver / too old / WSL shim absent): the cu13 wheels would be dead
+    weight — the environment is left completely untouched."""
+    fake = _PreloadSpyOrt()
+    _arm_preload(monkeypatch, fake)
+    monkeypatch.setattr(dlsep, "_soname_loadable", lambda s: False)
+    monkeypatch.setattr(dlsep, "_cuda13_driver_ok", lambda: False)
+    dlsep._preload_pip_cuda_libs()
+    assert fake.preload_calls == 0
+
+
+def test_preload_fills_gaps_once(monkeypatch):
+    """Missing sonames + CUDA-13-capable driver → preload_dlls runs, and
+    the once-per-process flag keeps it at exactly one call even across
+    multiple session builds."""
+    fake = _PreloadSpyOrt()
+    _arm_preload(monkeypatch, fake)
+    monkeypatch.setattr(dlsep, "_soname_loadable", lambda s: False)
+    monkeypatch.setattr(dlsep, "_cuda13_driver_ok", lambda: True)
+    dlsep._preload_pip_cuda_libs()
+    dlsep._preload_pip_cuda_libs()
+    assert fake.preload_calls == 1
+
+
+def test_preload_tolerates_older_ort(monkeypatch):
+    """pre-1.21 ORT (no preload_dlls attribute): the gate degrades to a
+    no-op instead of raising — same contract as the rest of dlsep."""
+    _arm_preload(monkeypatch, object())  # ort without preload_dlls
+    monkeypatch.setattr(dlsep, "_soname_loadable", lambda s: False)
+    monkeypatch.setattr(dlsep, "_cuda13_driver_ok", lambda: True)
+    dlsep._preload_pip_cuda_libs()  # must not raise
+
+
+class _FakeOrt:
+    """Stands in for the onnxruntime module inside _load_session:
+    compiled-in provider list (get_available_providers) vs the ACTIVE
+    readback (session.get_providers()), plus an optional failure set
+    simulating a GPU EP that is compiled in but unusable."""
+
+    class GraphOptimizationLevel:
+        ORT_ENABLE_ALL = "all"
+
+    class SessionOptions:
+        def __init__(self):
+            self.graph_optimization_level = None
+            self.intra_op_num_threads = 0
+            self.inter_op_num_threads = 0
+
+    def __init__(self, active, available=None, fail_on=None):
+        self._active = list(active)
+        self._available = list(available if available is not None
+                               else active)
+        self._fail_on = set(fail_on or ())
+        self.requests = []
+
+    def get_available_providers(self):
+        return list(self._available)
+
+    def InferenceSession(self, path, sess_options=None, providers=None):
+        self.requests.append(list(providers or []))
+        if set(providers or []) & self._fail_on:
+            raise RuntimeError("CUDA error: driver/runtime mismatch")
+
+        class _Sess:
+            def get_providers(inner_self):  # noqa: N805
+                return list(self._active)
+
+        return _Sess()
+
+
+def test_load_session_selects_providers_and_reads_back_active(
+        tmp_path, monkeypatch, capsys):
+    """The session is created with the probed chain and the ACTIVE
+    provider list (session.get_providers() readback — ops may fall back
+    to CPU inside the graph) is recorded for /api/ping; the requested vs
+    active chain is logged so a device switch is observable (3.10.4
+    D4)."""
+    fake = _FakeOrt(active=["CUDAExecutionProvider",
+                            "CPUExecutionProvider"],
+                    available=["CUDAExecutionProvider",
+                               "CPUExecutionProvider"])
+    monkeypatch.setattr(dlsep, "ort", fake)
+    # same convention as the rest of the suite: the availability flag is
+    # monkeypatched explicitly so this runs in BOTH environments
+    monkeypatch.setattr(dlsep, "ORT_AVAILABLE", True)
+    monkeypatch.setattr(dlsep, "_ACTIVE_PROVIDERS", [])
+    monkeypatch.delenv("KEYPRISM_ORT_PROVIDERS", raising=False)
+    model = tmp_path / "m.onnx"
+    model.write_bytes(b"x")
+    dlsep._load_session(model, threads=0)
+    assert fake.requests == \
+        [["CUDAExecutionProvider", "CPUExecutionProvider"]]
+    assert dlsep.active_providers() == \
+        ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    out = capsys.readouterr().out
+    assert "requested" in out or "请求" in out
+    assert "CUDAExecutionProvider" in out
+
+
+def test_load_session_silent_cpu_fallback_when_gpu_unusable(
+        tmp_path, monkeypatch):
+    """A GPU EP that is compiled in but fails at session creation
+    (driver/runtime mismatch) retries CPU-only — never a crash — and
+    the active readback then reports plain CPU."""
+    fake = _FakeOrt(active=["CPUExecutionProvider"],
+                    available=["CUDAExecutionProvider",
+                               "CPUExecutionProvider"],
+                    fail_on={"CUDAExecutionProvider"})
+    monkeypatch.setattr(dlsep, "ort", fake)
+    monkeypatch.setattr(dlsep, "ORT_AVAILABLE", True)
+    monkeypatch.setattr(dlsep, "_ACTIVE_PROVIDERS", [])
+    monkeypatch.delenv("KEYPRISM_ORT_PROVIDERS", raising=False)
+    model = tmp_path / "m2.onnx"
+    model.write_bytes(b"x")
+    dlsep._load_session(model, threads=0)  # must not raise
+    assert fake.requests == [
+        ["CUDAExecutionProvider", "CPUExecutionProvider"],
+        ["CPUExecutionProvider"],
+    ]
+    assert dlsep.active_providers() == ["CPUExecutionProvider"]
+
+    # a CPU-only request that still fails is a real error (re-raised)
+    fake2 = _FakeOrt(active=[], available=["CPUExecutionProvider"],
+                     fail_on={"CPUExecutionProvider"})
+    monkeypatch.setattr(dlsep, "ort", fake2)
+    model3 = tmp_path / "m3.onnx"
+    model3.write_bytes(b"x")
+    with pytest.raises(RuntimeError):
+        dlsep._load_session(model3, threads=0)
+    assert fake2.requests == [["CPUExecutionProvider"]]
+
+
+def test_stop_cancel_chain_contract():
+    """3.10.4 D3 regression contract: the FULL stop chain is present —
+    button → POST /api/task/{id}/cancel → (server flag → boundary abort
+    → cancelled status, covered by test_task_cancel_endpoint_and_no_cache)
+    → poll unwind to idle. The traced breakpoint (an enabled Stop click
+    in the window before the task id arrives silently no-op'd) is closed
+    by the stopRequested latch honored in requestStems."""
+    lanes = strip_js_comments(
+        (FRONTEND / "lanes.js").read_text(encoding="utf-8"))
+    assert "state.stopRequested" in lanes
+    assert "stopRequested = true" in lanes
+    # the latch is honored the moment the task id arrives
+    latch = lanes[lanes.index("state.taskId = body.task_id"):]
+    latch = latch[:latch.index("const taskUrl")]
+    assert "state.stopRequested" in latch and "cancel" in latch
+    # the poll unwinds a cancelled task to idle with no failure text
+    assert "tb.status === 'cancelled'" in lanes
+    assert "e.cancelled" in lanes
+
+
+def test_session_key_includes_providers(tmp_path, monkeypatch):
+    """3.10.2: the session singleton key includes the provider list, so
+    a device switch (auto vs forced CPU) cannot silently reuse a session
+    built for another chain; force_reload evicts every session of the
+    path (the runtime retry path)."""
+    fake = _FakeOrt(active=["CPUExecutionProvider"],
+                    available=["CUDAExecutionProvider",
+                               "CPUExecutionProvider"])
+    monkeypatch.setattr(dlsep, "ort", fake)
+    monkeypatch.setattr(dlsep, "ORT_AVAILABLE", True)
+    monkeypatch.setattr(dlsep, "_ACTIVE_PROVIDERS", [])
+    monkeypatch.delenv("KEYPRISM_ORT_PROVIDERS", raising=False)
+    model = tmp_path / "m.onnx"
+    model.write_bytes(b"x")
+    s1 = dlsep._load_session(model, threads=0,
+                             providers=["CUDAExecutionProvider",
+                                        "CPUExecutionProvider"])
+    n_after_first = len(fake.requests)
+    s2 = dlsep._load_session(model, threads=0,
+                             providers=["CPUExecutionProvider"])
+    assert s2 is not s1                       # different chain: new session
+    assert len(fake.requests) == n_after_first + 1
+    assert fake.requests[-1] == ["CPUExecutionProvider"]
+    s3 = dlsep._load_session(model, threads=0,
+                             providers=["CPUExecutionProvider"])
+    assert s3 is s2                           # same chain: singleton hit
+    s4 = dlsep._load_session(model, threads=0,
+                             providers=["CPUExecutionProvider"],
+                             force_reload=True)
+    assert s4 is not s2                       # evicted + rebuilt
+    assert fake.requests[-2] == ["CPUExecutionProvider"]
+
+
+def test_run_session_cuda_error9_falls_back_to_cpu(tmp_path, monkeypatch):
+    """3.10.2 D1 centerpiece: a GPU session that loads fine but fails on
+    FIRST INFERENCE (CUDA error 9 / NOT_IMPLEMENTED on a Conv node) is
+    evicted, rebuilt pure-CPU, and the same call retried once — the
+    separation completes instead of crashing. A pure-CPU session has no
+    fallback left: its errors propagate."""
+    cuda_err = RuntimeError(
+        "CUDA_ERROR 9: NOT_IMPLEMENTED kernel 'Conv' not implemented on "
+        "the CUDAExecutionProvider")
+    attempts = {"n": 0}
+
+    def fake_load(path, threads=None, providers=None, force_reload=False):
+        attempts["n"] += 1
+        assert list(providers) == ["CPUExecutionProvider"]
+        assert force_reload is True
+        return _FakeSession(stems=6)   # healthy CPU session (6 stems)
+
+    monkeypatch.setattr(dlsep, "_load_session", fake_load)
+
+    class _BrokenThenGood:
+        """Stands in for the pre-built GPU session."""
+
+        def get_inputs(self):
+            return [_FakeSession._In()]
+
+    gpu_sess = _BrokenThenGood()
+
+    sep = dlsep.DemucsSeparator(
+        "demucs_6", infer=lambda c: np.zeros((6, c.shape[0]),
+                                             dtype=np.float32))
+    sep._session = gpu_sess
+    sep._io = ("mix", 2)
+    sep._segment = dlsep.SEGMENT_SAMPLES
+    sep._path = tmp_path / "m.onnx"
+    sep._path.write_bytes(b"x")
+    sep._threads = 0
+    sep._session_providers = ["CUDAExecutionProvider",
+                              "CPUExecutionProvider"]
+
+    def run_raises(out_names, feed):
+        raise cuda_err
+
+    gpu_sess.run = run_raises
+    out = sep._run_session(np.zeros(dlsep.SEGMENT_SAMPLES,
+                                    dtype=np.float32))
+    assert out.shape[0] == 6                  # retried on CPU and done
+    assert attempts["n"] == 1
+    assert sep._session_providers == ["CPUExecutionProvider"]
+    assert sep._session is not gpu_sess
+
+    # a pure-CPU session has nowhere to fall back: the error propagates
+    sep._session_providers = ["CPUExecutionProvider"]
+    sep._session = type("S", (), {"run": staticmethod(run_raises),
+                                  "get_inputs": lambda self:
+                                      [_FakeSession._In()]})()
+    with pytest.raises(RuntimeError):
+        sep._run_session(np.zeros(dlsep.SEGMENT_SAMPLES,
+                                  dtype=np.float32))
+
+    # non-EP failures (e.g. segment mismatch) are never retried
+    calls = {"n": 0}
+
+    def run_other(out_names, feed):
+        calls["n"] += 1
+        raise RuntimeError("Got invalid dimensions for input")
+
+    sep._session_providers = ["CUDAExecutionProvider",
+                              "CPUExecutionProvider"]
+    sep._session = type("S", (), {"run": staticmethod(run_other),
+                                  "get_inputs": lambda self:
+                                      [_FakeSession._In()]})()
+    with pytest.raises(RuntimeError):
+        sep._run_session(np.zeros(dlsep.SEGMENT_SAMPLES,
+                                  dtype=np.float32))
+    assert calls["n"] == 1
+
+
+def test_providers_for_device(monkeypatch):
+    """3.10.2 D3 routing: auto = probe chain; cpu = forced pure CPU
+    (bypasses probing AND the env override); gpu = first available GPU
+    EP by preference + CPU tail; gpu on a GPU-less build raises the
+    exact actionable error the server maps to 400."""
+    monkeypatch.delenv("KEYPRISM_ORT_PROVIDERS", raising=False)
+    pfd = dlsep.providers_for_device
+    assert pfd("auto", available=["CUDAExecutionProvider",
+                                  "CPUExecutionProvider"]) == \
+        ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    assert pfd("cpu", available=["CUDAExecutionProvider",
+                                 "CPUExecutionProvider"]) == \
+        ["CPUExecutionProvider"]
+    assert pfd("gpu", available=["DmlExecutionProvider",
+                                 "CPUExecutionProvider"]) == \
+        ["DmlExecutionProvider", "CPUExecutionProvider"]
+    assert pfd("gpu", available=["CUDAExecutionProvider",
+                                 "DmlExecutionProvider",
+                                 "CPUExecutionProvider"]) == \
+        ["CUDAExecutionProvider", "CPUExecutionProvider"]  # CUDA wins
+    # forced choices win over the env override
+    monkeypatch.setenv("KEYPRISM_ORT_PROVIDERS", "CUDA")
+    assert pfd("cpu", available=["CUDAExecutionProvider",
+                                 "CPUExecutionProvider"]) == \
+        ["CPUExecutionProvider"]
+    assert pfd("gpu", available=["CoreMLExecutionProvider",
+                                 "CPUExecutionProvider"]) == \
+        ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+    # no GPU EP in the build: the exact actionable error
+    with pytest.raises(ValueError, match="GPU requested but no GPU "
+                                         "provider available"):
+        pfd("gpu", available=["CPUExecutionProvider"])
+
+
+def test_stems_device_param(srv, monkeypatch):
+    """POST /api/stems&device=...: default auto; cpu forces pure CPU
+    through to the separator; gpu on a GPU-less build -> 400 with the
+    actionable message; unknown device -> 400. No session work runs for
+    the 400s (nothing reaches the separator)."""
+    monkeypatch.setattr(server_mod, "DL_AVAILABLE", True)
+    monkeypatch.setattr(server_mod, "POLY_AVAILABLE", True)
+    monkeypatch.setattr(dlsep, "get_separator", FakeSeparator)
+    monkeypatch.setattr(dlsep, "ort_available_providers",
+                        lambda: ["CPUExecutionProvider"])
+    FakeSeparator.shifts_seen.clear()
+    FakeSeparator.devices_seen.clear()
+
+    # default: absent device = auto -> probe chain of a CPU-only build
+    code, body = post(f"{srv['base']}/api/stems?method=demucs_4")
+    assert code == 200
+    wait_task(srv["base"], body["task_id"])
+    assert FakeSeparator.devices_seen == [["CPUExecutionProvider"]]
+
+    # forced CPU: pure CPU list reaches the separator (a quality switch
+    # forces the cache open — device alone never invalidates a cached
+    # render, the stems' audio is identical either way)
+    code, body = post(
+        f"{srv['base']}/api/stems?method=demucs_4&device=cpu"
+        "&quality=fast")
+    assert code == 200
+    wait_task(srv["base"], body["task_id"])
+    assert FakeSeparator.devices_seen[-1] == ["CPUExecutionProvider"]
+
+    # forced GPU on a GPU-less build: 400, no task, no separator call
+    n = len(FakeSeparator.devices_seen)
+    code, body = post(
+        f"{srv['base']}/api/stems?method=demucs_4&device=gpu")
+    assert code == 400
+    assert "GPU requested but no GPU provider available" in body["error"]
+    assert len(FakeSeparator.devices_seen) == n
+
+    # unknown device: 400 before anything starts
+    code, body = post(
+        f"{srv['base']}/api/stems?method=demucs_4&device=tpu")
+    assert code == 400 and "未知设备" in body["error"]
+
+
+def test_ping_reports_available_providers(srv, monkeypatch):
+    """/api/ping capabilities.ort_providers_available (3.10.2): the
+    providers compiled into this build — the Device dropdown disables
+    its GPU option when no GPU EP is listed; empty without [dl]."""
+    monkeypatch.setattr(server_mod, "DL_AVAILABLE", True)
+    monkeypatch.setattr(dlsep, "ort_available_providers",
+                        lambda: ["CUDAExecutionProvider",
+                                 "CPUExecutionProvider"])
+    _, ping = get(f"{srv['base']}/api/ping")
+    caps = ping["capabilities"]
+    assert caps["ort_providers_available"] == \
+        ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    assert "ort_providers" in caps  # the ACTIVE chain stays too
+    monkeypatch.setattr(server_mod, "DL_AVAILABLE", False)
+    _, ping = get(f"{srv['base']}/api/ping")
+    assert ping["capabilities"]["ort_providers_available"] == []
+
+
+def test_device_selector_frontend_contract():
+    """3.10.2 D2 frontend contract: a Device dropdown (Auto/GPU/CPU)
+    next to the quality select, POSTed as &device=, persisted in
+    localStorage, with the GPU option disabled from
+    capabilities.ort_providers_available and a stale persisted 'gpu'
+    coerced back to auto; i18n in both dicts."""
+    lanes = strip_js_comments(
+        (FRONTEND / "lanes.js").read_text(encoding="utf-8"))
+    assert "['auto', 'gpu', 'cpu']" in lanes
+    assert "&device=${state.device}" in lanes
+    assert "ort_providers_available" in lanes
+    assert "localStorage.setItem(DEVICE_KEY" in lanes
+    assert "deviceNoGpu" in lanes
+    i18n = strip_js_comments(
+        (FRONTEND / "i18n.js").read_text(encoding="utf-8"))
+    for key in ("deviceAuto", "deviceGpu", "deviceCpu", "deviceTip",
+                "deviceNoGpu"):
+        assert i18n.count(f"{key}:") >= 2
+
+
+def test_ping_reports_ort_providers(srv, monkeypatch):
+    """/api/ping capabilities.ort_providers: the ACTIVE EP chain (badge
+    data source); empty without the DL extra."""
+    monkeypatch.setattr(server_mod, "DL_AVAILABLE", True)
+    monkeypatch.setattr(dlsep, "_ACTIVE_PROVIDERS",
+                        ["CUDAExecutionProvider", "CPUExecutionProvider"])
+    _, ping = get(f"{srv['base']}/api/ping")
+    assert ping["capabilities"]["ort_providers"] == \
+        ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    monkeypatch.setattr(server_mod, "DL_AVAILABLE", False)
+    _, ping = get(f"{srv['base']}/api/ping")
+    assert ping["capabilities"]["ort_providers"] == []
+
+
+def test_gpu_extras_declared():
+    """[dl-cuda] / [dl-directml] extras exist (plain [dl] stays
+    CPU-only onnxruntime)."""
+    txt = (Path(__file__).resolve().parent.parent / "pyproject.toml") \
+        .read_text(encoding="utf-8")
+    assert "dl-cuda" in txt and "onnxruntime-gpu" in txt
+    assert "dl-directml" in txt and "onnxruntime-directml" in txt
+
+
+def test_provider_badge_contract():
+    """Frontend source contract: the lanes panel renders a GPU/CPU
+    provider badge from capabilities.ort_providers with a full-chain
+    tooltip, and both i18n dicts carry the keys."""
+    lanes = strip_js_comments(
+        (FRONTEND / "lanes.js").read_text(encoding="utf-8"))
+    assert "ort_providers" in lanes
+    assert "providerBadge" in lanes
+    assert "CUDAExecutionProvider" in lanes
+    assert "DmlExecutionProvider" in lanes
+    i18n = strip_js_comments(
+        (FRONTEND / "i18n.js").read_text(encoding="utf-8"))
+    for key in ("providerGpu", "providerCpu", "providerTip"):
+        assert i18n.count(f"{key}:") >= 2
+
+
+# ------------------------------------------------- quality tiers (3.10)
+
+def test_shifts_for_quality_mapping():
+    assert dlsep.QUALITY_SHIFTS == {"fast": 0, "balanced": 1, "best": 2}
+    assert dlsep.DEFAULT_QUALITY == "balanced"
+    assert dlsep.shifts_for_quality("fast") == 0
+    assert dlsep.shifts_for_quality("balanced") == 1
+    assert dlsep.shifts_for_quality("best") == 2
+    with pytest.raises(ValueError):
+        dlsep.shifts_for_quality("ultra")
+
+
+def test_shift_passes_averages_shifted_passes():
+    """shift_passes semantics: pass s infers the circularly shifted
+    input and shifts the output back; the result is the MEAN of the
+    shifted-back passes; progress fires per pass."""
+    n = 40
+    x = np.arange(n, dtype=np.float32)
+    seen = []
+
+    def infer(chunk):  # deliberately NON-linear: mean semantics must
+        seen.append(np.array(chunk))   # hold regardless of the backend
+        return np.stack([chunk, np.zeros_like(chunk)])
+
+    progress = []
+    out = dlsep.shift_passes(infer, x, passes=2,
+                             on_pass=lambda p, t: progress.append((p, t)))
+    k = (n * 1) // 2
+    np.testing.assert_allclose(seen[0], x)               # pass 0: no shift
+    np.testing.assert_allclose(seen[1], np.roll(x, -k))  # pass 1: n/2 roll
+    expect = (np.stack([x, np.zeros_like(x)]) +
+              np.stack([np.roll(np.roll(x, -k), k),
+                        np.zeros_like(x)])) / 2.0
+    np.testing.assert_allclose(out, expect, atol=1e-6)
+    assert progress == [(1, 2), (2, 2)]
+
+    # passes=1 is the plain single call (fast tier)
+    seen.clear()
+    out1 = dlsep.shift_passes(infer, x, passes=1)
+    np.testing.assert_allclose(seen[0], x)
+    np.testing.assert_allclose(out1, np.stack([x, np.zeros_like(x)]))
+
+
+def test_shifts_linear_infer_equivalence():
+    """With a LINEAR, shift-equivariant infer (circular convolution),
+    every shifted pass reproduces the single-pass output, so the
+    shifts=1 average equals the fast output exactly (fp tolerance) —
+    the equivalence the tier implementation rests on."""
+    sr = dlsep.TARGET_SR
+    rng = np.random.default_rng(7)
+    x = (rng.standard_normal(int(3.0 * sr)).astype(np.float32) * 0.1)
+    taps = (1.0, 0.5, -0.25, 0.125)
+
+    def infer(chunk):
+        y = np.zeros_like(chunk)
+        for i, c in enumerate(taps):  # linear + shift-equivariant
+            y += c * np.roll(chunk, i, axis=-1)
+        return np.stack([y, -y, 0.5 * y, np.zeros_like(y)])
+
+    sep = dlsep.DemucsSeparator("demucs_4", infer=infer)
+    fast = sep.separate(x, sr, chunk_sec=1.0, overlap_sec=0.1, shifts=0)
+    balanced = sep.separate(x, sr, chunk_sec=1.0, overlap_sec=0.1,
+                            shifts=1)
+    best = sep.separate(x, sr, chunk_sec=1.0, overlap_sec=0.1, shifts=2)
+    assert list(fast) == list(dlsep.STEM_SPECS["demucs_4"])
+    for key in fast:
+        np.testing.assert_allclose(balanced[key], fast[key], atol=1e-5)
+        np.testing.assert_allclose(best[key], fast[key], atol=1e-5)
+
+
+def test_shifts_scale_progress_denominator():
+    """Progress denominator = chunks * passes, advanced per completed
+    pass; shifts=0 keeps the exact pre-3.10 chunk granularity."""
+    sr = dlsep.TARGET_SR
+    x = np.zeros(int(25 * sr), dtype=np.float32)  # 3 chunks @ 10s/1s
+    assert len(dlsep.chunk_windows(x.shape[0], 10.0, 1.0, sr)) == 3
+
+    def infer(chunk):
+        return np.stack([chunk, -chunk, chunk * 0.5, np.zeros_like(chunk)])
+
+    sep = dlsep.DemucsSeparator("demucs_4", infer=infer)
+    seen = []
+    sep.separate(x, sr, progress=lambda d, t: seen.append((d, t)))
+    assert seen[-1] == (3, 3)
+    seen.clear()
+    sep.separate(x, sr, shifts=1,
+                 progress=lambda d, t: seen.append((d, t)))
+    assert seen[-1] == (6, 6)                       # 3 chunks x 2 passes
+    assert [d for d, _ in seen] == list(range(1, 7))  # per-pass updates
+    seen.clear()
+    sep.separate(x, sr, shifts=2,
+                 progress=lambda d, t: seen.append((d, t)))
+    assert seen[-1] == (9, 9)                       # 3 chunks x 3 passes
+    with pytest.raises(ValueError):
+        sep.separate(x, sr, shifts=-1)
+
+
+def test_quality_tier_server_flow(srv, monkeypatch):
+    """/api/stems?quality=...: default balanced; tier-aware cache (same
+    tier -> cache hit, tier switch -> recompute with the mapped shifts);
+    unknown tier -> 400, never a task; status.json records the tier."""
+    monkeypatch.setattr(server_mod, "DL_AVAILABLE", True)
+    monkeypatch.setattr(server_mod, "POLY_AVAILABLE", True)
+    monkeypatch.setattr(dlsep, "get_separator", FakeSeparator)
+    FakeSeparator.shifts_seen.clear()
+    FakeSeparator.devices_seen.clear()
+    monkeypatch.setattr(dlsep, "ort_available_providers",
+                        lambda: ["CPUExecutionProvider"])
+
+    # default tier = balanced -> shifts 1
+    code, body = post(f"{srv['base']}/api/stems?method=demucs_4")
+    assert code == 200 and body["status"] == "started"
+    done = wait_task(srv["base"], body["task_id"])
+    assert done["status"] == "done" and done["quality"] == "balanced"
+    assert FakeSeparator.shifts_seen == [1]
+
+    # same tier again: cache hit, no recompute
+    code, body = post(f"{srv['base']}/api/stems?method=demucs_4")
+    assert code == 200 and body["cached"] is True
+    assert body["quality"] == "balanced"
+    assert FakeSeparator.shifts_seen == [1]
+    statuses = list((audio_io.KEYPRISM_HOME / "cache").rglob(
+        "dl_v1/demucs_4/status.json"))
+    assert statuses and json.loads(
+        statuses[0].read_text(encoding="utf-8"))["quality"] == "balanced"
+
+    # tier switch -> recompute with the new shifts
+    code, body = post(
+        f"{srv['base']}/api/stems?method=demucs_4&quality=fast")
+    assert code == 200 and body.get("cached") is None
+    done = wait_task(srv["base"], body["task_id"])
+    assert done["quality"] == "fast"
+    assert FakeSeparator.shifts_seen == [1, 0]
+    code, body = post(
+        f"{srv['base']}/api/stems?method=demucs_4&quality=fast")
+    assert code == 200 and body["cached"] is True
+    assert FakeSeparator.shifts_seen == [1, 0]
+
+    # best tier -> third compute with shifts 2
+    code, body = post(
+        f"{srv['base']}/api/stems?method=demucs_4&quality=best")
+    assert code == 200 and body["status"] == "started"
+    wait_task(srv["base"], body["task_id"])
+    assert FakeSeparator.shifts_seen == [1, 0, 2]
+
+    # unknown tier: 400 before anything is started
+    code, body = post(
+        f"{srv['base']}/api/stems?method=demucs_4&quality=ultra")
+    assert code == 400 and "质量" in body["error"]
+    assert FakeSeparator.shifts_seen == [1, 0, 2]
+
+
+def test_quality_tier_frontend_contract():
+    """Frontend source contract: a quality dropdown (fast/balanced/
+    best) beside the method select, POSTed as &quality=, with i18n in
+    both dicts; the progress status names the tier's pass count so the
+    chunks-x-passes denominator is visible while it runs (3.10.1 D3),
+    and a tier switch re-POSTs (server recomputes on mismatch)."""
+    lanes = strip_js_comments(
+        (FRONTEND / "lanes.js").read_text(encoding="utf-8"))
+    assert "'fast', 'balanced', 'best'" in lanes
+    assert "`${apiBase}/api/stems?method=${method}&quality=${state.quality}`" \
+        in lanes
+    assert "&device=${state.device}" in lanes
+    assert "qualityTip" in lanes
+    assert "QUALITY_PASSES" in lanes
+    assert "passes: QUALITY_PASSES[state.quality] || 1" in lanes
+    # tier switch persists and re-loads through the same load() path
+    assert "localStorage.setItem(QUALITY_KEY" in lanes
+    i18n = strip_js_comments(
+        (FRONTEND / "i18n.js").read_text(encoding="utf-8"))
+    for key in ("qualityFast", "qualityBalanced", "qualityBest",
+                "qualityTip"):
+        assert i18n.count(f"{key}:") >= 2
+    assert i18n.count("lanesSeparating:") >= 2
+    assert "{passes}" in i18n  # both dicts carry the pass count
 
 
 # --------------------------------------------------------- note merging
@@ -461,14 +1664,23 @@ def test_convert_raw_accepts_library_shapes():
 # ------------------------------------------- background task + DL cache
 
 class FakeSeparator:
-    """Stands in for the ONNX DemucsSeparator (no weights needed)."""
+    """Stands in for the ONNX DemucsSeparator (no weights needed).
+    Records the shifts and device providers each separate()/init
+    received (3.10 quality-tier + 3.10.2 device-routing seams)."""
 
-    def __init__(self, variant, download_progress=None):
+    shifts_seen: list = []
+    devices_seen: list = []
+
+    def __init__(self, variant, download_progress=None,
+                 device_providers=None, cancelled=None):
         self.variant = variant
         self.stems = dlsep.STEM_SPECS[variant]
+        FakeSeparator.devices_seen.append(
+            list(device_providers) if device_providers else None)
 
     def separate(self, pcm, sr, chunk_sec=10.0, overlap_sec=1.0,
-                 progress=None):
+                 shifts=0, progress=None, cancelled=None):
+        FakeSeparator.shifts_seen.append(shifts)
         n = int(len(pcm) * dlsep.TARGET_SR / sr)
         out = {}
         for i, key in enumerate(self.stems):
