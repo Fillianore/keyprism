@@ -20,6 +20,10 @@ The only module coupled to stdlib httpd:
                            the optional [dl] dependencies)
 - GET  /api/task/{id}      background-task status/progress/result
 - GET  /api/stem?method&name  one computed stem as a WAV download
+- GET  /api/stem_spec?method=&stem=&rate=
+                           quantized semitone spectrogram of one computed
+                           stem (Phase 3.9: lane [Wave|Spec] view + master-
+                           plot overlay layers); disk-cached beside the WAV
 - POST /api/upload?name=   upload audio bytes, analyze and switch tracks
 
 make_server() returns an unstarted ThreadingHTTPServer so tests can
@@ -212,6 +216,9 @@ def make_server(path: Path, port: int, host: str, start: float,
                 return
             if u.path == "/api/stem":
                 self._stem_wav(u)
+                return
+            if u.path == "/api/stem_spec":
+                self._stem_spec(u)
                 return
             if u.path != "/api/spec":
                 self.send_error(404)
@@ -557,6 +564,48 @@ def make_server(path: Path, port: int, host: str, start: float,
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
+
+        def _stem_spec(self, u):
+            """GET /api/stem_spec?method=&stem=&rate= : quantized semitone
+            spectrogram of one computed stem (Phase 3.9), for the lane
+            [Wave|Spec] view and the master-plot overlay layers.
+
+            Reuses the Phase 0 aggregate pipeline (``spec_matrix``, sub=1
+            -> 88 piano semitone rows, the same row space as the master
+            heatmap's y axis) compressed to dB and base64-quantized. Needs
+            only the stem WAV from the cache — no onnxruntime — and 404s
+            with the compute hint when the separation has not run yet."""
+            cur = state["cur"]
+            if cur is None:
+                self._json(409, {"error": "暂无已加载的曲目"})
+                return
+            q = urllib.parse.parse_qs(u.query)
+            method = _norm_method(
+                (q.get("method", [""])[0] or "").strip())
+            name = (q.get("stem", [""])[0] or "").strip()
+            try:
+                rate = int(q.get("rate", ["30"])[0])
+            except ValueError:
+                rate = 30
+            is_dl = method in dlsep.DL_METHODS
+            specs = dlsep.STEM_SPECS if is_dl else stems.STEM_SPECS
+            if method not in specs or name not in specs.get(method, ()):
+                self._json(400, {
+                    "error": f"未知 stem: {method}/{name} (可用: {specs})"})
+                return
+            entry = self._notes_entry(cur)
+            fn = dlsep.get_stem_spec if is_dl else stems.get_stem_spec
+            lock = state["dl_lock"] if is_dl else state["stems_lock"]
+            try:
+                body = fn(entry, method, name, window=window,
+                          db_range=db_range, rate=rate, lock=lock)
+            except FileNotFoundError as e:
+                self._json(404, {"error": str(e)})
+                return
+            except Exception as e:  # noqa: BLE001
+                self._json(500, {"error": str(e)})
+                return
+            self._json(200, body)
 
         def do_POST(self):
             u = urllib.parse.urlparse(self.path)

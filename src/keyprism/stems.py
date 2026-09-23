@@ -54,7 +54,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from . import analyze
+from . import analyze, payload
 from .hpss import HPSS_EPS, hpss_context_frames, hpss_masks
 from .rpca import iter_rpca_blocks, plan_chunks
 from .transform import istft_complex
@@ -62,6 +62,7 @@ from .transform import istft_complex
 __all__ = [
     "STEMS_VERSION", "METHODS", "STEM_SPECS", "compute_stems", "get_stems",
     "stems_dir", "stem_status_path", "stem_file_path", "load_status",
+    "stem_spec_path", "get_stem_spec",
 ]
 
 #: Version tag of the stem pipeline; part of the cache path (bump to
@@ -289,3 +290,69 @@ def get_stems(entry: Path, method: str = "combined", progress=None,
         if cached is not None:
             return {**cached, "cached": True}
         return compute_stems(entry, method, progress=progress)
+
+
+# ------------------------------------------------- stem spectrogram (3.9)
+
+def stem_spec_path(entry: Path, method: str, key: str) -> Path:
+    """Cached per-stem spectrogram JSON next to its WAV (Phase 3.9).
+
+    Living inside the version-tagged stems dir means bumping
+    ``STEMS_VERSION`` invalidates cached specs together with the stems
+    they describe — the same rule as every other cache in this repo."""
+    _check_method(method)
+    return stems_dir(entry, method) / f"spec_{key}.json"
+
+
+def get_stem_spec(entry: Path, method: str, key: str, *, window: int,
+                  db_range: float, rate: int = 30, lock=None) -> dict:
+    """Quantized semitone spectrogram of one stem WAV (Phase 3.9), disk-
+    cached as ``spec_<stem>.json`` inside the stems dir.
+
+    The stem must already be computed (the lanes/stems panels only offer
+    the view after separation ran); a missing WAV raises FileNotFoundError
+    which the server maps to 404 with the request hint. Compute runs under
+    ``lock`` with the usual double-check so concurrent requests share one
+    STFT pass."""
+    _check_method(method)
+    if key not in STEM_SPECS[method]:
+        raise KeyError(f"未知 stem: {method}/{key}")
+    cache = stem_spec_path(entry, method, key)
+    body = _load_spec_cache(cache, method, key, rate)
+    if body is not None:
+        return body
+    with (lock or threading.Lock()):
+        body = _load_spec_cache(cache, method, key, rate)  # re-check
+        if body is not None:
+            return body
+        wav = stem_file_path(entry, method, key)
+        if not wav.is_file():
+            raise FileNotFoundError(
+                f"{method} 分轨尚未计算: 先请求 /api/stems?method={method}")
+        x, sr = sf.read(str(wav), dtype="float64", always_2d=True)
+        mono = x.mean(axis=1)
+        spec = payload.stem_spec_payload(mono, sr, window, db_range, rate=rate)
+        body = {"method": method, "stem": key,
+                "duration": round(float(x.shape[0] / sr), 6), **spec,
+                "version": STEMS_VERSION}
+        tmp = cache.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(body, ensure_ascii=False),
+                       encoding="utf-8")
+        os.replace(tmp, cache)
+        return {**body, "cached": False}
+
+
+def _load_spec_cache(cache: Path, method: str, key: str, rate: int) -> dict | None:
+    """Valid cached spec body or None; the version+stem identity guard
+    keys the file to the stems that produced it, ``rate`` to the request
+    (window/db_range are constant per analysis entry, so they need no
+    separate check)."""
+    try:
+        body = json.loads(cache.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    if body.get("version") == STEMS_VERSION and \
+            body.get("method") == method and body.get("stem") == key and \
+            body.get("rate") == int(rate):
+        return {**body, "cached": True}
+    return None

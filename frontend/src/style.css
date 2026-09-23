@@ -923,6 +923,43 @@ input[type='range']:active::-moz-range-thumb {
   opacity: 0.55;
 }
 
+/* Phase 3.9 [Wave|Spec] per-lane view toggle: mini segmented control
+   overlaid top-left on the scope (the Notes chip owns the top-right) */
+.lane-view-toggle {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  z-index: 2;
+  display: inline-flex;
+  background: rgba(13, 13, 16, 0.85);
+  border: 1px solid #2c2c33;
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.lane-view-toggle button {
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 9px;
+  letter-spacing: 0.4px;
+  line-height: 1.4;
+  padding: 1px 7px;
+  cursor: pointer;
+  transition: color var(--t), background var(--t);
+}
+
+.lane-view-toggle button:hover {
+  color: var(--ivory);
+}
+
+.lane-view-toggle button.active {
+  background: linear-gradient(180deg, #eeda9e, #d3ad66 55%, #b98f47);
+  color: #241c0e;
+  font-weight: 700;
+}
+
 .stem-vol::-webkit-slider-runnable-track {
   background:
     linear-gradient(

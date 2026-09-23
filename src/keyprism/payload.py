@@ -103,6 +103,40 @@ def compute_specs(data2d: np.ndarray, sr: int, dur: float, rate: int,
     }
 
 
+def stem_spec_payload(x: np.ndarray, sr: int, window: int, db_range: float,
+                      rate: int = 30, max_cols: int = 6000) -> dict:
+    """One signal -> quantized semitone spectrogram for the lane
+    [Wave|Spec] view and the overlay layers (Phase 3.9).
+
+    Reuses the exact Phase 0 aggregate pipeline — ``spec_matrix`` with
+    ``sub=1`` (88 piano semitone rows, same row space as the master
+    heatmap's y axis, which is what makes the lane/overlay views line up
+    with the master) — then compresses to dB against the STEM's OWN peak
+    (quiet stems must stay readable in their own lane) and quantizes to
+    base64 uint8 like ``compute_specs``. Pure: no IO."""
+    rate = min(max(rate, TIME_RATES[0]), TIME_RATES[-1])
+    max_cols = max(60, min(int(max_cols), 12000))
+    m, hop, _ = spec_matrix(np.asarray(x, dtype=np.float64), sr, window,
+                            max_cols, 1)
+    peak = m.max()
+    if peak <= 0:
+        raise ValueError("音频为静音")
+    spec_db = np.maximum(10.0 * np.log10(np.maximum(m / peak, 1e-12)),
+                         -db_range)
+    q = np.clip((spec_db + db_range) / db_range, 0.0, 1.0)
+    n_rows, n_cols = m.shape
+    return {
+        "spec": base64.b64encode(
+            (q * 255.0).round().astype(np.uint8).tobytes()).decode(),
+        "rows": int(n_rows),
+        "nCols": int(n_cols),
+        "hopSec": round(hop, 6),
+        "rate": int(rate),
+        "sub": 1,
+        "dbRange": float(db_range),
+    }
+
+
 def finalize_payload(path: Path, dur: float, bpm: float, beat_offset: float,
                      res: dict, *, start: float, end: float | None,
                      window: int, db_range: float, api_base: str | None = None,

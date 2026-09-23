@@ -80,7 +80,12 @@
  *    samples), cached per [lane, view window, column count] with a
  *    small FIFO bound, and painted pixel-sharp. The worker owns one
  *    transferred mono copy per lane, so zoom/pan requests ship only the
- *    view window.
+ *    view window;
+ *  - [WAVE|SPEC] per-lane toggle (Phase 3.9): the lane canvas flips to a
+ *    mini-spectrogram served by GET /api/stem_spec (the Phase 0 semitone
+ *    aggregate of the stem, the SAME row space as the master heatmap),
+ *    fetched lazily on first click (Notes-chip discipline) through the
+ *    shared stemspec.js cache; a failure toasts and degrades to Wave.
  */
 
 import { t, onChange } from './i18n.js';
@@ -89,6 +94,7 @@ import { MixerState, bufferPeak, makeupDb } from './mixer.js';
 import { trackRow, wireMuteSolo } from './controls.js';
 import { showToast } from './toast.js';
 import { WaveLod } from './wavelod.js';
+import { getStemSpec, specToImage } from './stemspec.js';
 import { throttled } from './util.js';
 
 const START_LEAD = 0.06; // keep identical to player.js START_LEAD
@@ -306,7 +312,9 @@ export function initLanes({ gd, data, player, apiBase }) {
   function drawAll() {
     if (!state.enabled) return;
     for (const lane of state.lanes) {
-      drawWave(lane);
+      // [Wave|Spec] per-lane view (Phase 3.9); notes always overlay
+      if ((lane.view || 'wave') === 'spec') drawSpec(lane);
+      else drawWave(lane);
       drawNotes(lane);
     }
   }
@@ -432,6 +440,96 @@ export function initLanes({ gd, data, player, apiBase }) {
         6,
         4
       );
+    }
+  }
+
+  /** Lane mini-spectrogram (Phase 3.9 [Wave|Spec] toggle): paints the
+   *  server-computed quantized semitone matrix (the same Phase 0 row
+   *  space as the master heatmap) from the shared offscreen image. The
+   *  x mapping is column = time / hopSec against the SAME shared view
+   *  range; y spans the full A0..C8 lane pitch space like the notes
+   *  overlay. Muting dims it like the waveform (silence never hides). */
+  function drawSpec(lane) {
+    const cv = lane.waveCv;
+    if (!cv || !cv.clientWidth) return;
+    const g = fitCanvas(cv);
+    const w = cv.clientWidth;
+    const h = cv.clientHeight;
+    g.clearRect(0, 0, w, h);
+    if (lane.specState !== 'ready' || !lane.specImg) {
+      // transient loading placeholder; a failure reverts the lane to Wave
+      // (with a toast) before the next paint
+      g.fillStyle = 'rgba(255,255,255,0.35)';
+      g.font = '11px system-ui, sans-serif';
+      g.textAlign = 'center';
+      g.textBaseline = 'middle';
+      g.fillText(t('laneSpecLoading'), w / 2, h / 2);
+      return;
+    }
+    const { cv: img, hopSec } = lane.specImg;
+    const [aSec, bSec] = viewSec();
+    // column c covers [c*hopSec, (c+1)*hopSec); map the view window onto
+    // source columns (out-of-range source is clipped transparent by
+    // drawImage, matching the waveform's blank margins)
+    const sx = aSec / hopSec;
+    const sw = Math.max(1e-6, (bSec - aSec) / hopSec);
+    g.globalAlpha = mixer.stripAudible(lane) ? 1 : 0.35;
+    g.imageSmoothingEnabled = false; // honest cells, like the master heatmap
+    g.drawImage(img, sx, 0, sw, img.height, 0, 0, w, h);
+    g.globalAlpha = 1;
+  }
+
+  /** Fetch + decode the stem spec once per lane (shared module cache in
+   *  stemspec.js makes repeat lanes/layers free). A failure toasts the
+   *  precise reason and degrades the lane back to Wave. */
+  async function ensureSpec(lane) {
+    if (lane.specState === 'loading' || lane.specState === 'ready') return;
+    lane.specState = 'loading';
+    scheduleDraw(); // show the loading placeholder
+    try {
+      const spec = await getStemSpec(apiBase, state.method, lane.key);
+      lane.specImg = specToImage(spec, lane.color);
+      lane.specState = 'ready';
+    } catch (e) {
+      lane.specState = 'failed';
+      lane.specErr = e?.message || String(e);
+      showToast(t('laneSpecFailed', { msg: lane.specErr }));
+      lane.view = 'wave';
+      paintViewToggle(lane);
+    }
+    scheduleDraw();
+  }
+
+  /** [Wave|Spec] segmented control, overlaid top-left on the scope (the
+   *  Notes chip owns the top-right corner). Spec is lazy: nothing is
+   *  fetched until the first click (same discipline as the Notes chip). */
+  function buildViewToggle(lane, scope) {
+    const seg = document.createElement('div');
+    seg.className = 'lane-view-toggle';
+    seg.title = t('laneSpecTip');
+    lane.viewBtns = {};
+    for (const mode of ['wave', 'spec']) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = t(mode === 'wave' ? 'laneWave' : 'laneSpec');
+      b.addEventListener('click', () => {
+        if (lane.view === mode) return;
+        lane.view = mode;
+        paintViewToggle(lane);
+        if (mode === 'spec') ensureSpec(lane);
+        else scheduleDraw();
+      });
+      lane.viewBtns[mode] = b;
+      seg.appendChild(b);
+    }
+    scope.appendChild(seg);
+    paintViewToggle(lane);
+  }
+
+  function paintViewToggle(lane) {
+    if (!lane.viewBtns) return;
+    for (const [mode, b] of Object.entries(lane.viewBtns)) {
+      b.classList.toggle('active', (lane.view || 'wave') === mode);
     }
   }
 
@@ -719,6 +817,9 @@ export function initLanes({ gd, data, player, apiBase }) {
     phEl.setAttribute('aria-hidden', 'true');
     scope.append(wave, noteCv, phEl);
     lane.phEl = phEl;
+    // Phase 3.9: [Wave|Spec] toggle (view state lives on the lane model
+    // so a language-switch renderShell keeps the user's choice)
+    buildViewToggle(lane, scope);
     // Notes (扒谱): uniform on every poly-eligible lane (D4); a compact
     // chip overlaid on the lane's own scope — the controls cell stays
     // one tidy [fader M S] line at the fixed grid widths
@@ -863,6 +964,9 @@ export function initLanes({ gd, data, player, apiBase }) {
           lodUp: false,
           lodId: null,
           pcmMono: null, // sync-fallback copy (only when Workers are gone)
+          view: 'wave', // [Wave|Spec] per-lane view
+          specState: null, // null | loading | ready | failed
+          specImg: null,
           decodeFailed: false,
         });
         lanes.push(lane);

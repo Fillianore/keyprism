@@ -77,7 +77,7 @@ try:  # optional [dl] extra: its presence gates the auto-download path
 except ImportError:  # pragma: no cover - exercised via the flag in tests
     HF_AVAILABLE = False
 
-from . import audio_io
+from . import audio_io, payload
 
 __all__ = [
     "DL_STEMS_VERSION", "DL_METHODS", "STEM_SPECS", "TARGET_SR",
@@ -86,6 +86,7 @@ __all__ = [
     "plan_chunks", "hann_cola", "resample", "ola_separate",
     "DemucsSeparator", "get_separator", "dl_stems_dir", "dl_status_path",
     "dl_stem_path", "load_status", "write_stems", "model_dir",
+    "dl_spec_path", "get_stem_spec",
 ]
 
 #: Version tag of the DL stem pipeline; part of the cache path (bump to
@@ -652,3 +653,70 @@ def write_stems(entry: Path, method: str, stems: dict, sr: int,
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise
     return status
+
+
+# ------------------------------------------------- stem spectrogram (3.9)
+
+def dl_spec_path(entry: Path, method: str, key: str) -> Path:
+    """Cached per-stem spectrogram JSON next to its WAV (Phase 3.9);
+    lives inside the version-tagged DL stems dir so bumping
+    ``DL_STEMS_VERSION`` invalidates specs together with their stems."""
+    _check_method(method)
+    return dl_stems_dir(entry, method) / f"spec_{key}.json"
+
+
+def get_stem_spec(entry: Path, method: str, key: str, *, window: int,
+                  db_range: float, rate: int = 30, lock=None) -> dict:
+    """Quantized semitone spectrogram of one DL stem WAV (Phase 3.9),
+    disk-cached as ``spec_<stem>.json`` (same layout as stems.py's twin).
+
+    Needs only the cached WAV — no onnxruntime — so the lane [Wave|Spec]
+    view and overlay layers keep working in any environment where the
+    stems were computed. A missing WAV raises FileNotFoundError which the
+    server maps to 404 with the request hint. Compute runs under ``lock``
+    with the usual double-check."""
+    _check_method(method)
+    if key not in STEM_SPECS[method]:
+        raise KeyError(f"未知 stem: {method}/{key}")
+    cache = dl_spec_path(entry, method, key)
+    body = _load_spec_cache(cache, method, key, rate)
+    if body is not None:
+        return body
+    with (lock or threading.Lock()):
+        body = _load_spec_cache(cache, method, key, rate)  # re-check
+        if body is not None:
+            return body
+        wav = dl_stem_path(entry, method, key)
+        if not wav.is_file():
+            raise FileNotFoundError(
+                f"{method} 分轨尚未计算: 先请求 POST /api/stems?method="
+                f"{method}")
+        import soundfile as sf
+
+        x, sr = sf.read(str(wav), dtype="float64", always_2d=True)
+        mono = x.mean(axis=1)
+        spec = payload.stem_spec_payload(mono, sr, window, db_range,
+                                         rate=rate)
+        body = {"method": method, "stem": key,
+                "duration": round(float(x.shape[0] / sr), 6), **spec,
+                "version": DL_STEMS_VERSION}
+        tmp = cache.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(body, ensure_ascii=False),
+                       encoding="utf-8")
+        os.replace(tmp, cache)
+        return {**body, "cached": False}
+
+
+def _load_spec_cache(cache: Path, method: str, key: str, rate: int) -> dict | None:
+    """Valid cached spec body or None (same guard as stems.py: version +
+    stem identity + request rate; window/db_range are constant per
+    analysis entry)."""
+    try:
+        body = json.loads(cache.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    if body.get("version") == DL_STEMS_VERSION and \
+            body.get("method") == method and body.get("stem") == key and \
+            body.get("rate") == int(rate):
+        return {**body, "cached": True}
+    return None
