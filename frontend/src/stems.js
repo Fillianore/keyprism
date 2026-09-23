@@ -329,6 +329,12 @@ export function initStems({ data, player, apiBase }) {
       mixer.mix.volume = player.mixGainNorm();
       mixer.mix.muted = false;
       mixer.mix.solo = false;
+      // 3.10.1 D2 root cause: clear the flag BEFORE the final render —
+      // renderPanel disables the method select while state.loading is
+      // set, so the old ordering (cleared only in finally, after the
+      // render) left the dropdown permanently dead. Ends the progress
+      // poll loop too (best-effort by then).
+      state.loading = false;
       renderPanel();
       mixer.apply();
       if (player.isPlaying()) {
@@ -339,6 +345,7 @@ export function initStems({ data, player, apiBase }) {
     } catch (e) {
       if (state.method === method) {
         state.ready = false;
+        state.loading = false; // same ordering rule: render enabled
         renderPanel();
         setStatus(t('stemsFailed', { msg: e.message }));
       }

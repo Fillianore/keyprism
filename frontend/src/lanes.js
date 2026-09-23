@@ -1142,6 +1142,12 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
       mixer.mix.volume = player.mixGainNorm();
       mixer.mix.muted = false;
       mixer.mix.solo = false;
+      // 3.10.1 D2 root cause: the flag MUST be cleared before the final
+      // render — renderShell builds the method/quality selects with
+      // disabled = state.loading, so when this render ran while the
+      // flag was still set (it used to be cleared only in finally,
+      // AFTER the render) both dropdowns came up permanently dead.
+      state.loading = false;
       renderShell();
       mixer.apply();
       drawAll(); // waveforms visible immediately, before Play (D2)
@@ -1156,6 +1162,7 @@ export function initLanes({ gd, data, player, apiBase, layers }) {
         state.ready = false;
         stopAll();
         state.lanes = [];
+        state.loading = false; // same ordering rule: render enabled
         renderShell();
         setStatus(t('lanesFailed', { msg: e.message }));
       }

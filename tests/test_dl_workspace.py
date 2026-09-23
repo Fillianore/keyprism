@@ -9,6 +9,7 @@ same code paths.
 """
 
 import json
+import re
 import threading
 import time
 import urllib.error
@@ -449,6 +450,35 @@ def test_lanes_demucs_6_six_lane_contract():
     assert "POLY_LANES.has(lane.key)" in lanes
     # one lane row per registry stem (the render loop is registry-driven)
     assert "for (const lane of state.lanes) buildLaneRow" in lanes
+
+
+def test_dropdowns_not_born_disabled_contract():
+    """3.10.1 D2 root cause (confirmed): the post-load re-render ran
+    while the loading flag was still set — the flag was cleared only in
+    finally, AFTER renderShell/renderPanel had rebuilt the method and
+    quality selects with disabled = state.loading — so every dropdown
+    came up permanently dead (listeners bound, but a disabled <select>
+    never fires and the handlers guard on disabled). Hypothesis A
+    (z-index/pointer-events interception) was disproven: .layer-stack
+    already sits at z-auto with pointer-events: none. Contract: the
+    loading flag is cleared BEFORE the final render on BOTH the success
+    and the error paths of both panels, and the layer-stack pass-through
+    stays pinned."""
+    for name, render in (("lanes.js", "renderShell"),
+                         ("stems.js", "renderPanel")):
+        src = strip_js_comments(
+            (FRONTEND / name).read_text(encoding="utf-8"))
+        hits = re.findall(
+            r"state\.loading = false;[\s\S]{0,200}?" + render + r"\(\);",
+            src)
+        assert len(hits) >= 2, \
+            f"{name}: loading flag not cleared before {render} on both paths"
+    css = (FRONTEND / "style.css").read_text(encoding="utf-8")
+    stack = css[css.index(".layer-stack {"):]
+    stack = stack[:stack.index("}")]
+    assert "position: absolute" in stack
+    assert "pointer-events: none" in stack
+    assert "z-index" not in stack  # z-auto: the 3.9.1 blend contract
 
 
 def test_unified_method_selector_contract():
