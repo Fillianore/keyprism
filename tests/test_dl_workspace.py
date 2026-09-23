@@ -627,8 +627,10 @@ def test_task_reports_downloading_phase(srv, monkeypatch):
 # -------------------------------------------- execution providers (3.10)
 
 def test_provider_chain_prefers_gpu(monkeypatch):
-    """Probe order CUDA -> DirectML -> CoreML -> CPU, intersected with
-    the compiled-in providers: a plain [dl] install (CPU-only build)
+    """Probe order CUDA -> DirectML -> CoreML, and CPUExecutionProvider
+    ALWAYS last (3.10.2 D1: with CPU in the list ORT runs ops that lack
+    a GPU kernel on CPU instead of failing the session with CUDA error
+    9 / NOT_IMPLEMENTED). A plain [dl] install (CPU-only build)
     silently falls back to CPU, never an error."""
     monkeypatch.delenv("KEYPRISM_ORT_PROVIDERS", raising=False)
     pc = dlsep.provider_chain
@@ -642,7 +644,11 @@ def test_provider_chain_prefers_gpu(monkeypatch):
                          "CPUExecutionProvider"]) == \
         ["CoreMLExecutionProvider", "CPUExecutionProvider"]
     assert pc(available=["CPUExecutionProvider"]) == ["CPUExecutionProvider"]
-    assert pc(available=[]) == []
+    assert pc(available=[]) == ["CPUExecutionProvider"]
+    # CPU stays last even when the build does not list it (every real
+    # build ships it; this pins the ALWAYS-appended contract)
+    assert pc(available=["CUDAExecutionProvider"]) == \
+        ["CUDAExecutionProvider", "CPUExecutionProvider"]
     # several GPUs compiled in: the first entry of the preference wins
     assert pc(available=["CoreMLExecutionProvider",
                          "CUDAExecutionProvider",
@@ -678,16 +684,15 @@ def test_provider_chain_env_override(monkeypatch):
         override="coreml") == \
         ["CoreMLExecutionProvider", "CPUExecutionProvider"]
     # the override replaces the default probe entirely: an unlisted-but-
-    # available GPU is NOT picked (user preference wins); CPU remains
+    # available GPU is NOT picked (user preference wins); CPU appended
     monkeypatch.setenv("KEYPRISM_ORT_PROVIDERS", "CUDA,DirectML")
     assert dlsep.provider_chain(
         available=["CoreMLExecutionProvider",
                    "CPUExecutionProvider"]) == ["CPUExecutionProvider"]
-    # an all-unknown override on a CPU-less fake build falls back to the
-    # default probe
+    # an all-unknown override degrades to the mandatory CPU tail
     assert dlsep.provider_chain(
         available=["CoreMLExecutionProvider"],
-        override="CUDA") == ["CoreMLExecutionProvider"]
+        override="CUDA") == ["CPUExecutionProvider"]
 
 
 class _FakeOrt:
@@ -782,6 +787,116 @@ def test_load_session_silent_cpu_fallback_when_gpu_unusable(
     with pytest.raises(RuntimeError):
         dlsep._load_session(model3, threads=0)
     assert fake2.requests == [["CPUExecutionProvider"]]
+
+
+def test_session_key_includes_providers(tmp_path, monkeypatch):
+    """3.10.2: the session singleton key includes the provider list, so
+    a device switch (auto vs forced CPU) cannot silently reuse a session
+    built for another chain; force_reload evicts every session of the
+    path (the runtime retry path)."""
+    fake = _FakeOrt(active=["CPUExecutionProvider"],
+                    available=["CUDAExecutionProvider",
+                               "CPUExecutionProvider"])
+    monkeypatch.setattr(dlsep, "ort", fake)
+    monkeypatch.setattr(dlsep, "ORT_AVAILABLE", True)
+    monkeypatch.setattr(dlsep, "_ACTIVE_PROVIDERS", [])
+    monkeypatch.delenv("KEYPRISM_ORT_PROVIDERS", raising=False)
+    model = tmp_path / "m.onnx"
+    model.write_bytes(b"x")
+    s1 = dlsep._load_session(model, threads=0,
+                             providers=["CUDAExecutionProvider",
+                                        "CPUExecutionProvider"])
+    n_after_first = len(fake.requests)
+    s2 = dlsep._load_session(model, threads=0,
+                             providers=["CPUExecutionProvider"])
+    assert s2 is not s1                       # different chain: new session
+    assert len(fake.requests) == n_after_first + 1
+    assert fake.requests[-1] == ["CPUExecutionProvider"]
+    s3 = dlsep._load_session(model, threads=0,
+                             providers=["CPUExecutionProvider"])
+    assert s3 is s2                           # same chain: singleton hit
+    s4 = dlsep._load_session(model, threads=0,
+                             providers=["CPUExecutionProvider"],
+                             force_reload=True)
+    assert s4 is not s2                       # evicted + rebuilt
+    assert fake.requests[-2] == ["CPUExecutionProvider"]
+
+
+def test_run_session_cuda_error9_falls_back_to_cpu(tmp_path, monkeypatch):
+    """3.10.2 D1 centerpiece: a GPU session that loads fine but fails on
+    FIRST INFERENCE (CUDA error 9 / NOT_IMPLEMENTED on a Conv node) is
+    evicted, rebuilt pure-CPU, and the same call retried once — the
+    separation completes instead of crashing. A pure-CPU session has no
+    fallback left: its errors propagate."""
+    cuda_err = RuntimeError(
+        "CUDA_ERROR 9: NOT_IMPLEMENTED kernel 'Conv' not implemented on "
+        "the CUDAExecutionProvider")
+    attempts = {"n": 0}
+
+    def fake_load(path, threads=None, providers=None, force_reload=False):
+        attempts["n"] += 1
+        assert list(providers) == ["CPUExecutionProvider"]
+        assert force_reload is True
+        return _FakeSession(stems=6)   # healthy CPU session (6 stems)
+
+    monkeypatch.setattr(dlsep, "_load_session", fake_load)
+
+    class _BrokenThenGood:
+        """Stands in for the pre-built GPU session."""
+
+        def get_inputs(self):
+            return [_FakeSession._In()]
+
+    gpu_sess = _BrokenThenGood()
+
+    sep = dlsep.DemucsSeparator(
+        "demucs_6", infer=lambda c: np.zeros((6, c.shape[0]),
+                                             dtype=np.float32))
+    sep._session = gpu_sess
+    sep._io = ("mix", 2)
+    sep._segment = dlsep.SEGMENT_SAMPLES
+    sep._path = tmp_path / "m.onnx"
+    sep._path.write_bytes(b"x")
+    sep._threads = 0
+    sep._session_providers = ["CUDAExecutionProvider",
+                              "CPUExecutionProvider"]
+
+    def run_raises(out_names, feed):
+        raise cuda_err
+
+    gpu_sess.run = run_raises
+    out = sep._run_session(np.zeros(dlsep.SEGMENT_SAMPLES,
+                                    dtype=np.float32))
+    assert out.shape[0] == 6                  # retried on CPU and done
+    assert attempts["n"] == 1
+    assert sep._session_providers == ["CPUExecutionProvider"]
+    assert sep._session is not gpu_sess
+
+    # a pure-CPU session has nowhere to fall back: the error propagates
+    sep._session_providers = ["CPUExecutionProvider"]
+    sep._session = type("S", (), {"run": staticmethod(run_raises),
+                                  "get_inputs": lambda self:
+                                      [_FakeSession._In()]})()
+    with pytest.raises(RuntimeError):
+        sep._run_session(np.zeros(dlsep.SEGMENT_SAMPLES,
+                                  dtype=np.float32))
+
+    # non-EP failures (e.g. segment mismatch) are never retried
+    calls = {"n": 0}
+
+    def run_other(out_names, feed):
+        calls["n"] += 1
+        raise RuntimeError("Got invalid dimensions for input")
+
+    sep._session_providers = ["CUDAExecutionProvider",
+                              "CPUExecutionProvider"]
+    sep._session = type("S", (), {"run": staticmethod(run_other),
+                                  "get_inputs": lambda self:
+                                      [_FakeSession._In()]})()
+    with pytest.raises(RuntimeError):
+        sep._run_session(np.zeros(dlsep.SEGMENT_SAMPLES,
+                                  dtype=np.float32))
+    assert calls["n"] == 1
 
 
 def test_ping_reports_ort_providers(srv, monkeypatch):

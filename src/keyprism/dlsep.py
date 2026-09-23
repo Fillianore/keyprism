@@ -129,13 +129,16 @@ def provider_chain(available: list | None = None,
                    override: str | None = None) -> list:
     """The provider list handed to ``InferenceSession`` (ordered).
 
-    Default: CUDA -> DirectML -> CoreML -> CPU, intersected with
-    ``available`` (``ort.get_available_providers()`` when not given).
-    ``KEYPRISM_ORT_PROVIDERS="CUDA,CPU"`` replaces the preference part
-    (short names or raw ORT names, order = preference); tokens naming
-    providers this build lacks are silently dropped — the fallback is
-    CPU, never a crash. ``override=`` is the test seam (wins over the
-    env var)."""
+    Default: CUDA -> DirectML -> CoreML, intersected with ``available``
+    (``ort.get_available_providers()`` when not given), and
+    ``CPUExecutionProvider`` ALWAYS appended at the END (3.10.2 D1:
+    with CPU in the list, ORT runs any op that lacks a GPU kernel on
+    CPU instead of failing the whole session with CUDA error 9 /
+    NOT_IMPLEMENTED on e.g. a Conv node). ``KEYPRISM_ORT_PROVIDERS=
+    "CUDA,CPU"`` replaces the preference part (comma list, order =
+    preference; short names or raw ORT names); tokens naming providers
+    this build lacks are silently dropped. ``override=`` is the test
+    seam (wins over the env var)."""
     if available is None:
         available = ort_available_providers()
     avset = {str(p) for p in available}
@@ -149,12 +152,11 @@ def provider_chain(available: list | None = None,
     if not prefs:
         prefs = list(_PROVIDER_PREFERENCE)
     chain = []
-    for p in prefs + [CPU_PROVIDER]:
+    for p in prefs:
         if p in avset and p not in chain:
             chain.append(p)
-    if not chain:  # override named nothing this build ships
-        chain = [p for p in list(_PROVIDER_PREFERENCE) + [CPU_PROVIDER]
-                 if p in avset]
+    if CPU_PROVIDER not in chain:
+        chain.append(CPU_PROVIDER)
     return chain
 
 
@@ -597,7 +599,8 @@ class DemucsSeparator:
 
     def __init__(self, variant: str = "demucs_4", infer=None,
                  threads: int | None = None,
-                 download_progress=None):
+                 download_progress=None,
+                 device_providers: list | None = None):
         if variant not in STEM_SPECS:
             raise ValueError(
                 f"未知 DL 分离方法: {variant} (可用: {', '.join(DL_METHODS)})")
@@ -606,16 +609,29 @@ class DemucsSeparator:
         self._infer = infer
         self._session = None
         self._io = None
+        # Providers the CURRENT session was built for (the runtime
+        # EP-failure retry only fires while a GPU EP is still in play)
+        self._session_providers: list = []
         # Fixed model segment length in samples (0 = unknown/flexible:
         # injected infer backends accept whatever the chunker produces)
         self._segment = 0
+        # Device-selector routing (3.10.2): forced provider list from
+        # providers_for_device (None = auto / probe chain)
+        self._device_providers = \
+            list(device_providers) if device_providers else None
+        self._path = None
+        self._threads = threads
         if infer is None:
             if not ORT_AVAILABLE:
                 raise DLMissingError(
                     "onnxruntime 未安装: 请安装 DL 依赖 (uv sync --extra dl)")
             path = self._resolve_model_file(
                 download_progress=download_progress)
-            self._session = _load_session(path, threads)
+            self._path = path
+            self._session = _load_session(path, threads,
+                                          providers=self._device_providers)
+            self._session_providers = list(self._device_providers) \
+                if self._device_providers else provider_chain()
             self._io = _session_io(self._session)
             try:
                 self._segment = int(
@@ -737,7 +753,43 @@ class DemucsSeparator:
         When the export fixes the segment length (``self._segment``), a
         shorter input is zero-padded up to the segment (see
         :func:`_pad_segment`) and the output trimmed back to the valid
-        region."""
+        region.
+
+        Runtime EP-failure retry (3.10.2 D1): a GPU EP can load fine yet
+        fail on FIRST INFERENCE when a node lacks a kernel for it (CUDA
+        error 9 / NOT_IMPLEMENTED on e.g. a Conv node) — the failure
+        surfaces at ``session.run()``, not at session creation. While a
+        GPU EP is still in play, such a failure evicts the cached
+        session and rebuilds it pure-CPU once, then retries the call;
+        the rest of the task (and every later request) runs on CPU."""
+        try:
+            return self._session_run(x)
+        except Exception as e:  # noqa: BLE001 - classified below
+            if not self._retry_cpu_on_ep_failure(e):
+                raise
+            return self._session_run(x)
+
+    def _retry_cpu_on_ep_failure(self, e: Exception) -> bool:
+        """True when the failure looks like a GPU EP falling short at
+        run time ("NOT IMPLEMENTED" / "CUDA" in the message) AND the
+        current session still targets a GPU EP — in that case rebuild
+        the session pure-CPU (evicting the singleton) and let the caller
+        retry once. A pure-CPU session has nowhere to fall back to, so
+        its errors are re-raised verbatim."""
+        msg = str(e).lower()
+        if "not implemented" not in msg and "cuda" not in msg:
+            return False
+        if not any(p != CPU_PROVIDER for p in self._session_providers):
+            return False
+        print(f"[dlsep] GPU 执行提供者推理失败, 回退到纯 CPU 重建会话 "
+              f"({type(e).__name__}: {e})", flush=True)
+        self._session = _load_session(self._path, threads=self._threads,
+                                      providers=[CPU_PROVIDER],
+                                      force_reload=True)
+        self._session_providers = [CPU_PROVIDER]
+        return True
+
+    def _session_run(self, x: np.ndarray) -> np.ndarray:
         sess, (name, in_ch) = self._session, self._io
         x, valid = _pad_segment(x, self._segment)
         t = x.reshape(1, -1)
@@ -861,19 +913,40 @@ def _normalize_output(outs, n_samples: int) -> np.ndarray:
     return arr[..., :n_samples].astype(np.float32, copy=False)
 
 
-def _load_session(path: Path, threads: int | None = None):
-    """Cached session loader (singleton per resolved path+mtime).
+#: Singleton sessions keyed by (path, mtime, providers tuple): the
+#: providers are part of the key so a device switch (auto vs forced
+#: CPU) can never silently reuse a session built for another chain.
+_SESSION_META: dict = {}
 
-    Providers come from :func:`provider_chain` (GPU preference
-    intersected with the installed build). When a requested GPU EP makes
-    session creation fail anyway (driver/runtime mismatch — the EP can
-    be compiled in yet unusable on this host), the load silently retries
-    CPU-only: a missing/broken GPU stack must never crash the server.
-    The ACTIVE provider list (``session.get_providers()`` — individual
-    ops may still fall back to CPU inside the graph) is recorded for
-    :func:`active_providers` / the /api/ping capability."""
-    key = (str(path.resolve()), int(path.stat().st_mtime))
+
+def _load_session(path: Path, threads: int | None = None,
+                  providers: list | None = None,
+                  force_reload: bool = False):
+    """Cached session loader (singleton per path+mtime+providers).
+
+    ``providers`` overrides :func:`provider_chain` (the Device selector's
+    forced gpu/cpu routing); ``force_reload`` evicts every session for
+    this path first (the runtime EP-failure retry path). Providers come
+    from :func:`provider_chain` when not given — GPU preference
+    intersected with the installed build, CPU always last. When a
+    requested GPU EP makes session creation fail anyway (driver/runtime
+    mismatch — the EP can be compiled in yet unusable on this host), the
+    load silently retries CPU-only: a missing/broken GPU stack must
+    never crash the server. The ACTIVE provider list
+    (``session.get_providers()`` — individual ops may still fall back to
+    CPU inside the graph) is recorded for :func:`active_providers` /
+    the /api/ping capability."""
+    if not providers:
+        providers = provider_chain()
+    else:
+        providers = list(providers)
+    resolved = str(path.resolve())
+    key = (resolved, int(path.stat().st_mtime), tuple(providers))
     with _SESSIONS_LOCK:
+        if force_reload:
+            for k in [k for k in _SESSIONS if k[0] == resolved]:
+                _SESSIONS.pop(k, None)
+                _SESSION_META.pop(k, None)
         hit = _SESSIONS.get(key)
         if hit is not None:
             return hit
@@ -888,18 +961,18 @@ def _load_session(path: Path, threads: int | None = None):
         if threads and threads > 0:
             opts.intra_op_num_threads = threads
             opts.inter_op_num_threads = 1
-        providers = provider_chain()
         try:
             sess = ort.InferenceSession(str(path), sess_options=opts,
                                         providers=providers)
         except Exception:  # noqa: BLE001 - GPU advertised but unusable
-            if providers in ([], [CPU_PROVIDER]):
+            if providers == [CPU_PROVIDER]:
                 raise
             sess = ort.InferenceSession(str(path), sess_options=opts,
                                         providers=[CPU_PROVIDER])
         with _ACTIVE_LOCK:
             _ACTIVE_PROVIDERS[:] = list(sess.get_providers())
         _SESSIONS[key] = sess
+        _SESSION_META[key] = {"providers": list(providers)}
         return sess
 
 
