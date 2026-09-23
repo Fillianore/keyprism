@@ -14,7 +14,9 @@
 
 ```
 音频 → STFT → 半音聚合 → 交互式热图 + 播放器
-            └→ 源分离 (HPSS / RPCA) → 分轨播放器
+           ├→ 源分离 (HPSS / RPCA) → 分轨播放器
+           └→ Demucs 分离 (4/6 轨, 可选 [dl]) → 多轨工作台
+                                 └→ 多音轨转写 (Basic Pitch)
 ```
 
 <div align="center">
@@ -41,10 +43,44 @@
   RPCA（分块 ADMM 低秩/稀疏）与融合模式，按需对缓存的复数 STFT 计算，
   保留原始相位渲染为分轨 WAV 文件，缓存于分析条目下、按需提供
   （`/api/stems`，需 serve 模式）
-- **分轨播放器**：多轨面板（每轨音量、静音 M、独奏 S，外加原曲 Mix 行），
-  与主播放走同一套传输控制——所有分轨与原曲在同一个绝对 AudioContext
-  时间戳上一起启动，采样级精确同步；静音/独奏通过增益节点斜坡切换，
-  无咔哒声；分轨可下载 WAV 供外部 DAW 使用
+- **分轨播放器与 DAW 调音台**：多轨面板（每轨推子带实时 dB 读数、静音 M、
+  独奏 S，外加原曲 Mix 行），与主播放走同一套传输控制——所有分轨与原曲在
+  同一个绝对 AudioContext 时间戳上一起启动，采样级精确同步。调音台语义
+  对齐 DAW：独奏是破坏性的（落地为真实静音状态，M 与 S 永远不会同时点亮）、
+  每轨默认补足增益（make-up gain，单独试听时响度与原曲可比）、母线上挂
+  砖墙限制器（−1 dB 门限、20:1、1 ms 启动）防止多轨叠加过载；静音/独奏通过
+  增益节点斜坡切换，无咔哒声；分轨可下载 WAV 供外部 DAW 使用
+- **DL 分离 — Demucs（可选 `[dl]` extra）**：安装可选深度学习依赖
+  （`uv sync --extra dl`）后，htdemucs 4 轨与 MIT 许可的 6 轨导出模型
+  （鼓/贝斯/其他/人声/吉他/钢琴——首次使用自动下载并记录来源
+  provenance）经 ONNX Runtime 本地推理：按模型定长分块、50% 重叠、
+  以严格为正的 Hann 窗按累计窗和归一化做无缝交叉淡化（边缘重建精确、
+  内存以单分块为界——全曲永远不会整段喂给模型）。分轨与经典分轨同样缓存，
+  可下载 WAV。未安装 extra 时所有 DL 端点干净地回答 `501`，前端隐藏相关
+  选项——应用继续工作在 Phase 2 流水线上
+- **推理质量档位与设备选择（可选）**：质量 fast / balanced / best 通过
+  demucs 循环移位平均（围绕不动的 ONNX 图做 1 / 2 / 3 次推理）以时间换精度
+  （分轨缓存感知档位）；设备选择器（Auto / GPU / CPU）调度 ONNX Runtime
+  执行提供者，安装的构建没有 GPU 提供者时 GPU 选项自动禁用。GPU 构建
+  （Linux 用 `[dl-cuda]`，Windows 用 `[dl-directml]`）自动探测提供者链，
+  CUDA 13 运行时以 pip wheel 形式发布并按需预加载（完整系统级 CUDA 安装
+  优先，wheel 只补缺口），GPU 提供者缺失或失败时静默回退 CPU——没有 GPU
+  的环境只是降级，绝不崩溃。`/api/ping` 上报激活的提供者链（面板的
+  GPU/CPU 徽章）
+- **多轨工作台（可选）**：堆叠多轨面板（Mix + 人声/鼓/贝斯/其他 或 Demucs
+  六轨），每轨波形、音量、静音/独奏，全部锁定共享传输时钟（每轨播放头
+  骑在主光标的帧循环上；放大视图的高清波形由 Web Worker 按需计算）。
+  钢琴/吉他/其他轨的多音符叠加（Basic Pitch + 同音高碎片合并，50 ms 间隙
+  阈值）绘制在每轨专属 HTML canvas 上——绝不用 SVG 形状——空间索引
+  （有序起点 + 二分查找），每次 relayout 与主频谱图的缩放/平移保持同步。
+  长任务是后台进程：实时进度（含模型下载阶段）与 停止/重启 控制
+  （分块边界的协作式取消；重启绕过缓存重算）
+- **图层合成器（可选）**：把某轨的 ⧉ 手柄拖到主频谱图上，即可将该分轨的
+  半音频谱叠加在主图上（时间轴与音高轴与主热图完全共享，亮度以主图
+  混音峰值归一化，叠加层显示的是它在混音中的真实占比）。图层经 CSS
+  mix-blend-mode 混合——叠加（screen：暗像素无效）或 覆盖（normal：不透明）
+  ——并支持每层透明度、增益（±24 dB）与高光 γ 重塑，右上角图层管理器提供
+  可见性 / 拖动排序 / 删除；叠加层只在视图变化时重绘，播放期间绝不变动
 - **在线选曲**：顶栏"选择音乐"按钮选择本地音频，上传后端解析并整页切换（需 serve 模式）
 - **音频格式**：mp3/wav/ogg/flac 直接读取；m4a/aac/wma/opus/aiff 等其他主流容器
   经 PyAV (ffmpeg) 解码（sndfile 不支持时自动回退），并自动转存浏览器全兼容的
@@ -87,7 +123,9 @@ keyprism/
 │       ├── hpss.py        # 中值滤波 HPSS 掩码 (零 IO)
 │       ├── rpca.py        # 分块 inexact-ALM (ADMM) RPCA (零 IO)
 │       ├── stems.py       # 分轨合成 + 按条目的 stems 缓存
-│       └── server.py      # HTTP 服务: /api/ping /api/spec /api/notes /api/stems /api/upload
+│       ├── dlsep.py       # Demucs ONNX 分块分离 + DL 分轨缓存 (可选 [dl])
+│       ├── poly_transcribe.py  # Basic Pitch 多音轨音符 + 碎片合并 (可选 [dl])
+│       └── server.py      # HTTP 服务: /api/ping /api/spec /api/notes /api/stems /api/task /api/upload
 ├── pyproject.toml        # uv 项目定义 (依赖锁定见 uv.lock, 默认走清华源)
 ├── scripts/              # 启动与发版脚本 (配置与端口见下)
 │   ├── start.sh          # 一键启动 Linux / macOS
@@ -110,17 +148,31 @@ keyprism/
         ├── player.js       # Web Audio 播放引擎 + 传输事件
         ├── notes.js        # 音符叠加层 (Phase 1 转写)
         ├── stems.js        # 分轨播放器: Web Audio 多轨同步 (Phase 2)
+        ├── lanes.js        # 多轨 DL 工作台: canvas 轨道 + 多音音符 (Phase 3)
+        ├── mixer.js        # DAW 调音台状态: 破坏性独奏、补足增益、母线
+        ├── controls.js     # 共享面板行工厂 (音量 / M / S / 扒谱)
+        ├── geometry.js     # 共享绘图几何 (主图 + 轨道像素契约)
+        ├── layers.js       # 图层合成器: 分轨频谱叠加到主图
+        ├── stemspec.js     # 分轨频谱请求缓存 + 强度整形
+        ├── wavelod.js      # LOD 波形缓存 (Web Worker 客户端)
+        ├── wave-worker.js  # 逐像素列 min/max 工作线程
+        ├── specfeed.js     # 滚轮手势下热图轨迹的平移滑动
+        ├── trackIcons.js   # 调音台行标签的内联 SVG 图标
+        ├── toast.js        # 可关闭的气泡提示
         └── style.css
 ```
 
 ## 测试
 
 `tests/` 不实现产品功能, 是自动化回归测试: 修改代码后运行
-`uv run pytest -q`, 95 个用例覆盖 DSP 算法 (含 120 BPM 节拍器确定性用例)、
+`uv run pytest -q`, 172 个用例覆盖 DSP 算法 (含 120 BPM 节拍器确定性用例)、
 解码链回退 (真实 m4a 编码)、payload 契约 (前端依赖字段逐一断言)、
 转写 (合成音符恢复)、源分离 (HPSS/RPCA 合成分离、ADMM 收敛、分块与
-全曲等价、流式 ISTFT 精确性)、HTTP 全路由 (上传切换 / notes / stems /
-错误码 / CORS 预检)。它是重构与加功能时的安全网, 建议保留。
+全曲等价、流式 ISTFT 精确性)、DL 工作台 (501 优雅降级、Demucs 分块/
+重建数学、音符碎片合并、后台任务管线、前端 canvas 同步源码契约) 与
+HTTP 全路由 (上传切换 / notes / stems / 错误码 / CORS 预检)。DL 用例
+对可选模型做打桩, 同一套测试在 装/不装 `[dl]` extra 两种环境下都应绿。
+它是重构与加功能时的安全网, 建议保留。
 
 CI (`.github/workflows/ci.yml`) 在每次 push / PR 时自动执行同样流程:
 后端 `uv sync + pytest` + 启动脚本语法检查, 前端 `npm ci + build`,
@@ -148,6 +200,9 @@ CHANGELOG 并开发版 PR。合并后由 workflow 自动接管：打 `v<版本>`
 ├── cache/matplotlib/   # matplotlib 字体与配置缓存
 ├── cache/analysis/     # 复数 STFT 分析缓存 (stft.npy + meta.json,
 │                       #   以及各条目下的 notes/ 与 stems/ 结果)
+├── models/demucs/      # 可选 Demucs ONNX 权重 ([dl] extra 首次使用时
+│                       #   自动下载; KEYPRISM_DEMUCS4_FILE / KEYPRISM_DEMUCS6_FILE
+│                       #   指向显式文件, *_REPO 指向替代 HF 仓库)
 ├── uploads/            # "选择音乐" 上传的音频暂存 (自动只保留最近几个)
 └── config.env          # 可选持久配置: KEY=VALUE, # 开头为注释
 ```
@@ -168,6 +223,17 @@ CHANGELOG 并开发版 PR。合并后由 workflow 自动接管：打 `v<版本>`
 
 - **Python 3.10+**，通过 [uv](https://docs.astral.sh/uv/) 管理环境（自动创建 venv 并锁定依赖）
 - **Node.js 20.19+**（用于 Vite 7 前端，`npm run dev` 在更低版本无法启动）
+- 可选 DL 分离/转写（Phase 3）：`uv sync --extra dl` 安装
+  `onnxruntime` + `basic-pitch` + `huggingface-hub`；Demucs 权重
+  （4 轨与 6 轨导出）首次使用时自动下载到 `~/.keyprism/models/demucs/`
+  （或放入任意兼容的 htdemucs ONNX 导出；无法访问 huggingface.co 的网络
+  设置 `HF_ENDPOINT=https://hf-mirror.com`）。不安装也一切可用——DL 功能
+  只会回答 501 并在 UI 中隐藏
+- 可选 GPU 加速：`uv sync --extra dl --extra dl-cuda`（Linux、NVIDIA——
+  安装 `onnxruntime-gpu` 及以 pip wheel 发布的 CUDA 13 运行时，自动预加载）
+  或 `uv sync --extra dl --extra dl-directml`（Windows、任意 GPU 厂商）。
+  两个 onnxruntime 构建至多装一个；GPU extra 缺失/损坏时静默回退 CPU，
+  绝不报错，`KEYPRISM_ORT_PROVIDERS` 可固定提供者链
 
 ## 快速开始
 
@@ -229,12 +295,18 @@ uv run python -m keyprism [音频] [--serve PORT] [--rate R] [--sub S]
 
 | 端点 | 说明 |
 |------|------|
-| `GET /api/ping` | 健康检查 |
+| `GET /api/ping` | 健康检查 + DL 能力标志（`capabilities.dl` / `capabilities.poly` / `dl_methods` / `ort_providers` / `ort_providers_available`） |
 | `GET /api/spec?rate=15&sub=5` | 重算指定分辨率的频谱（三通道 + 包络），带缓存 |
 | `GET /api/notes?track=bass\|lead\|both` | 单音轨转写音符，按音轨缓存 |
+| `GET /api/notes?track=piano\|guitar\|other&method=poly[&source=demucs_6]` | DL 分轨的多音符转写（Basic Pitch、碎片合并；无 `[dl]` extra 时 501） |
 | `GET /api/midi?track=bass\|lead\|both` | 同样的音符导出为标准 MIDI 文件下载 |
 | `GET /api/stems?method=hpss\|rpca\|combined` | 当前曲目的分轨（`&progress=1` 轮询计算进度） |
-| `GET /api/stem?method=..&name=..` | 单个分轨的 WAV 附件下载 |
+| `GET /api/stems?method=demucs_4\|demucs_6` | 从条目缓存提供已算好的 DL 分轨（算完前 404） |
+| `POST /api/stems?method=demucs_4\|demucs_6[&quality=fast\|balanced\|best][&device=auto\|gpu\|cpu][&force=1]` | 启动 DL 分离后台任务；返回 `{"task_id", "status_url"}`（无 `[dl]` extra 时 501；缓存命中直接返回，`force=1` 强制重算；quality/device 参与缓存判定） |
+| `GET /api/task/{task_id}` | 后台任务轮询：`{"status": "running"\|"downloading"\|"done"\|"error"\|"cancelled", "progress": 0..1, "stems": [...]}` |
+| `POST /api/task/{task_id}/cancel` | 协作式停止：在下一个分块/分段边界取消；未完成的下载被丢弃 |
+| `GET /api/stem?method=..&name=..` | 单个分轨的 WAV 附件下载（经典与 DL 方法） |
+| `GET /api/stem_spec?method=..&stem=..` | 分轨的半音频谱（88 行、相对主图混音峰值的 dB），供轨道迷你频谱与叠加图层使用 |
 | `POST /api/upload?name=歌曲.mp3` | 上传本地音频（请求体为原始文件字节），后端解析并切换当前曲目，刷新 `data.json`；返回完整 payload |
 
 完整参考（错误码 / 响应结构 / 预检）见 `docs/api.md`。
@@ -251,9 +323,13 @@ uv run python -m keyprism [音频] [--serve PORT] [--rate R] [--sub S]
 | 双击 | 恢复全曲视图 |
 | 点击频谱 | 定位播放进度（不自动播放） |
 | 分轨 → 开 | 计算/读取分轨并在频谱图下方展开分轨面板（需 serve 模式）；原曲自动静音，关闭时恢复 |
-| 分轨面板 | 每轨音量滑块、M (静音)、S (独奏)；方法切换（融合 / HPSS / RPCA）；经 `/api/stem` 链接下载 |
+| 分轨面板 | 每轨推子带实时 dB 读数（默认补足增益）、M (静音)、S (独奏)；方法切换（融合 / HPSS / RPCA）；经 `/api/stem` 链接下载；母线经过砖墙限制器 |
+| 多轨 → 开 | 展开 DL 工作台面板（需 serve 模式 + `[dl]` extra）；原曲自动静音，关闭时恢复；不做任何自动分析 |
+| 轨道控制条 | 方法（经典 HPSS/RPCA/融合 或 Demucs 4/6 轨）、质量（fast / balanced / best）、设备（Auto / GPU / CPU）、GPU/CPU 徽章，以及 ▶ 运行 / ⏹ 停止 / ↻ 重启：运行提交分离任务（实时进度含模型下载阶段），停止协作式取消，重启取消并绕过缓存重算 |
+| 轨道面板 | 每轨波形（放大时 LOD 高清）或迷你频谱（[波形\|频谱] 切换）、音量滑块、M (静音)、S (独奏)；PX 切换多音符叠加（钢琴/吉他/其他）；轨道与主频谱图缩放/平移联动 |
+| 拖动轨道的 ⧉ 手柄到主图 | 将该分轨频谱叠加为合成图层（叠加 screen / 覆盖 normal 混合、每层透明度、增益 ±24 dB、高光 γ；右上角管理/排序/删除） |
 | 底部导航条 | 拖窗口平移 / 拖手柄调宽 / 点击空白跳转 |
-| 顶栏 | 分辨率、通道、音符、分轨、音域、BPM、偏移、拍号、配色、色彩下限、高光 γ |
+| 顶栏 | 分辨率、通道、音域、BPM、偏移、拍号、配色、色彩下限、高光 γ |
 | 点击数值标签 | 直接输入（Enter 提交 / Esc 取消），↺ 还原默认 |
 
 ## 技术说明
@@ -277,6 +353,14 @@ uv run python -m keyprism [音频] [--serve PORT] [--rate R] [--sub S]
   overlap-add 贡献者齐备的采样区间，输出与全矩阵重合成逐样本一致。
   分轨缓存在 STFT 条目旁（`stems/<版本>/<方法>/`），某个方法的首次请求支付
   计算耗时（演示曲目约几秒），后续请求即时返回文件
+- **DL 分离**：ONNX 图内嵌按定长分段（44.1 kHz 下约 7.8 s）定制的
+  STFT/iSTFT，因此分块跟随模型（50% 重叠、COLA 精确 Hann、尾块零填充），
+  ONNX 会话按 模型 + 提供者链 单例缓存。质量档位包裹同一张图：
+  循环移位 → 推理 → 移回再平均（fast/balanced/best = 1/2/3 次推理；
+  `shifts=0` 与旧单次推理逐字节一致）。GPU 提供者自动探测（CUDA →
+  DirectML → CoreML，CPU 永远殿后），CUDA 13 pip wheel 只在真正补缺口时
+  预加载，GPU 提供者首次推理失败即逐出会话并重试纯 CPU——两种方式产出
+  的分轨完全一致
 - **分轨播放器同步**：所有分轨与原曲都在同一个共享 AudioContext 上、以同一个
   绝对时间戳（`ctx.currentTime + 0.06`）调用 `source.start(when, offset)`，
   多轨播放采样级精确、无漂移；静音/独奏/音量只对增益节点做斜坡
