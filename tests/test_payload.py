@@ -8,7 +8,12 @@ import pytest
 
 from keyprism import audio_io
 from helpers import make_m4a, make_wav
-from keyprism.payload import analyze, compute_specs
+from keyprism.payload import (
+    analyze,
+    compute_specs,
+    joint_spec_peak,
+    stem_spec_payload,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -91,3 +96,81 @@ def test_analyze_m4a_end_to_end(tmp_path, isolated_dirs):
     d = analyze(p, 0.0, None, 2048, 70.0, 5, 1)
     assert d["durationSec"] == pytest.approx(1.5, abs=0.2)
     assert (isolated_dirs / "audio.wav").exists()
+
+
+# ------------------------------------------------- stem spec basis (3.9.1)
+
+def _master_basis(tmp_path, gain=1.0):
+    """(data2d, sr, master peak) for a stereo track whose channels are
+    identical, so mix == left == right and the joint peak is the mix
+    channel's semitone-matrix max."""
+    p = tmp_path / "t.wav"
+    make_wav(p, seconds=2.0)
+    data, sr, dur = audio_io.load_channels(p, 0.0, None)
+    data = data * gain
+    return data, sr, joint_spec_peak(data, sr, 2048, 60, 1)
+
+
+def test_stem_spec_payload_global_basis_not_inflated(tmp_path):
+    """3.9.1 C: a stem at HALF the master's amplitude must quantize to
+    -6.02 dB against the master joint peak — NOT to full scale (which is
+    what the pre-3.9.1 own-peak normalization produced). gain=0/screen
+    overlay brightness therefore matches the master's view of the stem."""
+    data, sr, peak = _master_basis(tmp_path)
+    stem = data.mean(axis=1) * 0.5  # exact -6.02 dB (power) below the peak
+    spec = stem_spec_payload(stem, sr, 2048, 70.0, peak_ref=peak)
+    assert spec["basis"] == "mix_joint_peak"
+    assert spec["peak_ref"] == pytest.approx(peak, rel=1e-5)
+    raw = np.frombuffer(base64.b64decode(spec["spec"]), dtype=np.uint8)
+    loudest = raw.max() / 255.0  # normalized dB over [0, 1]
+    # q = 255*(10*log10(0.25) + 70)/70 = 255*(70-6.0206)/70 ~ 233.1/255
+    expect = (10.0 * np.log10(0.25) + 70.0) / 70.0
+    assert loudest == pytest.approx(expect, abs=1.5 / 255)
+    assert loudest < 0.97  # clearly NOT the own-peak full scale
+
+
+def test_stem_spec_payload_own_peak_reference_full_scale(tmp_path):
+    """The contrast case: with peak_ref == the stem's OWN joint peak the
+    loudest cell quantizes to full scale — pinning the two bases apart so
+    the 3.9.1 change is a tested behavior, not an accident."""
+    data, sr, _ = _master_basis(tmp_path)
+    stem = data.mean(axis=1)
+    own = joint_spec_peak(np.stack([stem, stem], axis=1), sr, 2048, 60, 1)
+    spec = stem_spec_payload(stem, sr, 2048, 70.0, peak_ref=own)
+    raw = np.frombuffer(base64.b64decode(spec["spec"]), dtype=np.uint8)
+    assert raw.max() >= 254  # own peak == full scale
+
+
+def test_stem_spec_payload_rejects_bad_reference(tmp_path):
+    data, sr, _ = _master_basis(tmp_path)
+    stem = data.mean(axis=1)
+    with pytest.raises(ValueError, match="peak_ref"):
+        stem_spec_payload(stem, sr, 2048, 70.0, peak_ref=0.0)
+    with pytest.raises(ValueError, match="peak_ref"):
+        stem_spec_payload(stem, sr, 2048, 70.0, peak_ref=None)
+
+
+def test_joint_spec_peak_matches_compute_specs(tmp_path):
+    """The shared master basis is EXACTLY the peak data.json is quantized
+    against (single source of truth for the dB scale): it equals the max
+    over the three channels' semitone matrices, and the loudest quantized
+    mix cell sits at 10*log10(mix_max / peak) dB."""
+    from keyprism.dsp import spec_matrix
+
+    p = tmp_path / "t.wav"
+    make_wav(p, seconds=2.0)
+    data, sr, dur = audio_io.load_channels(p, 0.0, None)
+    peak = joint_spec_peak(data, sr, 2048, 60, 1)
+    matrices = [
+        spec_matrix(sig, sr, 2048, 60, 1)[0]
+        for sig in (data.mean(axis=1), data[:, 0], data[:, -1])
+    ]
+    assert peak == pytest.approx(max(m.max() for m in matrices), rel=1e-9)
+    assert peak > 0
+    # the data.json quantization is dB-normalized by the SAME peak
+    res = compute_specs(data, sr, dur, 15, 1, 70.0, 2048)
+    raw = np.frombuffer(base64.b64decode(res["specs"]["mix"]),
+                        dtype=np.uint8)
+    mix_db = raw.max() / 255.0 * 70.0 - 70.0
+    assert mix_db == pytest.approx(
+        10.0 * np.log10(matrices[0].max() / peak), abs=0.05)

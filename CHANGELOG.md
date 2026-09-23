@@ -7,6 +7,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-09-23
+
+### Added
+
+- Phase 3.9 — lane visualization engine + layer compositor (M1/M2):
+  - Shared plot geometry (`PLOT_LEFT_PX` / `PLOT_RIGHT_PX`, JS consts in
+    `frontend/src/geometry.js` mirrored into `--plot-left` /
+    `--plot-right` CSS custom properties): the master spectrogram plot
+    area and every lane canvas span the identical pixel boundaries, so a
+    drum hit lands on the same vertical line in both; the keyboard strip
+    is pinned to the fixed pixel geometry and re-pinned on resize
+  - Per-lane playhead hairlines driven by the master cursor's own
+    repaint path (new `player.onFrame`) — one time source, zero drift,
+    and playback never repaints a canvas
+  - LOD high-res waveforms: at view windows ≤ 10 s the lane waveform is
+    painted from per-pixel-column min/max computed on demand in a Web
+    Worker (`wavelod.js` + `wave-worker.js`), cached per
+    [lane, view window, column count]; the worker owns one transferred
+    mono PCM copy per lane
+  - Per-stem spectrogram endpoint `GET /api/stem_spec?method=&stem=`
+    (Phase 0 semitone aggregate of the stem, sub=1 → 88 rows, dB-
+    compressed against the stem's own peak, base64 uint8) disk-cached as
+    `spec_<stem>.json` beside the WAV in the version-tagged stems dir;
+  - Per-lane [Wave|Spec] toggle: the lane canvas flips to a mini-
+    spectrogram rendered from the shared `stemspec.js` fetch cache;
+    lazily fetched on first click, failure toasts and degrades to Wave
+  - Layer compositor: drag a lane's ⧉ handle onto the master spectrogram
+    to create an overlay layer of that stem's spectrogram — exactly
+    covering the master plot area, y-mapped onto the master heatmap's
+    key range; blending via CSS `mix-blend-mode` (叠加 = `screen` +
+    per-layer opacity slider, 覆盖 = `normal` + opacity 1); a top-right
+    manager lists layers topmost-first with blend / opacity /
+    visibility / drag-to-reorder / remove; overlays redraw only on
+    view-range change (throttled) — playback never repaints them
+
+### Changed
+
+- Master figure x axis now uses fixed pixel margins + full-domain range
+  (`margin.autoexpand` off) so the plot-area boundaries are exact; lane
+  grid columns are derived from the same CSS variables (the lane scope's
+  1px border became an inset box-shadow to keep the canvas box exact)
+
+### Fixed
+
+- 3.9.1 hotfix (three defects):
+  - Keyboard strip relocated INTO the left margin: plotly 'paper' shape
+    coordinates span the plotting area inside the margins, so 3.9's
+    fractions drew the keyboard INSIDE the plot area (~280–480px,
+    occluding the spectrum) while the left margin sat empty. The pitch
+    labels (C-note names) are now left-anchored annotations at ~10px —
+    leftmost — and the keyboard spans [40, PLOT_LEFT_PX−4] hugging the
+    plot edge; the plot area contains only spectrum. Resize re-pinning
+    (applyPlotShapes) now re-pins shapes AND annotations
+  - Layer INTENSITY controls: opacity is alpha-mixing, so per-layer
+    gain_dB (−24…+24 dB, default 0) and γ (0.3…3.0, default 1) now act
+    on the layer's dB matrix BEFORE the tint (dB' = dB + gain, then
+    v' = v^(1/γ) — the master's highlight-γ direction: the master warps
+    colorscale anchors by p^γ, so a BIGGER γ reads BRIGHTER; the naive
+    v^γ would invert the slider), on a second line of each layer-manager
+    row; gain shifts WHICH energies light up, opacity only fades the
+    whole layer. Direction locked by `npm run test:intensity` (Node,
+    wired into CI)
+  - Stem-spec normalization rebased onto the MASTER's mix joint peak
+    (`peak_ref` + `basis: "mix_joint_peak"` in the payload; frontend
+    asserts the master's dbRange): at gain 0 / opacity 1 / screen an
+    overlaid stem's brightness now equals its true share of the mix
+    instead of being inflated to its own full scale (pre-3.9.1 caches
+    fail the basis check and recompute). Pitch→pixel mapping extracted
+    into ONE shared definition (geometry.js `keyRangeUnits` /
+    `rowCenterUnit` / `unitToPlotFraction`) used by both the master
+    heatmap axis and the overlay canvases; a new `npm run test:geometry`
+    (Node, wired into CI) locks overlay-vs-master row alignment to
+    ≤ 1 px (measured worst |Δ| = 0.000000 px over 108 cases)
+
 ## [0.6.2] - 2026-09-23
 
 ### Added

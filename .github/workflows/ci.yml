@@ -54,5 +54,11 @@ jobs:
       - name: Mixer transition-table test (T1-T5, I1)
         run: npm run test:mixer
 
+      - name: Shared pitch->pixel geometry test (<=1 px alignment)
+        run: npm run test:geometry
+
+      - name: Layer intensity direction test (gamma matches master)
+        run: npm run test:intensity
+
       - name: Production build
         run: npm run build

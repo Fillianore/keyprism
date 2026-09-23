@@ -653,6 +653,80 @@ def test_lanes_js_is_wired_into_the_app():
     assert 'id="lanesPanel"' in html and "lanesToggle" in html
 
 
+def test_shared_pitch_mapping_contract():
+    """3.9.1 D: pitch->pixel is ONE shared definition (geometry.js:
+    keyRangeUnits / rowCenterUnit / unitToPlotFraction). The master
+    yaxis is built from keyRangeUnits + rowCenterUnit, the overlay
+    canvases map their bands through unitToPlotFraction — no
+    per-overlay re-implementation. The <=1 px overlay-vs-master row
+    alignment runs as a Node test (test:geometry) wired into npm + CI."""
+    geo = strip_js_comments(
+        (FRONTEND / "geometry.js").read_text(encoding="utf-8"))
+    for fn in ("keyRangeUnits", "rowCenterUnit", "unitToPlotFraction"):
+        assert f"export function {fn}" in geo
+    spec_src = strip_js_comments(
+        (FRONTEND / "spectrogram.js").read_text(encoding="utf-8"))
+    assert "keyRangeUnits(" in spec_src and "rowCenterUnit(" in spec_src
+    layers = strip_js_comments(
+        (FRONTEND / "layers.js").read_text(encoding="utf-8"))
+    assert "unitToPlotFraction(" in layers
+    assert "m * sub + (sub - 1) / 2" not in layers  # no re-implementation
+    script = FRONTEND.parent / "scripts" / "test-geometry.mjs"
+    assert script.is_file()
+    assert "unitToPlotFraction" in script.read_text(encoding="utf-8")
+    pkg = json.loads((FRONTEND.parent / "package.json").read_text(
+        encoding="utf-8"))
+    assert pkg["scripts"]["test:geometry"] == \
+        "node scripts/test-geometry.mjs"
+    assert "npm run test:geometry" in pkg["scripts"]["test"]
+    repo = Path(__file__).resolve().parent.parent
+    ci = (repo / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8")
+    assert "npm run test:geometry" in ci
+
+
+def test_layer_intensity_direction_contract():
+    """3.9.1 gamma-direction fix: the layer intensity transform lives in
+    ONE pure function (stemspec.js intensityValue) applying the MASTER's
+    highlight-γ direction (v^(1/γ) — bigger γ = brighter, because the
+    master warps colorscale anchors by p^γ). The direction is locked by a
+    Node test (test:intensity) wired into npm + CI."""
+    stemspec = strip_js_comments(
+        (FRONTEND / "stemspec.js").read_text(encoding="utf-8"))
+    assert "export function intensityValue" in stemspec
+    assert "Math.pow(t, 1 / Math.max(0.01, gamma))" in stemspec
+    # the naive v^γ (direction-inverted vs the master) must not survive
+    assert "Math.pow(t, g)" not in stemspec
+    script = FRONTEND.parent / "scripts" / "test-intensity.mjs"
+    assert script.is_file()
+    src = script.read_text(encoding="utf-8")
+    assert "bigger γ" in src and "intensityValue" in src
+    pkg = json.loads((FRONTEND.parent / "package.json").read_text(
+        encoding="utf-8"))
+    assert pkg["scripts"]["test:intensity"] == \
+        "node scripts/test-intensity.mjs"
+    assert "npm run test:intensity" in pkg["scripts"]["test"]
+    repo = Path(__file__).resolve().parent.parent
+    ci = (repo / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8")
+    assert "npm run test:intensity" in ci
+
+
+def test_stem_spec_shared_basis_contract():
+    """3.9.1 C frontend side: the stem-spec client asserts the master's
+    dB basis (getStemSpec expect.dbRange), and both consumers — the lane
+    [Wave|Spec] view and the overlay layers — pass data.dbRange so an
+    overlaid stem cannot render on a foreign scale."""
+    stemspec = strip_js_comments(
+        (FRONTEND / "stemspec.js").read_text(encoding="utf-8"))
+    assert "expect.dbRange" in stemspec
+    assert "stem spec: dbRange" in stemspec  # mismatch throws
+    for name in ("lanes.js", "layers.js"):
+        src = strip_js_comments(
+            (FRONTEND / name).read_text(encoding="utf-8"))
+        assert "dbRange: data.dbRange" in src
+
+
 def test_frontend_mixer_contract():
     """stems.js and lanes.js must share the MixerState (mixer.js): one
     master GainNode into a brickwall limiter before the destination,

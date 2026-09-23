@@ -42,6 +42,16 @@ def get(url):
         return r.status, json.loads(r.read().decode())
 
 
+def get_body(url):
+    """Like get(), but returns error responses instead of raising (the
+    JSON error paths of /api/stem_spec are part of its contract)."""
+    try:
+        with urllib.request.urlopen(url, timeout=30) as r:
+            return r.status, json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read().decode())
+
+
 def post(url, data: bytes):
     req = urllib.request.Request(url, data=data, method="POST")
     try:
@@ -82,6 +92,54 @@ def test_spec_writes_data_json(srv):
     assert (srv["pub"] / "data.json").exists()
     d = json.loads((srv["pub"] / "data.json").read_text(encoding="utf-8"))
     assert d["apiBase"].startswith("http://")
+
+
+def test_stem_spec_serves_quantized_matrix(srv):
+    """Phase 3.9: /api/stem_spec returns the quantized semitone
+    spectrogram of a computed stem (Phase 0 pipeline, sub=1 -> 88 rows),
+    disk-cached: a repeat request is a cache hit with an identical body.
+    (The analysis cache is content-addressed and shared across runs, so
+    the FIRST call may legitimately already be a hit.)"""
+    import base64
+
+    code, _ = get(f"{srv['base']}/api/stems?method=combined")
+    assert code == 200
+    url = f"{srv['base']}/api/stem_spec?method=combined&stem=harmonic"
+    code, body = get(url)
+    assert code == 200
+    assert body["method"] == "combined" and body["stem"] == "harmonic"
+    assert body["rows"] == 88
+    assert body["sub"] == 1
+    assert body["nCols"] > 0 and body["hopSec"] > 0
+    raw = base64.b64decode(body["spec"])
+    assert len(raw) == body["rows"] * body["nCols"]
+    assert max(raw) > 0  # a click-track fixture has visible energy
+    # 3.9.1 C: the global normalization basis is present and asserted —
+    # every stem spec is dB-normalized by the MASTER's mix joint peak, not
+    # the stem's own peak
+    assert body["basis"] == "mix_joint_peak"
+    assert body["peak_ref"] > 0
+    assert body["dbRange"] == 70.0
+    # repeat request: cache hit, byte-identical payload (minus the flag)
+    code, again = get(url)
+    assert code == 200 and again["cached"] is True
+    again.pop("cached")
+    first = dict(body)
+    first.pop("cached")
+    assert again == first
+
+
+def test_stem_spec_validation(srv):
+    """Unknown method/stem -> 400; separation not yet computed -> 404 with
+    the compute hint (the DL path needs no onnxruntime to answer)."""
+    code, body = get_body(f"{srv['base']}/api/stem_spec?method=nope&stem=x")
+    assert code == 400 and "未知" in body["error"]
+    code, body = get_body(
+        f"{srv['base']}/api/stem_spec?method=combined&stem=nope")
+    assert code == 400 and "未知" in body["error"]
+    code, body = get_body(
+        f"{srv['base']}/api/stem_spec?method=demucs_4&stem=bass")
+    assert code == 404 and "demucs_4" in body["error"]
 
 
 def test_upload_switches_track(srv):

@@ -61,6 +61,29 @@ def build_envelope_dataurl(spec_db: np.ndarray) -> str:
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
 
 
+def _spec_channels(data2d: np.ndarray) -> dict:
+    """The three payload channels (unified normalization set)."""
+    n_ch = data2d.shape[1]
+    return {
+        "mix": data2d.mean(axis=1),
+        "left": data2d[:, 0],
+        "right": data2d[:, 1] if n_ch > 1 else data2d[:, 0].copy(),
+    }
+
+
+def joint_spec_peak(data2d: np.ndarray, sr: int, window: int, max_cols: int,
+                    sub: int) -> float:
+    """The master spectrogram's normalization basis (3.9.1 C): the joint
+    peak of the three-channel semitone power matrices, exactly what
+    ``compute_specs`` quantizes data.json against. Single source so the
+    per-stem specs share the master's dB scale — an overlaid stem then
+    reads at its true share of the mix instead of being inflated to its
+    own full scale. (Rate-independent by construction: time pooling is
+    max-preserving; sub-dependent via ``widen_rows`` at sub > 1.)"""
+    return max(spec_matrix(sig, sr, window, max_cols, sub)[0].max()
+               for sig in _spec_channels(data2d).values())
+
+
 def compute_specs(data2d: np.ndarray, sr: int, dur: float, rate: int,
                   sub: int, db_range: float, window: int) -> dict:
     """Compute the three-channel spectra at the given resolution parameters
@@ -69,15 +92,9 @@ def compute_specs(data2d: np.ndarray, sr: int, dur: float, rate: int,
     if sub not in SUB_OPTIONS:
         sub = 1
     max_cols = max(60, int(round(rate * dur)))
-    n_ch = data2d.shape[1]
-    channels = {
-        "mix": data2d.mean(axis=1),
-        "left": data2d[:, 0],
-        "right": data2d[:, 1] if n_ch > 1 else data2d[:, 0].copy(),
-    }
     specs = {}
     hop = dur / 1000.0
-    for name, sig in channels.items():
+    for name, sig in _spec_channels(data2d).items():
         m, hop, _ = spec_matrix(sig, sr, window, max_cols, sub)
         specs[name] = m
     peak = max(m.max() for m in specs.values())
@@ -100,6 +117,47 @@ def compute_specs(data2d: np.ndarray, sr: int, dur: float, rate: int,
         "hopSec": round(hop, 6),
         "rate": rate,
         "sub": sub,
+    }
+
+
+def stem_spec_payload(x: np.ndarray, sr: int, window: int, db_range: float,
+                      peak_ref: float, rate: int = 30,
+                      max_cols: int = 6000) -> dict:
+    """One signal -> quantized semitone spectrogram for the lane
+    [Wave|Spec] view and the overlay layers (Phase 3.9, rebased 3.9.1).
+
+    Reuses the exact Phase 0 aggregate pipeline — ``spec_matrix`` with
+    ``sub=1`` (88 piano semitone rows, same row space as the master
+    heatmap's y axis, which is what makes the lane/overlay views line up
+    with the master). Normalization basis (3.9.1 C): the MASTER's mix
+    joint peak (``joint_spec_peak`` of the loaded track), NOT the stem's
+    own peak — an overlaid stem at gain 0 / opacity 1 / screen blend then
+    reads exactly as bright as the same energy in the master spectrum,
+    never inflated to its own full scale. Same power-domain
+    ``10*log10(m/peak_ref)`` and the same ``db_range`` floor as the
+    payload. ``peak_ref`` is returned (``peak_ref`` + ``basis``) so the
+    frontend can assert the basis. Pure: no IO."""
+    if not peak_ref or peak_ref <= 0:
+        raise ValueError("peak_ref 必须为正 (主图联合峰值)")
+    rate = min(max(rate, TIME_RATES[0]), TIME_RATES[-1])
+    max_cols = max(60, min(int(max_cols), 12000))
+    m, hop, _ = spec_matrix(np.asarray(x, dtype=np.float64), sr, window,
+                            max_cols, 1)
+    spec_db = np.maximum(10.0 * np.log10(np.maximum(m / peak_ref, 1e-12)),
+                         -db_range)
+    q = np.clip((spec_db + db_range) / db_range, 0.0, 1.0)
+    n_rows, n_cols = m.shape
+    return {
+        "spec": base64.b64encode(
+            (q * 255.0).round().astype(np.uint8).tobytes()).decode(),
+        "rows": int(n_rows),
+        "nCols": int(n_cols),
+        "hopSec": round(hop, 6),
+        "rate": int(rate),
+        "sub": 1,
+        "dbRange": float(db_range),
+        "peak_ref": round(float(peak_ref), 6),
+        "basis": "mix_joint_peak",
     }
 
 
