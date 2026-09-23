@@ -72,7 +72,15 @@
  *  - lane PLAYHEADS are thin DOM hairlines (same technique as the
  *    master cursor), moved by the master cursor's own repaint path via
  *    player.onFrame — ONE time source (ctx.currentTime), zero drift,
- *    and playback never repaints a single canvas pixel.
+ *    and playback never repaints a single canvas pixel;
+ *  - HIGH-RES WAVEFORMS (LOD): the cached full-track envelope stays for
+ *    the overview; when the visible window is <= LOD_SPAN_SEC the
+ *    per-pixel-column min/max are computed ON DEMAND from the stem PCM
+ *    inside a Web Worker (wavelod.js — the main thread never scans
+ *    samples), cached per [lane, view window, column count] with a
+ *    small FIFO bound, and painted pixel-sharp. The worker owns one
+ *    transferred mono copy per lane, so zoom/pan requests ship only the
+ *    view window.
  */
 
 import { t, onChange } from './i18n.js';
@@ -80,10 +88,22 @@ import { EPOCH_MS, pMs } from './spectrogram.js';
 import { MixerState, bufferPeak, makeupDb } from './mixer.js';
 import { trackRow, wireMuteSolo } from './controls.js';
 import { showToast } from './toast.js';
+import { WaveLod } from './wavelod.js';
 import { throttled } from './util.js';
 
 const START_LEAD = 0.06; // keep identical to player.js START_LEAD
 const POLL_MS = 700;
+
+/** LOD waveforms (Phase 3.9): windows at or below this span switch from
+ *  the ~1024-column overview envelope to per-pixel-column min/max
+ *  computed in the worker. */
+const LOD_SPAN_SEC = 10;
+
+/** Per-lane LOD cache bound (FIFO): keys are [aMs|bMs|columns]; a pan,
+ *  zoom or resize allocates a new entry, so the bound keeps memory flat
+ *  while covering ordinary browsing. The cache dies with the lane object
+ *  (method switch / track switch re-decode). */
+const LOD_CACHE_MAX = 8;
 
 /** Fixed DL stem contract per method (mirrors
  *  keyprism.dlsep.STEM_SPECS — the frontend never reads Python data).
@@ -139,6 +159,9 @@ export function initLanes({ gd, data, player, apiBase }) {
   const mixer = new MixerState(ctx, (norm, opts) =>
     player.setMixGain(norm, opts)
   );
+  // One shared LOD worker for every lane (module worker; sync fallback
+  // inside WaveLod when Workers are unavailable)
+  const lod = new WaveLod();
 
   const state = {
     enabled: false,
@@ -288,6 +311,46 @@ export function initLanes({ gd, data, player, apiBase }) {
     }
   }
 
+  /** LOD lookup/refresh for the current view (Phase 3.9). Returns the
+   *  cached per-column {min,max} for this exact [window, column count],
+   *  or null while nothing is ready — the draw then falls back to the
+   *  overview envelope and the worker reply repaints when it lands.
+   *  Cache key = exact view window + column count: any pan, zoom or
+   *  resize gets its own entry (invalidation by construction), bounded
+   *  by LOD_CACHE_MAX FIFO. */
+  function laneLod(lane, w) {
+    if (!lane.buffer || w < 32) return null;
+    const [aSec, bSec] = viewSec();
+    if (bSec - aSec > LOD_SPAN_SEC) return null;
+    const key = `${state.view.aMs}|${state.view.bMs}|${w}`;
+    const hit = lane.lodCache && lane.lodCache.get(key);
+    if (hit) return hit;
+    if (lane.lodPending) return null; // one request in flight per lane
+    if (!lane.lodCache) lane.lodCache = new Map();
+    if (!lane.lodUp) {
+      // hand the worker a zero-copy mono transfer once; in sync-fallback
+      // mode uploadPcm returns false and a main-thread copy is kept
+      lane.lodUp = true;
+      lane.lodId = `${state.method}/${lane.key}`;
+      if (!lod.uploadPcm(lane.lodId, lane.buffer.getChannelData(0))) {
+        lane.pcmMono = new Float32Array(lane.buffer.getChannelData(0));
+      }
+    }
+    lane.lodPending = key;
+    lod
+      .compute(lane.lodId, lane.pcmMono, lane.buffer.sampleRate, w, aSec, bSec)
+      .then((res) => {
+        lane.lodPending = null;
+        if (!res) return;
+        if (lane.lodCache.size >= LOD_CACHE_MAX) {
+          lane.lodCache.delete(lane.lodCache.keys().next().value);
+        }
+        lane.lodCache.set(key, res);
+        scheduleDraw(); // repaint pixel-sharp
+      });
+    return null;
+  }
+
   function drawWave(lane) {
     const cv = lane.waveCv;
     if (!cv || !cv.clientWidth) return;
@@ -307,11 +370,8 @@ export function initLanes({ gd, data, player, apiBase }) {
       g.fillText(t('laneDecodeFailed'), w / 2, mid);
       return;
     }
-    if (!lane.peaks) return;
     const [aSec, bSec] = viewSec();
     const span = Math.max(bSec - aSec, 1e-6);
-    const p = lane.peaks;
-    const nB = p.max.length;
     // auto-scale (I2 visuals): normalize to THIS lane's own peak so
     // quiet stems render visible waveforms instead of flat lines
     const k = lane.peak > 1e-6 ? 1 / lane.peak : 0;
@@ -322,26 +382,42 @@ export function initLanes({ gd, data, player, apiBase }) {
       lane.color,
       mixer.stripAudible(lane) ? 1 : 0.35
     );
-    for (let px = 0; px < w; px++) {
-      const ta = aSec + (px / w) * span;
-      const tb = aSec + ((px + 1) / w) * span;
-      // bucketSec lives on the envelope (lane.peaks), not the lane —
-      // reading lane.bucketSec yielded undefined -> NaN indexes -> the
-      // loop skipped every column and lanes rendered black (3.8 D1)
-      let i0 = Math.floor(ta / p.bucketSec);
-      let i1 = Math.max(i0 + 1, Math.ceil(tb / p.bucketSec));
-      i0 = Math.max(0, Math.min(nB, i0));
-      i1 = Math.max(0, Math.min(nB, i1));
-      let lo = 0;
-      let hi = 0;
-      for (let i = i0; i < i1; i++) {
-        if (p.min[i] < lo) lo = p.min[i];
-        if (p.max[i] > hi) hi = p.max[i];
+    const lodHit = laneLod(lane, w); // may kick off an async compute
+    if (lodHit) {
+      // pixel-sharp path: one min/max pair per canvas column, straight
+      // from the worker's answer
+      for (let px = 0; px < w; px++) {
+        const hi = clamp(lodHit.max[px]);
+        const lo = clamp(lodHit.min[px]);
+        if (hi <= 0 && lo >= 0) continue;
+        const y0 = mid - hi * (mid * 0.92);
+        const y1 = mid - lo * (mid * 0.92);
+        g.fillRect(px, y0, 1, Math.max(1, y1 - y0));
       }
-      if (hi <= 0 && lo >= 0) continue;
-      const y0 = mid - clamp(hi) * (mid * 0.92);
-      const y1 = mid - clamp(lo) * (mid * 0.92);
-      g.fillRect(px, y0, 1, Math.max(1, y1 - y0));
+    } else if (lane.peaks) {
+      const p = lane.peaks;
+      const nB = p.max.length;
+      for (let px = 0; px < w; px++) {
+        const ta = aSec + (px / w) * span;
+        const tb = aSec + ((px + 1) / w) * span;
+        // bucketSec lives on the envelope (lane.peaks), not the lane —
+        // reading lane.bucketSec yielded undefined -> NaN indexes -> the
+        // loop skipped every column and lanes rendered black (3.8 D1)
+        let i0 = Math.floor(ta / p.bucketSec);
+        let i1 = Math.max(i0 + 1, Math.ceil(tb / p.bucketSec));
+        i0 = Math.max(0, Math.min(nB, i0));
+        i1 = Math.max(0, Math.min(nB, i1));
+        let lo = 0;
+        let hi = 0;
+        for (let i = i0; i < i1; i++) {
+          if (p.min[i] < lo) lo = p.min[i];
+          if (p.max[i] > hi) hi = p.max[i];
+        }
+        if (hi <= 0 && lo >= 0) continue;
+        const y0 = mid - clamp(hi) * (mid * 0.92);
+        const y1 = mid - clamp(lo) * (mid * 0.92);
+        g.fillRect(px, y0, 1, Math.max(1, y1 - y0));
+      }
     }
     if (lane.peak > 1e-6) {
       // tiny peak-dB label: what the auto-scale factor is compensating
@@ -732,6 +808,7 @@ export function initLanes({ gd, data, player, apiBase }) {
 
   function teardownLanes() {
     stopAll();
+    lod.forgetAll(); // drop the worker-side PCM copies of the old lanes
     mixer.unroute();
     state.lanes = [];
   }
@@ -781,6 +858,11 @@ export function initLanes({ gd, data, player, apiBase }) {
           noteCv: null,
           notesBtn: null,
           phEl: null,
+          lodCache: null, // [view window|columns] -> per-column min/max
+          lodPending: null,
+          lodUp: false,
+          lodId: null,
+          pcmMono: null, // sync-fallback copy (only when Workers are gone)
           decodeFailed: false,
         });
         lanes.push(lane);
